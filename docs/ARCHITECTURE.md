@@ -30,7 +30,7 @@ Svelte owns:
 4. `start_analysis` streams each upload through `gpt-4o-transcribe-diarize` using `diarized_json`, Japanese guidance, and automatic server chunking.
 5. Finalized local timestamps receive the chunk's global offset. Boundary duplicates prefer the more complete text; distinct overlaps remain available for two-line stacking.
 6. A clean 2–10 second first-chunk segment per speaker becomes an internal WAV data-URL reference, up to four speakers. UI names remain separate from internal IDs.
-7. Pending lines are translated in batches of at most six. GPT‑5.6 receives speaker IDs and at most 80 preceding lines, uses low reasoning, `store:false`, and a strict JSON schema.
+7. Pending lines are translated in batches of at most six. `gpt-5.6-sol` receives speaker IDs and at most 80 preceding lines, uses low reasoning, `store:false`, and a strict JSON schema.
 8. The UI starts after 15 seconds of translated coverage. It pauses below 2 seconds of lead and resumes at 8 seconds.
 9. Tutor calls include the selected line, learner level, up to 80 preceding lines, available following context, and the local question thread. Plain-text deltas stream back to the dock.
 

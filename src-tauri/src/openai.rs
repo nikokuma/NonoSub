@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 pub const TRANSCRIPTION_MODEL: &str = "gpt-4o-transcribe-diarize";
-pub const LANGUAGE_MODEL: &str = "gpt-5.6";
+pub const LANGUAGE_MODEL: &str = "gpt-5.6-sol";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

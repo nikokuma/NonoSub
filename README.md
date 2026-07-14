@@ -106,7 +106,7 @@ Tests cover the TypeScript reducer, active/overlap selection, coverage hysteresi
 ## Model usage
 
 - `gpt-4o-transcribe-diarize`: streamed finalized Japanese segments with timestamps and speaker labels.
-- `gpt-5.6`: batched context-aware English subtitles through Structured Outputs, plus streamed grammar/tone/culture tutoring.
+- `gpt-5.6-sol`: the flagship GPT‑5.6 model, used for batched context-aware English subtitles through Structured Outputs and streamed grammar/tone/culture tutoring.
 - Responses requests use `store:false`; requested batches contain up to six target lines and at most 80 preceding lines.
 
 References: [speech to text](https://developers.openai.com/api/docs/guides/speech-to-text), [GPT‑5.6 guidance](https://developers.openai.com/api/docs/guides/latest-model), and [Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs).
