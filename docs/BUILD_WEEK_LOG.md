@@ -30,3 +30,6 @@
 - Confirmed a `store:false` Responses call through `gpt-5.6-sol` returned the exact requested probe text.
 - Confirmed `gpt-4o-transcribe-diarize` transcribed a locally generated Japanese AAC/WAV probe into two diarized segments.
 - Corrected the implementation from the unavailable lookup slug `gpt-5.6` to the concrete flagship model ID `gpt-5.6-sol`.
+- Nico confirmed the core tutor controls, speaker customization, and overlay movement work in the native app. Broader display-mode/style polish is intentionally parked.
+- Fixed the tutor dock to retain the full conversation, scroll independently, and follow streamed answers. Rebalanced the rail to provide a useful reading viewport at 1280×720.
+- Built an original 33-second technical fixture from Nico's two synthetic-voice recordings. A live diarization probe returned six clean turns with stable `A/B/A/B/A/B` labels.

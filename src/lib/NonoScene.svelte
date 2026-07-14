@@ -78,7 +78,7 @@
 </div>
 
 <style>
-  .scene { position: relative; width: 100%; height: 205px; overflow: hidden; background: radial-gradient(circle at 50% 76%, rgba(255,114,182,.18), transparent 58%); }
+  .scene { position: relative; width: 100%; height: 120px; flex: 0 0 120px; overflow: hidden; background: radial-gradient(circle at 50% 76%, rgba(255,114,182,.18), transparent 58%); }
   .scene :global(canvas) { display: block; width: 100%; height: 100%; }
   .fallback { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; gap: 8px; color: var(--muted); }
   .fallback span { width: 70px; height: 70px; display: grid; place-items: center; margin: auto; border-radius: 50%; background: linear-gradient(135deg, var(--pink), var(--violet)); color: white; font-size: 32px; }

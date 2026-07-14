@@ -21,7 +21,7 @@ The repository currently contains:
 - streamed diarized transcription parsing, contextual Structured Output translation, coverage events, cancellation, retry-once behavior, and streamed GPT‑5.6 tutoring;
 - fixture/unit tests that make no paid API calls.
 
-Still awaiting live acceptance proof: Nico's model-access probe, the original synthetic demo video, one-minute transcript review, ten-minute speaker-continuity review, signed-off translation quality, and release packaging. See [Build Week log](docs/BUILD_WEEK_LOG.md).
+Still awaiting live acceptance proof: the final indirect-refusal demo video, one-minute transcript review, ten-minute speaker-continuity review, signed-off translation quality, and release packaging. Model access and the first live tutoring review have passed. See [Build Week log](docs/BUILD_WEEK_LOG.md).
 
 ## Supported media
 
@@ -31,6 +31,8 @@ Build Week scope is deliberately narrow:
 - AAC audio;
 - Japanese speech translated to English;
 - Apple Silicon macOS is the only verified release target.
+
+The repository includes [`demo/NonoSubTwoSpeakerFixture.mp4`](demo/NonoSubTwoSpeakerFixture.mp4), an original roughly 34-second, two-voice Japanese test clip. See [`demo/README.md`](demo/README.md) for its provenance, purpose, and reproducible FFmpeg build command.
 
 Livestreams, browser/system audio, YouTube/Twitch URLs, accounts, saved transcripts, vocabulary decks, cloud sync, mobile, and overlapping-speech separation research are post-hackathon work.
 
