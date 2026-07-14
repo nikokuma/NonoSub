@@ -40,14 +40,6 @@ struct SubtitleSegment {
     translation_status: SegmentStatus,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-struct SpeakerProfile {
-    id: String,
-    display_name: String,
-    color: String,
-}
-
 #[derive(Debug, Default)]
 struct AppState {
     selected_media: Mutex<Option<PathBuf>>,
