@@ -7,9 +7,9 @@ mod openai;
 mod pipeline;
 
 use contracts::{
-    LanguageSettings, LearnerLevel, LessonCard, PreparedMediaInfo, RecoverableError,
-    SequencedSessionEvent, SessionEvent, SessionMode, SessionSnapshot, SpeakerProfile,
-    SubtitleSegment, TutorMessage,
+    LanguageSettings, LearnerLevel, LessonCard, LiveSyncMode, LiveSyncState, PreparedMediaInfo,
+    RecoverableError, SequencedSessionEvent, SessionEvent, SessionMode, SessionSnapshot,
+    SpeakerProfile, SubtitleSegment, TutorMessage,
 };
 use serde::Serialize;
 use std::{
@@ -659,10 +659,11 @@ async fn start_live_capture(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     languages: LanguageSettings,
+    sync_mode: LiveSyncMode,
 ) -> Result<(), openai::ApiError> {
     begin_session(&app, SessionMode::Live, languages.clone())?;
     let key = api_key()?;
-    match live::start(app.clone(), &state.live, key, languages).await {
+    match live::start(app.clone(), &state.live, key, languages, sync_mode).await {
         Ok(()) => Ok(()),
         Err(error) => {
             let _ = record_event(
@@ -686,7 +687,10 @@ async fn start_live_capture(
 
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-async fn start_live_capture(_languages: LanguageSettings) -> Result<(), openai::ApiError> {
+async fn start_live_capture(
+    _languages: LanguageSettings,
+    _sync_mode: LiveSyncMode,
+) -> Result<(), openai::ApiError> {
     Err(service_error(
         "Live system-audio captions are available on macOS 14 or later.",
     ))
@@ -767,6 +771,7 @@ fn apply_event(snapshot: &mut SessionSnapshot, event: &SessionEvent) {
             snapshot.mode = Some(mode.clone());
             snapshot.languages = languages.clone();
             snapshot.phase = "preparing".into();
+            snapshot.live_sync = (mode == &SessionMode::Live).then(LiveSyncState::default);
         }
         SessionEvent::PhaseChanged { phase } => snapshot.phase = phase.clone(),
         SessionEvent::CaptionUpserted { segment }
@@ -800,6 +805,7 @@ fn apply_event(snapshot: &mut SessionSnapshot, event: &SessionEvent) {
         SessionEvent::CoverageChanged {
             translated_through_ms,
         } => snapshot.translated_through_ms = *translated_through_ms,
+        SessionEvent::LiveSyncChanged { sync } => snapshot.live_sync = Some(sync.clone()),
         SessionEvent::LessonSelected { segment_id } => {
             snapshot.selected_segment_id = segment_id.clone()
         }
@@ -894,6 +900,11 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         .text("preset_manga", "Manga")
         .text("preset_retro", "Retro Pixel")
         .build()?;
+    let timing = SubmenuBuilder::new(app, "Subtitle timing")
+        .text("subtitle_earlier", "100 ms Earlier")
+        .text("subtitle_later", "100 ms Later")
+        .text("subtitle_reset", "Reset")
+        .build()?;
     let menu = MenuBuilder::new(app)
         .text("open_video", "Open Video…")
         .text("start_live", "Start Live Captions…")
@@ -902,6 +913,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         .text("toggle_subtitles", "Show / Hide Subtitles")
         .text("arrange_overlay", "Arrange Subtitle Overlay")
         .text("play_pause", "Play / Pause")
+        .item(&timing)
         .item(&presets)
         .item(&levels)
         .text("languages", "Languages…")
@@ -935,7 +947,8 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
                 live::stop(&state.live);
                 let _ = record_event(app, SessionEvent::Complete);
             }
-            "toggle_subtitles" | "arrange_overlay" | "play_pause" | "languages" => {
+            "toggle_subtitles" | "arrange_overlay" | "play_pause" | "subtitle_earlier"
+            | "subtitle_later" | "subtitle_reset" | "languages" => {
                 let _ = app.emit("tray-action", id);
                 if id == "languages" {
                     let _ = show_surface(app, "workbench");

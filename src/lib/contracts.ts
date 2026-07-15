@@ -2,6 +2,8 @@ export type LearnerLevel = "beginner" | "intermediate" | "advanced";
 export type SubtitleDisplayMode = "source" | "translation" | "both";
 export type SegmentStatus = "pending" | "complete" | "failed";
 export type SessionMode = "file" | "live";
+export type LiveSyncMode = "coordinated" | "fast_source";
+export type LiveSyncStatus = "steady" | "catching_up" | "degraded";
 export type SessionPhase =
   | "idle"
   | "preparing"
@@ -20,6 +22,17 @@ export interface LanguageSettings {
   source: "auto" | string;
   target: string;
   explanation: string;
+}
+
+export interface SyncSettings {
+  liveMode: LiveSyncMode;
+}
+
+export interface LiveSyncState {
+  targetDelayMs: number;
+  observedLagMs: number;
+  status: LiveSyncStatus;
+  visibleSegmentId?: string;
 }
 
 export interface SubtitleSegment {
@@ -91,6 +104,7 @@ export type SessionEvent =
   | { type: "translation_finalized"; segmentId: string; translationText: string; ambiguityNote?: string }
   | { type: "speaker_discovered"; speaker: SpeakerProfile }
   | { type: "coverage_changed"; translatedThroughMs: number }
+  | { type: "live_sync_changed"; sync: LiveSyncState }
   | { type: "lesson_selected"; segmentId?: string }
   | { type: "recoverable_error"; error: RecoverableError }
   | { type: "fatal_error"; message: string }
@@ -116,6 +130,7 @@ export interface SessionState {
   segments: SubtitleSegment[];
   speakers: Record<string, SpeakerProfile>;
   translatedThroughMs: number;
+  liveSync?: LiveSyncState;
   errors: RecoverableError[];
   fatalError?: string;
   selectedSegmentId?: string;
@@ -131,6 +146,16 @@ export const DEFAULT_LANGUAGES: LanguageSettings = {
   source: "auto",
   target: "en",
   explanation: "en",
+};
+
+export const DEFAULT_SYNC: SyncSettings = {
+  liveMode: "coordinated",
+};
+
+export const DEFAULT_LIVE_SYNC: LiveSyncState = {
+  targetDelayMs: 2_500,
+  observedLagMs: 0,
+  status: "steady",
 };
 
 export const DEFAULT_STYLE: StyleSettings = {

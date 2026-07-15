@@ -1,7 +1,7 @@
 use crate::{
     contracts::{
-        LanguageSettings, RecoverableError, SegmentStatus, SessionEvent, SessionMode,
-        SubtitleSegment,
+        LanguageSettings, LiveSyncMode, LiveSyncState, LiveSyncStatus, RecoverableError,
+        SegmentStatus, SessionEvent, SessionMode, SubtitleSegment,
     },
     openai::{ApiError, ApiErrorKind},
     record_event,
@@ -21,6 +21,7 @@ use screencapturekit::{
 };
 use serde_json::{json, Value};
 use std::{
+    collections::{HashSet, VecDeque},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -47,90 +48,418 @@ pub struct LiveState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct TimedText {
+    event_id: Option<String>,
+    text: String,
+    elapsed_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum RealtimeEvent {
-    SourceDelta(String),
-    TranslationDelta(String),
-    SourceDone(Option<String>),
-    TranslationDone(Option<String>),
+    SourceDelta(TimedText),
+    TranslationDelta(TimedText),
+    SourceDone(TimedText),
+    TranslationDone(TimedText),
     Closed,
     Error(String),
     Ignored,
 }
 
 #[derive(Debug)]
-struct CaptionAssembler {
-    session_started: Instant,
-    segment_started_ms: u64,
-    segment_index: u64,
+struct CaptionDraft {
+    id: String,
+    start_ms: u64,
+    end_ms: u64,
     source: String,
     translation: String,
-    last_delta: Instant,
+    last_source_at_ms: u64,
+    last_translation_at_ms: u64,
+    source_closed_at_ms: Option<u64>,
+    source_closed: bool,
+    translation_closed: bool,
 }
 
-impl CaptionAssembler {
-    fn new() -> Self {
-        let now = Instant::now();
+impl CaptionDraft {
+    fn new(id: String, aligned_ms: u64, capture_clock_ms: u64) -> Self {
         Self {
-            session_started: now,
-            segment_started_ms: 0,
-            segment_index: 1,
+            id,
+            start_ms: aligned_ms,
+            end_ms: aligned_ms.saturating_add(200),
             source: String::new(),
             translation: String::new(),
-            last_delta: now,
+            last_source_at_ms: capture_clock_ms,
+            last_translation_at_ms: capture_clock_ms,
+            source_closed_at_ms: None,
+            source_closed: false,
+            translation_closed: false,
         }
     }
 
-    fn has_text(&self) -> bool {
-        !self.source.trim().is_empty() || !self.translation.trim().is_empty()
-    }
-
-    fn elapsed_ms(&self) -> u64 {
-        self.session_started.elapsed().as_millis() as u64
-    }
-
-    fn id(&self) -> String {
-        format!("live-{}", self.segment_index)
-    }
-
-    fn provisional(&self) -> SubtitleSegment {
-        self.segment(true)
-    }
-
-    fn segment(&self, provisional: bool) -> SubtitleSegment {
+    fn segment(&self) -> SubtitleSegment {
         SubtitleSegment {
-            id: self.id(),
+            id: self.id.clone(),
             origin: SessionMode::Live,
-            start_ms: self.segment_started_ms,
-            end_ms: self.elapsed_ms().max(self.segment_started_ms + 250),
+            start_ms: self.start_ms,
+            end_ms: self.end_ms.max(self.start_ms.saturating_add(250)),
             source_text: self.source.trim().to_owned(),
             translation_text: (!self.translation.trim().is_empty())
                 .then(|| self.translation.trim().to_owned()),
             ambiguity_note: None,
             speaker_id: Some("live-audio".into()),
-            is_provisional: provisional,
-            transcription_status: if provisional {
-                SegmentStatus::Pending
-            } else {
+            is_provisional: !self.source_closed,
+            transcription_status: if self.source_closed {
                 SegmentStatus::Complete
+            } else {
+                SegmentStatus::Pending
             },
-            translation_status: if provisional || self.translation.trim().is_empty() {
-                SegmentStatus::Pending
-            } else {
+            translation_status: if self.translation_closed && !self.translation.trim().is_empty() {
                 SegmentStatus::Complete
+            } else {
+                SegmentStatus::Pending
             },
         }
     }
+}
 
-    fn finish(&mut self) -> Option<SubtitleSegment> {
-        if !self.has_text() {
-            return None;
+#[derive(Debug)]
+struct LagEstimator {
+    samples: VecDeque<(u64, u64)>,
+    target_delay_ms: u64,
+    observed_lag_ms: u64,
+    last_decrease_at_ms: u64,
+    status: LiveSyncStatus,
+}
+
+impl Default for LagEstimator {
+    fn default() -> Self {
+        Self {
+            samples: VecDeque::new(),
+            target_delay_ms: 2_500,
+            observed_lag_ms: 0,
+            last_decrease_at_ms: 0,
+            status: LiveSyncStatus::Steady,
         }
-        let segment = self.segment(false);
+    }
+}
+
+impl LagEstimator {
+    fn observe(&mut self, capture_clock_ms: u64, aligned_ms: u64) {
+        let lag = capture_clock_ms.saturating_sub(aligned_ms);
+        self.samples.push_back((capture_clock_ms, lag));
+        while self
+            .samples
+            .front()
+            .is_some_and(|(at, _)| capture_clock_ms.saturating_sub(*at) > 30_000)
+        {
+            self.samples.pop_front();
+        }
+        let mut values: Vec<u64> = self.samples.iter().map(|(_, value)| *value).collect();
+        values.sort_unstable();
+        let index = (values.len() * 90).div_ceil(100).saturating_sub(1);
+        self.observed_lag_ms = values.get(index).copied().unwrap_or_default();
+        let desired_unclamped = self.observed_lag_ms.saturating_add(600);
+        let desired = desired_unclamped.clamp(1_500, 6_000);
+        if desired > self.target_delay_ms {
+            self.target_delay_ms = desired;
+            self.last_decrease_at_ms = capture_clock_ms;
+        } else if self.target_delay_ms > desired
+            && capture_clock_ms.saturating_sub(self.last_decrease_at_ms) >= 10_000
+        {
+            self.target_delay_ms = self.target_delay_ms.saturating_sub(200).max(desired);
+            self.last_decrease_at_ms = capture_clock_ms;
+        }
+        self.status = if desired_unclamped > 6_000 {
+            LiveSyncStatus::Degraded
+        } else if lag.saturating_add(300) >= self.target_delay_ms {
+            LiveSyncStatus::CatchingUp
+        } else {
+            LiveSyncStatus::Steady
+        };
+    }
+}
+
+#[derive(Debug)]
+struct CaptionCoordinator {
+    mode: LiveSyncMode,
+    epoch_offset_ms: u64,
+    segment_index: u64,
+    drafts: VecDeque<CaptionDraft>,
+    seen_event_ids: HashSet<String>,
+    lag: LagEstimator,
+    display_cursor_ms: u64,
+    visible_segment_id: Option<String>,
+    last_emitted_sync: Option<LiveSyncState>,
+}
+
+impl CaptionCoordinator {
+    fn new(mode: LiveSyncMode) -> Self {
+        Self {
+            mode,
+            epoch_offset_ms: 0,
+            segment_index: 1,
+            drafts: VecDeque::new(),
+            seen_event_ids: HashSet::new(),
+            lag: LagEstimator::default(),
+            display_cursor_ms: 0,
+            visible_segment_id: None,
+            last_emitted_sync: None,
+        }
+    }
+
+    fn next_draft(&mut self, aligned_ms: u64, capture_clock_ms: u64) -> usize {
+        let id = format!("live-{}", self.segment_index);
         self.segment_index += 1;
-        self.segment_started_ms = segment.end_ms;
-        self.source.clear();
-        self.translation.clear();
-        Some(segment)
+        self.drafts
+            .push_back(CaptionDraft::new(id, aligned_ms, capture_clock_ms));
+        self.drafts.len() - 1
+    }
+
+    fn accept(&mut self, event_id: &Option<String>) -> bool {
+        match event_id {
+            Some(id) if !id.is_empty() => self.seen_event_ids.insert(id.clone()),
+            _ => true,
+        }
+    }
+
+    fn aligned_ms(&self, elapsed_ms: Option<u64>, capture_clock_ms: u64) -> u64 {
+        elapsed_ms.map_or(capture_clock_ms, |elapsed| {
+            self.epoch_offset_ms.saturating_add(elapsed)
+        })
+    }
+
+    fn on_source(&mut self, delta: TimedText, capture_clock_ms: u64) -> Vec<SessionEvent> {
+        if !self.accept(&delta.event_id) || delta.text.is_empty() {
+            return Vec::new();
+        }
+        let aligned_ms = self.aligned_ms(delta.elapsed_ms, capture_clock_ms);
+        let index = self
+            .drafts
+            .iter()
+            .rposition(|draft| !draft.source_closed)
+            .unwrap_or_else(|| self.next_draft(aligned_ms, capture_clock_ms));
+        let draft = &mut self.drafts[index];
+        draft.start_ms = draft.start_ms.min(aligned_ms);
+        draft.end_ms = draft.end_ms.max(aligned_ms.saturating_add(200));
+        draft.source.push_str(&delta.text);
+        draft.last_source_at_ms = capture_clock_ms;
+        let mut events = vec![SessionEvent::CaptionUpserted {
+            segment: draft.segment(),
+        }];
+        events.extend(self.advance(capture_clock_ms));
+        events
+    }
+
+    fn target_index(&mut self, aligned_ms: u64, capture_clock_ms: u64) -> usize {
+        if self.drafts.is_empty() {
+            return self.next_draft(aligned_ms, capture_clock_ms);
+        }
+        self.drafts
+            .iter()
+            .enumerate()
+            .filter(|(_, draft)| !draft.source.trim().is_empty())
+            .min_by_key(|(_, draft)| {
+                if aligned_ms < draft.start_ms {
+                    draft.start_ms - aligned_ms
+                } else {
+                    aligned_ms.saturating_sub(draft.end_ms)
+                }
+            })
+            .map(|(index, _)| index)
+            .unwrap_or_else(|| self.drafts.len() - 1)
+    }
+
+    fn on_translation(&mut self, delta: TimedText, capture_clock_ms: u64) -> Vec<SessionEvent> {
+        if !self.accept(&delta.event_id) || delta.text.is_empty() {
+            return Vec::new();
+        }
+        let aligned_ms = self.aligned_ms(delta.elapsed_ms, capture_clock_ms);
+        if delta.elapsed_ms.is_some() {
+            self.lag.observe(capture_clock_ms, aligned_ms);
+        }
+        let index = self.target_index(aligned_ms, capture_clock_ms);
+        let draft = &mut self.drafts[index];
+        draft.start_ms = draft.start_ms.min(aligned_ms);
+        draft.end_ms = draft.end_ms.max(aligned_ms.saturating_add(200));
+        draft.translation.push_str(&delta.text);
+        draft.translation_closed = false;
+        draft.last_translation_at_ms = capture_clock_ms;
+        let mut events = vec![SessionEvent::CaptionUpserted {
+            segment: draft.segment(),
+        }];
+        events.extend(self.advance(capture_clock_ms));
+        events
+    }
+
+    fn on_done(
+        &mut self,
+        source: bool,
+        done: TimedText,
+        capture_clock_ms: u64,
+    ) -> Vec<SessionEvent> {
+        if !self.accept(&done.event_id) {
+            return Vec::new();
+        }
+        let aligned_ms = self.aligned_ms(done.elapsed_ms, capture_clock_ms);
+        let index = if source {
+            self.drafts
+                .iter()
+                .rposition(|draft| !draft.source_closed)
+                .unwrap_or_else(|| self.next_draft(aligned_ms, capture_clock_ms))
+        } else {
+            self.target_index(aligned_ms, capture_clock_ms)
+        };
+        let draft = &mut self.drafts[index];
+        if !done.text.trim().is_empty() {
+            if source {
+                draft.source = done.text;
+            } else {
+                draft.translation = done.text;
+            }
+        }
+        draft.end_ms = draft.end_ms.max(aligned_ms.saturating_add(200));
+        if source {
+            draft.source_closed = true;
+            draft.source_closed_at_ms = Some(capture_clock_ms);
+        } else {
+            draft.translation_closed = true;
+        }
+        let mut events = vec![if source {
+            SessionEvent::TranscriptFinalized {
+                segment: draft.segment(),
+            }
+        } else {
+            SessionEvent::CaptionUpserted {
+                segment: draft.segment(),
+            }
+        }];
+        events.extend(self.advance(capture_clock_ms));
+        events
+    }
+
+    fn tick(&mut self, capture_clock_ms: u64) -> Vec<SessionEvent> {
+        let mut events = Vec::new();
+        for draft in &mut self.drafts {
+            let span = draft.end_ms.saturating_sub(draft.start_ms);
+            let source_quiet = capture_clock_ms.saturating_sub(draft.last_source_at_ms);
+            if !draft.source_closed
+                && !draft.source.trim().is_empty()
+                && (span >= 8_000
+                    || source_quiet >= 1_200
+                    || (terminal(&draft.source) && source_quiet >= 350))
+            {
+                draft.source_closed = true;
+                draft.source_closed_at_ms = Some(capture_clock_ms);
+                events.push(SessionEvent::TranscriptFinalized {
+                    segment: draft.segment(),
+                });
+            }
+            let translation_quiet = capture_clock_ms.saturating_sub(draft.last_translation_at_ms);
+            if !draft.translation_closed
+                && !draft.translation.trim().is_empty()
+                && (span >= 8_000
+                    || translation_quiet >= 1_200
+                    || (terminal(&draft.translation) && translation_quiet >= 350))
+            {
+                draft.translation_closed = true;
+                events.push(SessionEvent::CaptionUpserted {
+                    segment: draft.segment(),
+                });
+            }
+        }
+        events.extend(self.advance(capture_clock_ms));
+        events
+    }
+
+    fn advance(&mut self, capture_clock_ms: u64) -> Vec<SessionEvent> {
+        self.display_cursor_ms = self
+            .display_cursor_ms
+            .max(capture_clock_ms.saturating_sub(self.lag.target_delay_ms));
+        let next_visible = match self.mode {
+            LiveSyncMode::FastSource => self
+                .drafts
+                .iter()
+                .rev()
+                .find(|draft| !draft.source.trim().is_empty())
+                .map(|draft| draft.id.clone()),
+            LiveSyncMode::Coordinated => self
+                .drafts
+                .iter()
+                .rev()
+                .find(|draft| {
+                    let fallback = draft
+                        .source_closed_at_ms
+                        .is_some_and(|closed| capture_clock_ms.saturating_sub(closed) >= 6_000);
+                    draft.source_closed
+                        && draft.start_ms <= self.display_cursor_ms
+                        && ((!draft.translation.trim().is_empty() && draft.translation_closed)
+                            || fallback)
+                })
+                .map(|draft| draft.id.clone()),
+        };
+        if next_visible.is_some() {
+            self.visible_segment_id = next_visible;
+        }
+        let fallback_visible = self
+            .visible_segment_id
+            .as_ref()
+            .and_then(|id| self.drafts.iter().find(|draft| &draft.id == id))
+            .is_some_and(|draft| draft.translation.trim().is_empty());
+        let sync = LiveSyncState {
+            target_delay_ms: self.lag.target_delay_ms,
+            observed_lag_ms: self.lag.observed_lag_ms,
+            status: if fallback_visible {
+                LiveSyncStatus::Degraded
+            } else {
+                self.lag.status.clone()
+            },
+            visible_segment_id: self.visible_segment_id.clone(),
+        };
+        if self.last_emitted_sync.as_ref() == Some(&sync) {
+            Vec::new()
+        } else {
+            self.last_emitted_sync = Some(sync.clone());
+            vec![SessionEvent::LiveSyncChanged { sync }]
+        }
+    }
+
+    fn begin_epoch(&mut self, capture_clock_ms: u64) -> Vec<SessionEvent> {
+        let mut events = Vec::new();
+        for draft in &mut self.drafts {
+            if !draft.source.trim().is_empty() && !draft.source_closed {
+                draft.source_closed = true;
+                draft.source_closed_at_ms = Some(capture_clock_ms);
+                events.push(SessionEvent::TranscriptFinalized {
+                    segment: draft.segment(),
+                });
+            }
+            if !draft.translation.trim().is_empty() && !draft.translation_closed {
+                draft.translation_closed = true;
+                events.push(SessionEvent::CaptionUpserted {
+                    segment: draft.segment(),
+                });
+            }
+        }
+        self.epoch_offset_ms = capture_clock_ms;
+        self.seen_event_ids.clear();
+        events.extend(self.advance(capture_clock_ms));
+        events
+    }
+
+    fn finish(&mut self, capture_clock_ms: u64) -> Vec<SessionEvent> {
+        self.begin_epoch(capture_clock_ms)
+    }
+}
+
+fn terminal(text: &str) -> bool {
+    text.trim_end()
+        .chars()
+        .last()
+        .is_some_and(|character| matches!(character, '.' | '?' | '!' | '。' | '？' | '！' | '…'))
+}
+
+fn emit_events(app: &tauri::AppHandle, events: Vec<SessionEvent>) {
+    for event in events {
+        let _ = record_event(app, event);
     }
 }
 
@@ -139,6 +468,7 @@ pub async fn start(
     state: &LiveState,
     api_key: String,
     languages: LanguageSettings,
+    sync_mode: LiveSyncMode,
 ) -> Result<(), ApiError> {
     abort_previous(state);
     state.cancelled.store(false, Ordering::Relaxed);
@@ -189,7 +519,8 @@ pub async fn start(
     let cancelled = state.cancelled.clone();
     let task = tauri::async_runtime::spawn(async move {
         let mut pcm = Vec::<i16>::with_capacity(SEND_SAMPLES * 2);
-        let mut assembler = CaptionAssembler::new();
+        let mut coordinator = CaptionCoordinator::new(sync_mode);
+        let mut sent_samples = 0_u64;
         let mut ready = false;
         let mut tick = tokio::time::interval(Duration::from_millis(100));
         let mut closing = false;
@@ -237,6 +568,7 @@ pub async fn start(
                                             if let Ok((next_writer, next_reader)) = connect_translation(&api_key, &languages.target).await {
                                                 writer = next_writer;
                                                 reader = next_reader;
+                                                emit_events(&app, coordinator.begin_epoch(capture_clock_ms(sent_samples)));
                                                 let _ = record_event(&app, SessionEvent::PhaseChanged { phase: "ready".into() });
                                                 continue 'capture;
                                             }
@@ -245,6 +577,7 @@ pub async fn start(
                                         closing = true;
                                         break;
                                     }
+                                    sent_samples = sent_samples.saturating_add(SEND_SAMPLES as u64);
                                 }
                             }
                         }
@@ -259,6 +592,7 @@ pub async fn start(
                             if let Ok((next_writer, next_reader)) = connect_translation(&api_key, &languages.target).await {
                                 writer = next_writer;
                                 reader = next_reader;
+                                emit_events(&app, coordinator.begin_epoch(capture_clock_ms(sent_samples)));
                                 let _ = record_event(&app, SessionEvent::PhaseChanged { phase: "ready".into() });
                                 continue 'capture;
                             }
@@ -269,32 +603,24 @@ pub async fn start(
                     match message {
                         Ok(Message::Text(text)) => match parse_realtime_event(&text) {
                             RealtimeEvent::SourceDelta(delta) => {
-                                assembler.source.push_str(&delta);
-                                assembler.last_delta = Instant::now();
                                 if !ready {
                                     ready = true;
                                     let _ = record_event(&app, SessionEvent::PhaseChanged { phase: "ready".into() });
                                 }
-                                let _ = record_event(&app, SessionEvent::CaptionUpserted { segment: assembler.provisional() });
+                                emit_events(&app, coordinator.on_source(delta, capture_clock_ms(sent_samples)));
                             }
                             RealtimeEvent::TranslationDelta(delta) => {
-                                assembler.translation.push_str(&delta);
-                                assembler.last_delta = Instant::now();
                                 if !ready {
                                     ready = true;
                                     let _ = record_event(&app, SessionEvent::PhaseChanged { phase: "ready".into() });
                                 }
-                                let _ = record_event(&app, SessionEvent::CaptionUpserted { segment: assembler.provisional() });
+                                emit_events(&app, coordinator.on_translation(delta, capture_clock_ms(sent_samples)));
                             }
-                            RealtimeEvent::SourceDone(text) => {
-                                if let Some(text) = text { assembler.source = text; }
-                                assembler.last_delta = Instant::now();
+                            RealtimeEvent::SourceDone(done) => {
+                                emit_events(&app, coordinator.on_done(true, done, capture_clock_ms(sent_samples)));
                             }
-                            RealtimeEvent::TranslationDone(text) => {
-                                if let Some(text) = text { assembler.translation = text; }
-                                if let Some(segment) = assembler.finish() {
-                                    let _ = record_event(&app, SessionEvent::TranscriptFinalized { segment });
-                                }
+                            RealtimeEvent::TranslationDone(done) => {
+                                emit_events(&app, coordinator.on_done(false, done, capture_clock_ms(sent_samples)));
                             }
                             RealtimeEvent::Closed => closed = true,
                             RealtimeEvent::Error(message) => emit_recoverable(&app, "realtime_error", &message),
@@ -309,6 +635,7 @@ pub async fn start(
                                 if let Ok((next_writer, next_reader)) = connect_translation(&api_key, &languages.target).await {
                                     writer = next_writer;
                                     reader = next_reader;
+                                    emit_events(&app, coordinator.begin_epoch(capture_clock_ms(sent_samples)));
                                     let _ = record_event(&app, SessionEvent::PhaseChanged { phase: "ready".into() });
                                     continue 'capture;
                                 }
@@ -319,21 +646,12 @@ pub async fn start(
                     }
                 }
                 _ = tick.tick() => {
-                    if assembler.has_text()
-                        && !assembler.translation.trim().is_empty()
-                        && assembler.last_delta.elapsed() > Duration::from_millis(1_200)
-                    {
-                        if let Some(segment) = assembler.finish() {
-                            let _ = record_event(&app, SessionEvent::TranscriptFinalized { segment });
-                        }
-                    }
+                    emit_events(&app, coordinator.tick(capture_clock_ms(sent_samples)));
                 }
             }
         }
 
-        if let Some(segment) = assembler.finish() {
-            let _ = record_event(&app, SessionEvent::TranscriptFinalized { segment });
-        }
+        emit_events(&app, coordinator.finish(capture_clock_ms(sent_samples)));
         let _ = stream.stop_capture().await;
         let _ = record_event(&app, SessionEvent::Complete);
     });
@@ -342,6 +660,10 @@ pub async fn start(
         .lock()
         .map_err(|_| capture_error("Live task state is unavailable."))? = Some(task);
     Ok(())
+}
+
+fn capture_clock_ms(sent_samples: u64) -> u64 {
+    sent_samples.saturating_mul(1_000) / 24_000
 }
 
 pub fn stop(state: &LiveState) {
@@ -420,28 +742,32 @@ fn parse_realtime_event(text: &str) -> RealtimeEvent {
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let delta = || {
-        value
-            .get("delta")
+    let timed_text = |field: &str| TimedText {
+        event_id: value
+            .get("event_id")
             .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned()
-    };
-    let transcript = || {
-        value
-            .get("transcript")
+            .map(str::to_owned),
+        text: value
+            .get(field)
+            .or_else(|| {
+                (field != "transcript")
+                    .then(|| value.get("transcript"))
+                    .flatten()
+            })
             .or_else(|| value.get("text"))
             .and_then(Value::as_str)
-            .map(str::to_owned)
+            .unwrap_or_default()
+            .to_owned(),
+        elapsed_ms: value.get("elapsed_ms").and_then(Value::as_u64),
     };
     match event_type {
-        "session.input_transcript.delta" => RealtimeEvent::SourceDelta(delta()),
-        "session.output_transcript.delta" => RealtimeEvent::TranslationDelta(delta()),
+        "session.input_transcript.delta" => RealtimeEvent::SourceDelta(timed_text("delta")),
+        "session.output_transcript.delta" => RealtimeEvent::TranslationDelta(timed_text("delta")),
         "session.input_transcript.done" | "session.input_transcript.completed" => {
-            RealtimeEvent::SourceDone(transcript())
+            RealtimeEvent::SourceDone(timed_text("transcript"))
         }
         "session.output_transcript.done" | "session.output_transcript.completed" => {
-            RealtimeEvent::TranslationDone(transcript())
+            RealtimeEvent::TranslationDone(timed_text("transcript"))
         }
         "session.closed" => RealtimeEvent::Closed,
         "error" => RealtimeEvent::Error(
@@ -504,17 +830,211 @@ mod tests {
     #[test]
     fn parses_realtime_translation_deltas_and_errors() {
         assert_eq!(
-            parse_realtime_event(r#"{"type":"session.input_transcript.delta","delta":"今日は"}"#),
-            RealtimeEvent::SourceDelta("今日は".into())
+            parse_realtime_event(
+                r#"{"event_id":"source-1","type":"session.input_transcript.delta","delta":"今日は","elapsed_ms":1200}"#
+            ),
+            RealtimeEvent::SourceDelta(TimedText {
+                event_id: Some("source-1".into()),
+                text: "今日は".into(),
+                elapsed_ms: Some(1_200)
+            })
         );
         assert_eq!(
-            parse_realtime_event(r#"{"type":"session.output_transcript.delta","delta":"Today"}"#),
-            RealtimeEvent::TranslationDelta("Today".into())
+            parse_realtime_event(
+                r#"{"event_id":"target-1","type":"session.output_transcript.delta","delta":"Today","elapsed_ms":1200}"#
+            ),
+            RealtimeEvent::TranslationDelta(TimedText {
+                event_id: Some("target-1".into()),
+                text: "Today".into(),
+                elapsed_ms: Some(1_200)
+            })
         );
         assert_eq!(
             parse_realtime_event(r#"{"type":"error","error":{"message":"bad audio"}}"#),
             RealtimeEvent::Error("bad audio".into())
         );
+    }
+
+    #[test]
+    fn keeps_append_only_deltas_with_shared_alignment_times() {
+        let mut coordinator = CaptionCoordinator::new(LiveSyncMode::Coordinated);
+        coordinator.on_source(
+            TimedText {
+                event_id: Some("s1".into()),
+                text: "何".into(),
+                elapsed_ms: Some(200),
+            },
+            1_000,
+        );
+        coordinator.on_source(
+            TimedText {
+                event_id: Some("s2".into()),
+                text: "ですか？".into(),
+                elapsed_ms: Some(200),
+            },
+            1_100,
+        );
+        coordinator.on_source(
+            TimedText {
+                event_id: Some("s2".into()),
+                text: "duplicate".into(),
+                elapsed_ms: Some(200),
+            },
+            1_100,
+        );
+        assert_eq!(coordinator.drafts[0].source, "何ですか？");
+    }
+
+    #[test]
+    fn grows_delay_immediately_and_reduces_it_slowly() {
+        let mut estimator = LagEstimator::default();
+        estimator.observe(5_000, 1_000);
+        assert_eq!(estimator.target_delay_ms, 4_600);
+        estimator.observe(40_000, 39_000);
+        assert_eq!(estimator.target_delay_ms, 4_400);
+    }
+
+    #[test]
+    fn delay_is_clamped_and_display_cursor_never_rewinds() {
+        let mut coordinator = CaptionCoordinator::new(LiveSyncMode::Coordinated);
+        coordinator.tick(17_500);
+        assert_eq!(coordinator.display_cursor_ms, 15_000);
+        coordinator.on_translation(
+            TimedText {
+                event_id: Some("slow".into()),
+                text: "Slow".into(),
+                elapsed_ms: Some(0),
+            },
+            20_000,
+        );
+        assert_eq!(coordinator.lag.target_delay_ms, 6_000);
+        coordinator.tick(6_000);
+        assert_eq!(coordinator.display_cursor_ms, 15_000);
+    }
+
+    #[test]
+    fn coordinated_mode_waits_for_translation_and_fast_source_does_not() {
+        let source = TimedText {
+            event_id: Some("s1".into()),
+            text: "今日はちょっと…。".into(),
+            elapsed_ms: Some(200),
+        };
+        let mut coordinated = CaptionCoordinator::new(LiveSyncMode::Coordinated);
+        coordinated.on_source(source.clone(), 1_000);
+        coordinated.tick(2_300);
+        assert_eq!(coordinated.visible_segment_id, None);
+        coordinated.on_translation(
+            TimedText {
+                event_id: Some("t1".into()),
+                text: "Today is difficult.".into(),
+                elapsed_ms: Some(200),
+            },
+            2_400,
+        );
+        coordinated.tick(3_700);
+        assert_eq!(coordinated.visible_segment_id.as_deref(), Some("live-1"));
+
+        let mut fast = CaptionCoordinator::new(LiveSyncMode::FastSource);
+        fast.on_source(source, 1_000);
+        assert_eq!(fast.visible_segment_id.as_deref(), Some("live-1"));
+    }
+
+    #[test]
+    fn coordinated_mode_falls_back_to_source_after_six_seconds() {
+        let mut coordinator = CaptionCoordinator::new(LiveSyncMode::Coordinated);
+        coordinator.on_source(
+            TimedText {
+                event_id: Some("s1".into()),
+                text: "長い話です。".into(),
+                elapsed_ms: Some(200),
+            },
+            1_000,
+        );
+        coordinator.tick(2_300);
+        coordinator.tick(8_300);
+        assert_eq!(coordinator.visible_segment_id.as_deref(), Some("live-1"));
+        assert_eq!(
+            coordinator
+                .last_emitted_sync
+                .as_ref()
+                .map(|sync| &sync.status),
+            Some(&LiveSyncStatus::Degraded)
+        );
+        coordinator.on_translation(
+            TimedText {
+                event_id: Some("t1".into()),
+                text: "This is a long story.".into(),
+                elapsed_ms: Some(200),
+            },
+            8_500,
+        );
+        coordinator.tick(9_800);
+        assert_eq!(coordinator.drafts.len(), 1);
+        assert_eq!(coordinator.drafts[0].id, "live-1");
+        assert_eq!(coordinator.drafts[0].translation, "This is a long story.");
+    }
+
+    #[test]
+    fn reconnect_starts_a_new_alignment_epoch() {
+        let mut coordinator = CaptionCoordinator::new(LiveSyncMode::Coordinated);
+        coordinator.begin_epoch(12_000);
+        coordinator.on_source(
+            TimedText {
+                event_id: Some("s1".into()),
+                text: "再接続".into(),
+                elapsed_ms: Some(400),
+            },
+            12_500,
+        );
+        assert_eq!(coordinator.drafts[0].start_ms, 12_400);
+    }
+
+    #[test]
+    fn missing_alignment_is_kept_out_of_lag_estimation() {
+        let mut coordinator = CaptionCoordinator::new(LiveSyncMode::Coordinated);
+        coordinator.on_translation(
+            TimedText {
+                event_id: Some("t1".into()),
+                text: "Untimed".into(),
+                elapsed_ms: None,
+            },
+            4_000,
+        );
+        assert_eq!(coordinator.lag.observed_lag_ms, 0);
+        assert_eq!(coordinator.drafts[0].translation, "Untimed");
+    }
+
+    #[test]
+    fn aligned_audio_span_forces_a_new_source_clause() {
+        let mut coordinator = CaptionCoordinator::new(LiveSyncMode::Coordinated);
+        coordinator.on_source(
+            TimedText {
+                event_id: Some("s1".into()),
+                text: "First clause".into(),
+                elapsed_ms: Some(0),
+            },
+            1_000,
+        );
+        coordinator.on_source(
+            TimedText {
+                event_id: Some("s2".into()),
+                text: " keeps going".into(),
+                elapsed_ms: Some(8_200),
+            },
+            9_200,
+        );
+        coordinator.tick(9_200);
+        coordinator.on_source(
+            TimedText {
+                event_id: Some("s3".into()),
+                text: "Second clause".into(),
+                elapsed_ms: Some(8_400),
+            },
+            9_400,
+        );
+        assert_eq!(coordinator.drafts.len(), 2);
+        assert!(coordinator.drafts[0].source_closed);
+        assert_eq!(coordinator.drafts[1].source, "Second clause");
     }
 
     #[test]

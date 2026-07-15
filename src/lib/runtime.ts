@@ -3,6 +3,7 @@ import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   DEFAULT_LANGUAGES,
   DEFAULT_STYLE,
+  DEFAULT_SYNC,
   EMPTY_SESSION,
   type LanguageSettings,
   type LearnerLevel,
@@ -21,6 +22,7 @@ export function defaultPreferences(): Preferences {
     style: structuredClone(DEFAULT_STYLE),
     level: "beginner",
     languages: { ...DEFAULT_LANGUAGES },
+    sync: { ...DEFAULT_SYNC },
     onboardingComplete: false,
   };
 }

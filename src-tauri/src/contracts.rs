@@ -25,6 +25,47 @@ pub enum SessionMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveSyncMode {
+    Coordinated,
+    FastSource,
+}
+
+impl Default for LiveSyncMode {
+    fn default() -> Self {
+        Self::Coordinated
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveSyncStatus {
+    Steady,
+    CatchingUp,
+    Degraded,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveSyncState {
+    pub target_delay_ms: u64,
+    pub observed_lag_ms: u64,
+    pub status: LiveSyncStatus,
+    pub visible_segment_id: Option<String>,
+}
+
+impl Default for LiveSyncState {
+    fn default() -> Self {
+        Self {
+            target_delay_ms: 2_500,
+            observed_lag_ms: 0,
+            status: LiveSyncStatus::Steady,
+            visible_segment_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LanguageSettings {
     pub source: String,
@@ -105,6 +146,9 @@ pub enum SessionEvent {
     CoverageChanged {
         translated_through_ms: u64,
     },
+    LiveSyncChanged {
+        sync: LiveSyncState,
+    },
     LessonSelected {
         segment_id: Option<String>,
     },
@@ -143,6 +187,7 @@ pub struct SessionSnapshot {
     pub segments: Vec<SubtitleSegment>,
     pub speakers: HashMap<String, SpeakerProfile>,
     pub translated_through_ms: u64,
+    pub live_sync: Option<LiveSyncState>,
     pub errors: Vec<RecoverableError>,
     pub fatal_error: Option<String>,
     pub selected_segment_id: Option<String>,
@@ -160,6 +205,7 @@ impl Default for SessionSnapshot {
             segments: Vec::new(),
             speakers: HashMap::new(),
             translated_through_ms: 0,
+            live_sync: None,
             errors: Vec::new(),
             fatal_error: None,
             selected_segment_id: None,

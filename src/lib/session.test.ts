@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { EMPTY_SESSION } from "./contracts";
 import { FIXTURE_EVENTS, FIXTURE_SEGMENTS } from "./fixtures";
-import { activeSegments, applySequencedEvent, canResumeForCoverage, captionTail, latestLiveSegments, reduceSession, shouldPauseForCoverage } from "./session";
+import { activeSegments, applySequencedEvent, canResumeForCoverage, latestLiveSegments, reduceSession, shouldPauseForCoverage, subtitleTimelineTime, visibleLiveSegments } from "./session";
 
 describe("session contract", () => {
   it("reduces fixture events into one canonical session", () => {
@@ -52,8 +52,21 @@ describe("session contract", () => {
     expect(latestLiveSegments([finalized, provisional])).toEqual([provisional]);
   });
 
-  it("keeps the readable tail of long streaming captions", () => {
-    expect(captionTail("one two three four five six", 14)).toBe("…four five six");
-    expect(captionTail("字幕だけ、あと字幕だけちょっと待って", 10)).toBe("…幕だけちょっと待って");
+  it("applies VLC-style positive and negative subtitle offsets", () => {
+    expect(subtitleTimelineTime(5_000, 1_000)).toBe(4_000);
+    expect(subtitleTimelineTime(5_000, -500)).toBe(5_500);
+    expect(subtitleTimelineTime(200, 1_000)).toBe(0);
+  });
+
+  it("shows only the live segment selected by canonical sync state", () => {
+    const first = { ...FIXTURE_SEGMENTS[0], id: "live-1", origin: "live" as const };
+    const second = { ...FIXTURE_SEGMENTS[1], id: "live-2", origin: "live" as const };
+    expect(visibleLiveSegments([first, second], { targetDelayMs: 2_500, observedLagMs: 1_900, status: "steady", visibleSegmentId: "live-1" })).toEqual([first]);
+    expect(visibleLiveSegments([first, second], { targetDelayMs: 2_500, observedLagMs: 1_900, status: "steady" })).toEqual([]);
+  });
+
+  it("reduces canonical live sync updates", () => {
+    const sync = { targetDelayMs: 3_100, observedLagMs: 2_500, status: "catching_up" as const, visibleSegmentId: "live-2" };
+    expect(reduceSession(EMPTY_SESSION, { type: "live_sync_changed", sync }).liveSync).toEqual(sync);
   });
 });

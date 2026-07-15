@@ -1,4 +1,5 @@
-import type { SequencedSessionEvent, SessionEvent, SessionState, SubtitleSegment } from "./contracts";
+import { DEFAULT_LIVE_SYNC } from "./contracts";
+import type { LiveSyncState, SequencedSessionEvent, SessionEvent, SessionState, SubtitleSegment } from "./contracts";
 
 export function reduceSession(state: SessionState, event: SessionEvent): SessionState {
   switch (event.type) {
@@ -11,6 +12,7 @@ export function reduceSession(state: SessionState, event: SessionEvent): Session
         segments: [],
         speakers: {},
         translatedThroughMs: 0,
+        liveSync: event.mode === "live" ? { ...DEFAULT_LIVE_SYNC } : undefined,
         errors: [],
         fatalError: undefined,
         selectedSegmentId: undefined,
@@ -34,6 +36,8 @@ export function reduceSession(state: SessionState, event: SessionEvent): Session
       };
     case "coverage_changed":
       return { ...state, translatedThroughMs: event.translatedThroughMs };
+    case "live_sync_changed":
+      return { ...state, liveSync: event.sync };
     case "lesson_selected":
       return { ...state, selectedSegmentId: event.segmentId };
     case "recoverable_error":
@@ -54,6 +58,16 @@ export function activeSegments(segments: SubtitleSegment[], timeMs: number): Sub
   return segments
     .filter((segment) => timeMs >= segment.startMs && timeMs < segment.endMs)
     .slice(0, 2);
+}
+
+export function subtitleTimelineTime(videoTimeMs: number, manualOffsetMs: number): number {
+  return Math.max(0, videoTimeMs - manualOffsetMs);
+}
+
+export function visibleLiveSegments(segments: SubtitleSegment[], sync?: LiveSyncState): SubtitleSegment[] {
+  if (!sync?.visibleSegmentId) return [];
+  const visible = segments.find((segment) => segment.id === sync.visibleSegmentId);
+  return visible ? [visible] : [];
 }
 
 export function latestLiveSegments(segments: SubtitleSegment[]): SubtitleSegment[] {

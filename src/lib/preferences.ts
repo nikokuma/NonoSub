@@ -1,9 +1,10 @@
-import { DEFAULT_LANGUAGES, DEFAULT_STYLE, type LanguageSettings, type LearnerLevel, type SpeakerProfile, type StyleSettings, type SubtitleSegment } from "./contracts";
+import { DEFAULT_LANGUAGES, DEFAULT_STYLE, DEFAULT_SYNC, type LanguageSettings, type LearnerLevel, type SpeakerProfile, type StyleSettings, type SubtitleSegment, type SyncSettings } from "./contracts";
 
 export interface Preferences {
   style: StyleSettings;
   level: LearnerLevel;
   languages: LanguageSettings;
+  sync: SyncSettings;
   onboardingComplete: boolean;
 }
 
@@ -23,6 +24,9 @@ export function parsePreferences(serialized: string): Preferences | undefined {
         explanation: parsed.languages?.explanation ?? parsed.languages?.target ?? DEFAULT_LANGUAGES.explanation,
       },
       onboardingComplete: parsed.onboardingComplete ?? false,
+      sync: {
+        liveMode: parsed.sync?.liveMode === "fast_source" ? "fast_source" : DEFAULT_SYNC.liveMode,
+      },
       style: {
         ...DEFAULT_STYLE,
         ...parsed.style,

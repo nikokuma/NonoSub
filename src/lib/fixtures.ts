@@ -22,7 +22,7 @@ export const LONG_LIVE_FIXTURE_EVENTS: SessionEvent[] = [
   { type: "session_reset", mode: "live", languages: { source: "auto", target: "en", explanation: "en" } },
   { type: "phase_changed", phase: "ready" },
   {
-    type: "caption_upserted",
+    type: "transcript_finalized",
     segment: {
       id: "live-long",
       origin: "live",
@@ -31,11 +31,12 @@ export const LONG_LIVE_FIXTURE_EVENTS: SessionEvent[] = [
       sourceText: "配信とかはしたいと思ってるし、なんならあの動画がまだ編集中なんですけど、字幕だけ、あと字幕だけちょっと待って、あとちょっと、ちょっとあの音が聞き取りづらいところがあったからそこだけちょっと",
       translationText: "Um, I do want to do streams and things, and if anything, the video is still being edited, but only the captions—just wait a bit, and just a little longer—there were a few spots where the audio was hard to hear, just that part.",
       speakerId: "live-audio",
-      isProvisional: true,
-      transcriptionStatus: "pending",
-      translationStatus: "pending",
+      isProvisional: false,
+      transcriptionStatus: "complete",
+      translationStatus: "complete",
     },
   },
+  { type: "live_sync_changed", sync: { targetDelayMs: 2_800, observedLagMs: 2_200, status: "steady", visibleSegmentId: "live-long" } },
 ];
 
 export const FIXTURE_LESSON: LessonCard = {

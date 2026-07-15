@@ -6,7 +6,7 @@
   import type { SessionState, SubtitleSegment } from "./contracts";
   import { EMPTY_SESSION } from "./contracts";
   import { FIXTURE_EVENTS } from "./fixtures";
-  import { latestLiveSegments, reduceSession } from "./session";
+  import { reduceSession, visibleLiveSegments } from "./session";
   import { initialSession, loadPreferences, savePreferences, subscribePreferences, subscribeSession } from "./runtime";
   import LiveSubtitleStack from "./LiveSubtitleStack.svelte";
 
@@ -14,7 +14,12 @@
   let preferences = $state(loadPreferences());
   let arranging = $state(false);
   let visible = $state(true);
-  const captions = $derived(session.mode === "live" ? latestLiveSegments(session.segments) : session.segments.slice(-1));
+  const captions = $derived(session.mode === "live" ? visibleLiveSegments(session.segments, session.liveSync) : session.segments.slice(-1));
+  const waitingLabel = $derived(session.phase === "reconnecting"
+    ? "Reconnecting to Nono…"
+    : session.mode === "live" && session.segments.length > 0
+      ? "Nono is coordinating subtitles…"
+      : "Listening for speech…");
 
   onMount(() => {
     document.documentElement.dataset.surface = "overlay";
@@ -84,7 +89,7 @@
 
 <div class="overlay-shell" class:hidden={!visible} class:arranging>
   {#if arranging}<button class="grip" onpointerdown={startDragging}>⠿ MOVE NONOSUB</button>{/if}
-  {#if captions.length > 0}<LiveSubtitleStack segment={captions[0]} speaker={captions[0].speakerId ? session.speakers[captions[0].speakerId] : undefined} style={preferences.style} onselect={selectLine} />{:else}<div class="waiting"><i></i>{session.phase === "reconnecting" ? "Reconnecting to Nono…" : "Listening for speech…"}</div>{/if}
+  {#if captions.length > 0}<LiveSubtitleStack segment={captions[0]} speaker={captions[0].speakerId ? session.speakers[captions[0].speakerId] : undefined} style={preferences.style} sync={session.liveSync} onselect={selectLine} />{:else}<div class="waiting"><i></i>{waitingLabel}</div>{/if}
   {#if session.fatalError}<div class="error">{session.fatalError}</div>{/if}
 </div>
 
