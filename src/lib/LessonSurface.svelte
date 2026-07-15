@@ -13,14 +13,17 @@
   let session = $state<SessionState>(FIXTURE_EVENTS.reduce(reduceSession, structuredClone(EMPTY_SESSION)));
   let preferences = $state(loadPreferences());
   let messages = $state<LessonMessage[]>([]);
+  let threads = $state<Record<string, LessonMessage[]>>({});
   let input = $state("");
   let loading = $state(false);
   let error = $state("");
   let history = $state<HTMLDivElement>();
   let shouldFollow = true;
+  let activeSegmentId: string | undefined;
+  let requestGeneration = 0;
 
   const selected = $derived(session.segments.find((segment) => segment.id === session.selectedSegmentId) ?? session.segments[3]);
-  const latestCard = $derived(messages.findLast((message) => message.card)?.card ?? (isTauri() ? undefined : FIXTURE_LESSON));
+  const latestCard = $derived(messages.findLast((message) => message.card?.selectedSegmentId === selected?.id)?.card ?? (isTauri() ? undefined : FIXTURE_LESSON));
 
   onMount(() => {
     document.documentElement.dataset.surface = "lesson";
@@ -39,6 +42,19 @@
     void tick().then(() => history?.scrollTo({ top: history.scrollHeight, behavior: "smooth" }));
   });
 
+  $effect(() => {
+    const nextSegmentId = selected?.id;
+    if (nextSegmentId === activeSegmentId) return;
+    if (activeSegmentId) threads[activeSegmentId] = messages;
+    activeSegmentId = nextSegmentId;
+    messages = nextSegmentId ? [...(threads[nextSegmentId] ?? [])] : [];
+    input = "";
+    error = "";
+    loading = false;
+    shouldFollow = true;
+    requestGeneration += 1;
+  });
+
   function trackScroll() {
     if (!history) return;
     shouldFollow = history.scrollHeight - history.scrollTop - history.clientHeight < 60;
@@ -46,6 +62,8 @@
 
   async function ask(question: string) {
     if (!selected || !question.trim() || loading) return;
+    const requestSegment = selected;
+    const requestId = ++requestGeneration;
     const userMessage: LessonMessage = { id: crypto.randomUUID(), role: "user", text: question.trim() };
     messages = [...messages, userMessage];
     input = "";
@@ -55,16 +73,20 @@
       const card = isTauri()
         ? await invoke<LessonCard>("request_lesson", {
             question: question.trim(),
-            selected,
+            selected: requestSegment,
             learnerLevel: preferences.level,
-            context: buildTutorContext(session.segments, selected.id),
+            context: buildTutorContext(session.segments, requestSegment.id),
             thread: messages.slice(-12).map(({ role, text }) => ({ role, text })),
           })
         : { ...FIXTURE_LESSON, speechBubble: question === "Tone & politeness" ? "The unfinished phrase softens the refusal and lets the listener infer the awkward part." : FIXTURE_LESSON.speechBubble };
+      if (requestId !== requestGeneration || selected?.id !== requestSegment.id) return;
       messages = [...messages, { id: crypto.randomUUID(), role: "assistant", text: card.speechBubble, card }];
     } catch (requestError) {
+      if (requestId !== requestGeneration) return;
       error = errorMessage(requestError);
-    } finally { loading = false; }
+    } finally {
+      if (requestId === requestGeneration) loading = false;
+    }
   }
 
   async function closeLesson() {

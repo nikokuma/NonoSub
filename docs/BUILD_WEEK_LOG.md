@@ -66,6 +66,18 @@
 ### Remaining July 14 manual proof
 
 - [x] Select a real application in Apple's ScreenCaptureKit picker and confirm first realtime subtitles.
-- [ ] Confirm Japanese→English and English→Japanese live translation latency/quality.
+- [ ] Confirm English→Japanese live translation latency/quality; Japanese→English live is proven.
 - [ ] Approve the new minimal viewer, compact overlay, chalkboard lesson, and Wired workbench in the native app.
-- [ ] Re-enter the API key once in a stable build, or provide it as a debug-process environment variable, for the remaining paid reverse-direction smoke.
+- [x] Re-enter the API key in the stable checkpoint build for the remaining paid reverse-direction smoke.
+
+## July 15, 2026 — bidirectional file acceptance
+
+- Rebuilt the exact checkpoint as a native debug bundle and completed paid acceptance through the visible app with Computer Use.
+- English→Japanese completed across two audio chunks from the original 58-second English fixture. The pipeline produced 16 short, independently clickable lines instead of paragraph-sized captions; the Japanese was natural and preserved the speaker's indirect “maybe another time” refusal.
+- Japanese→English completed from the original 24-second indirect-refusal fixture with 12 short lines and stable Speaker 1/Speaker 2 labels. `今日はちょっと。` became “but today is a bit...”, and the next turn correctly inferred “So you're not going today?” rather than inventing a literal standalone meaning.
+- The chalkboard lesson for `今日はちょっと。` explained the omitted negative ending, soft-refusal pragmatics, and uncertainty about the exact missing words. The reverse-direction English lesson also correctly taught the tone of “maybe another time.”
+- Confirmed target-only language changes reuse the existing transcript and retranslate without retranscription.
+- Confirmed Keychain is not read during launch. macOS requested access only when the first explicit paid model operation needed the saved key; access was approved in the system prompt.
+- Made debug bundles always show the workbench while release bundles remain menu-bar-first, giving acceptance and development runs a reliable visible control surface.
+- Fixed cross-line lesson isolation: each selected subtitle now restores only its own in-memory thread and board, and an in-flight answer cannot land on a newly selected line.
+- Fixed coverage recovery in the viewer so a video paused on an empty translation buffer resumes reactively when coverage arrives or analysis completes, even though a paused video no longer emits time-update events.

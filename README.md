@@ -23,7 +23,7 @@ The repository currently contains:
 - readable timed splitting for paragraph-sized transcription turns, before contextual translation;
 - original Japanese indirect-refusal and English reverse-direction fixtures plus fixture/unit tests that make no paid API calls.
 
-Japanese→English file analysis, tutoring, HEVC compatibility playback, and real ScreenCaptureKit live translation have passed on the development Mac. Remaining manual gates are English→Japanese review, longer speaker-continuity proof, failure-path hardening, and final release review. See [Build Week log](docs/BUILD_WEEK_LOG.md).
+Japanese→English and English→Japanese file analysis, structured tutoring, HEVC compatibility playback, and Japanese→English ScreenCaptureKit live translation have passed on the development Mac. Remaining manual gates are English→Japanese live review, longer speaker-continuity proof, failure-path hardening, and final release review. See [Build Week log](docs/BUILD_WEEK_LOG.md).
 
 ## Supported media
 

@@ -972,8 +972,7 @@ pub fn run() {
         .setup(|app| {
             setup_tray(app)?;
             let has_key = api_key_marker_exists(app.handle());
-            let show_debug_workbench =
-                cfg!(debug_assertions) && std::env::var_os("NONOSUB_SHOW_WORKBENCH").is_some();
+            let show_debug_workbench = cfg!(debug_assertions);
             if has_key && !show_debug_workbench {
                 let _ = app.get_webview_window("main").map(|window| window.hide());
                 #[cfg(target_os = "macos")]

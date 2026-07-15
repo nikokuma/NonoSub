@@ -52,7 +52,16 @@
   });
 
   $effect(() => {
-    if (session.phase === "ready" && video?.paused && currentMs === 0) void video.play();
+    if ((session.phase === "ready" || session.phase === "complete") && video?.paused && currentMs === 0 && !catchingUp) void video.play();
+  });
+
+  $effect(() => {
+    const translatedThroughMs = session.translatedThroughMs;
+    if (!catchingUp || !video?.paused) return;
+    if (session.phase === "complete" || canResumeForCoverage(currentMs, translatedThroughMs)) {
+      catchingUp = false;
+      void video.play();
+    }
   });
 
   function activity() {
