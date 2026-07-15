@@ -1,8 +1,10 @@
-import { DEFAULT_STYLE, type LearnerLevel, type SpeakerProfile, type StyleSettings, type SubtitleSegment } from "./contracts";
+import { DEFAULT_LANGUAGES, DEFAULT_STYLE, type LanguageSettings, type LearnerLevel, type SpeakerProfile, type StyleSettings, type SubtitleSegment } from "./contracts";
 
 export interface Preferences {
   style: StyleSettings;
   level: LearnerLevel;
+  languages: LanguageSettings;
+  onboardingComplete: boolean;
 }
 
 export function serializePreferences(preferences: Preferences): string {
@@ -15,6 +17,12 @@ export function parsePreferences(serialized: string): Preferences | undefined {
     if (!parsed.style || !["beginner", "intermediate", "advanced"].includes(parsed.level ?? "")) return undefined;
     return {
       level: parsed.level as LearnerLevel,
+      languages: {
+        source: parsed.languages?.source ?? DEFAULT_LANGUAGES.source,
+        target: parsed.languages?.target ?? DEFAULT_LANGUAGES.target,
+        explanation: parsed.languages?.explanation ?? parsed.languages?.target ?? DEFAULT_LANGUAGES.explanation,
+      },
+      onboardingComplete: parsed.onboardingComplete ?? false,
       style: {
         ...DEFAULT_STYLE,
         ...parsed.style,
@@ -22,6 +30,11 @@ export function parsePreferences(serialized: string): Preferences | undefined {
           x: clamp(parsed.style.position?.x ?? DEFAULT_STYLE.position.x, 0.08, 0.92),
           y: clamp(parsed.style.position?.y ?? DEFAULT_STYLE.position.y, 0.12, 0.92),
         },
+        overlayPosition: {
+          x: clamp(parsed.style.overlayPosition?.x ?? DEFAULT_STYLE.overlayPosition.x, 0.05, 0.95),
+          y: clamp(parsed.style.overlayPosition?.y ?? DEFAULT_STYLE.overlayPosition.y, 0.05, 0.95),
+        },
+        overlayWidth: clamp(parsed.style.overlayWidth ?? DEFAULT_STYLE.overlayWidth, 520, 1200),
       },
     };
   } catch {

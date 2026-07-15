@@ -33,3 +33,31 @@
 - Nico confirmed the core tutor controls, speaker customization, and overlay movement work in the native app. Broader display-mode/style polish is intentionally parked.
 - Fixed the tutor dock to retain the full conversation, scroll independently, and follow streamed answers. Rebalanced the rail to provide a useful reading viewport at 1280×720.
 - Built an original 33-second technical fixture from Nico's two synthetic-voice recordings. A live diarization probe returned six clean turns with stable `A/B/A/B/A/B` labels.
+
+## July 14, 2026 — invisible viewer integration
+
+- Replaced the monolithic UI with a menu-bar controller and four synchronized surfaces: optional Wired workbench, minimal internal viewer, compact transparent overlay, and floating Nono lesson.
+- Generalized Japanese/English contracts to source/target/explanation languages and file/live origins. Rust now owns a sequenced canonical snapshot; windows refresh if an event is missed.
+- Added file target-only retranslation, viewer coverage buffering, pause/resume ownership across the lesson window, persistent overlay placement, and macOS activation-policy switching.
+- Replaced streamed tutor prose with validated GPT‑5.6 `LessonCard` Structured Output, memory-only caching, quick prompts, and follow-up history that preserves manual scroll position.
+- Implemented macOS 14 ScreenCaptureKit picker/capture with self-audio exclusion, 48→24 kHz PCM16 conversion, 100 ms realtime batches, source/translation delta reconciliation, graceful close draining, and one reconnect.
+- Corrected the realtime session configuration against OpenAI's dedicated translation guide (`session.audio.output.language`).
+- Fixed a native Swift-concurrency loader failure by adding `/usr/lib/swift` to NonoSub's macOS runtime search path; the menu-bar-first binary now launches cleanly.
+- Browser visual QA passed at 1280×720, workbench minimum 960×680, lesson 780×620, and overlay 900×220. QA found and fixed a lesson-history jump-to-bottom regression.
+- All 20 Rust tests, 8 TypeScript tests, strict Svelte checks, production build, and warning-free clippy pass. Nico's `JpTestFemale.mov` also passes the actual Symphonia AAC decoder test.
+- Nico completed the first real ScreenCaptureKit picker smoke: selected application audio reached `gpt-realtime-translate`, and translated target captions accumulated correctly in the canonical transcript.
+- The first native smoke exposed a secondary-window `/index.html?surface=…` development-route 404. Dynamic windows now use the root app route, with a regression test covering it.
+- Enabled `gpt-realtime-whisper` input transcription so live captions can show source and translation together. Translated deltas now also move the session from Buffering to Ready if source transcription is delayed.
+- Produced the first unsigned Apple Silicon release artifacts: an 8.9 MB `.dmg`, an 8.7 MB `.app.zip`, and an 18 MB arm64 app bundle. The bundle is ad-hoc signed with no Team ID, as expected for the Build Week source-first release.
+- Nico proved Japanese→English live capture with paired source/translation history. The first overlay exposed long-utterance coordination and clipping problems even though the canonical transcript was healthy.
+- Split live presentation from transcript storage: the overlay now shows only the current utterance, reserves stable source/translation rows, uses deliberate listening/translating placeholders, rolls long captions to their readable tails, clamps both rows to two lines, and scales from 30px at 900×220 to 18px at the minimum width. A long-live deterministic fixture protects this path without paid calls.
+- Fixed completed-file transcription streams that use CRLF SSE delimiters. The parser now accepts both `\n\n` and `\r\n\r\n`, preserves UTF-8 code points split across network chunks, and has focused regression coverage for both cases.
+- Re-ran `JpTestFemale.mov` through the native Open Video flow after the parser fix. The real pipeline completed without the malformed-JSON error and produced three diarized Japanese segments, three contextual English translations, and a validated Beginner chalkboard lesson from the first transcript line.
+- The native proof also isolated HEVC playback: WebKit advanced the iPhone `.mov` timeline but rendered black, while an H.264 control rendered correctly. NonoSub now detects HEVC with Symphonia and creates a temporary 720p H.264/AAC playback proxy using macOS `avconvert`; the original file remains the transcription source, metadata is filtered, scoped access is limited to the proxy, and the proxy is deleted with the session.
+- Re-ran the untouched `JpTestFemale.mov` after the compatibility change. Its frames, translated overlay, and correct `0:17` duration all rendered in the internal viewer.
+
+### Remaining July 14 manual proof
+
+- [x] Select a real application in Apple's ScreenCaptureKit picker and confirm first realtime subtitles.
+- [ ] Confirm Japanese→English and English→Japanese live translation latency/quality.
+- [ ] Approve the new minimal viewer, compact overlay, chalkboard lesson, and Wired workbench in the native app.

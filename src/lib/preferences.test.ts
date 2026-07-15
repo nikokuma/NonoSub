@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_STYLE, type SpeakerProfile } from "./contracts";
+import { DEFAULT_LANGUAGES, DEFAULT_STYLE, type SpeakerProfile } from "./contracts";
 import { FIXTURE_SEGMENTS } from "./fixtures";
 import { buildTutorContext, parsePreferences, renameSpeaker, serializePreferences } from "./preferences";
 
 describe("local preferences and tutor context", () => {
   it("round-trips styles and clamps persisted overlay position", () => {
-    const serialized = serializePreferences({ level: "advanced", style: { ...DEFAULT_STYLE, position: { x: 4, y: -2 } } });
+    const serialized = serializePreferences({ level: "advanced", style: { ...DEFAULT_STYLE, position: { x: 4, y: -2 } }, languages: DEFAULT_LANGUAGES, onboardingComplete: true });
     const parsed = parsePreferences(serialized);
     expect(parsed?.level).toBe("advanced");
     expect(parsed?.style.position).toEqual({ x: 0.92, y: 0.12 });

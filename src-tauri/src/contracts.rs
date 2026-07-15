@@ -1,0 +1,162 @@
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LearnerLevel {
+    Beginner,
+    Intermediate,
+    Advanced,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SegmentStatus {
+    Pending,
+    Complete,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMode {
+    File,
+    Live,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageSettings {
+    pub source: String,
+    pub target: String,
+    pub explanation: String,
+}
+
+impl Default for LanguageSettings {
+    fn default() -> Self {
+        Self { source: "auto".into(), target: "en".into(), explanation: "en".into() }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtitleSegment {
+    pub id: String,
+    pub origin: SessionMode,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub source_text: String,
+    pub translation_text: Option<String>,
+    pub ambiguity_note: Option<String>,
+    pub speaker_id: Option<String>,
+    pub is_provisional: bool,
+    pub transcription_status: SegmentStatus,
+    pub translation_status: SegmentStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeakerProfile {
+    pub id: String,
+    pub display_name: String,
+    pub color: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoverableError {
+    pub code: String,
+    pub message: String,
+    pub segment_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum SessionEvent {
+    SessionReset { mode: SessionMode, languages: LanguageSettings },
+    PhaseChanged { phase: String },
+    CaptionUpserted { segment: SubtitleSegment },
+    TranscriptFinalized { segment: SubtitleSegment },
+    TranslationFinalized { segment_id: String, translation_text: String, ambiguity_note: Option<String> },
+    SpeakerDiscovered { speaker: SpeakerProfile },
+    CoverageChanged { translated_through_ms: u64 },
+    LessonSelected { segment_id: Option<String> },
+    RecoverableError { error: RecoverableError },
+    FatalError { message: String },
+    Complete,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SequencedSessionEvent {
+    pub session_id: String,
+    pub sequence: u64,
+    pub event: SessionEvent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedMediaInfo {
+    pub path: String,
+    pub file_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSnapshot {
+    pub session_id: String,
+    pub sequence: u64,
+    pub mode: Option<SessionMode>,
+    pub languages: LanguageSettings,
+    pub phase: String,
+    pub segments: Vec<SubtitleSegment>,
+    pub speakers: HashMap<String, SpeakerProfile>,
+    pub translated_through_ms: u64,
+    pub errors: Vec<RecoverableError>,
+    pub fatal_error: Option<String>,
+    pub selected_segment_id: Option<String>,
+    pub media: Option<PreparedMediaInfo>,
+}
+
+impl Default for SessionSnapshot {
+    fn default() -> Self {
+        Self {
+            session_id: "idle".into(),
+            sequence: 0,
+            mode: None,
+            languages: LanguageSettings::default(),
+            phase: "idle".into(),
+            segments: Vec::new(),
+            speakers: HashMap::new(),
+            translated_through_ms: 0,
+            errors: Vec::new(),
+            fatal_error: None,
+            selected_segment_id: None,
+            media: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BoardSection {
+    pub heading: String,
+    pub lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LessonCard {
+    pub selected_segment_id: String,
+    pub title: String,
+    pub speech_bubble: String,
+    pub board_sections: Vec<BoardSection>,
+    pub ambiguity_note: Option<String>,
+    pub suggested_follow_ups: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TutorMessage {
+    pub role: String,
+    pub text: String,
+}

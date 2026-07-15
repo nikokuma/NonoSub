@@ -1,6 +1,7 @@
 export type LearnerLevel = "beginner" | "intermediate" | "advanced";
 export type SubtitleDisplayMode = "source" | "translation" | "both";
 export type SegmentStatus = "pending" | "complete" | "failed";
+export type SessionMode = "file" | "live";
 export type SessionPhase =
   | "idle"
   | "preparing"
@@ -9,18 +10,28 @@ export type SessionPhase =
   | "ready"
   | "playing"
   | "paused"
+  | "reconnecting"
   | "complete";
 
 export type SubtitlePreset = "clean" | "cinema" | "contrast" | "nono-pop" | "manga" | "retro";
+export type AppSurface = "workbench" | "viewer" | "overlay" | "lesson";
+
+export interface LanguageSettings {
+  source: "auto" | string;
+  target: string;
+  explanation: string;
+}
 
 export interface SubtitleSegment {
   id: string;
+  origin: SessionMode;
   startMs: number;
   endMs: number;
   sourceText: string;
-  naturalEnglish?: string;
+  translationText?: string;
   ambiguityNote?: string;
-  speakerId: string;
+  speakerId?: string;
+  isProvisional: boolean;
   transcriptionStatus: SegmentStatus;
   translationStatus: SegmentStatus;
 }
@@ -35,12 +46,35 @@ export interface SpeakerProfile {
 export interface StyleSettings {
   preset: SubtitlePreset;
   position: { x: number; y: number };
+  overlayPosition: { x: number; y: number };
+  overlayWidth: number;
   fontFamily: string;
   fontSize: number;
   backgroundOpacity: number;
   effect: "none" | "outline" | "shadow";
   displayMode: SubtitleDisplayMode;
   showSpeakerNames: boolean;
+}
+
+export interface BoardSection {
+  heading: string;
+  lines: string[];
+}
+
+export interface LessonCard {
+  selectedSegmentId: string;
+  title: string;
+  speechBubble: string;
+  boardSections: BoardSection[];
+  ambiguityNote?: string;
+  suggestedFollowUps: string[];
+}
+
+export interface LessonMessage {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  card?: LessonCard;
 }
 
 export interface RecoverableError {
@@ -50,33 +84,60 @@ export interface RecoverableError {
 }
 
 export type SessionEvent =
+  | { type: "session_reset"; mode: SessionMode; languages: LanguageSettings }
   | { type: "phase_changed"; phase: SessionPhase }
+  | { type: "caption_upserted"; segment: SubtitleSegment }
   | { type: "transcript_finalized"; segment: SubtitleSegment }
-  | { type: "translation_finalized"; segmentId: string; naturalEnglish: string; ambiguityNote?: string }
+  | { type: "translation_finalized"; segmentId: string; translationText: string; ambiguityNote?: string }
   | { type: "speaker_discovered"; speaker: SpeakerProfile }
   | { type: "coverage_changed"; translatedThroughMs: number }
+  | { type: "lesson_selected"; segmentId?: string }
   | { type: "recoverable_error"; error: RecoverableError }
   | { type: "fatal_error"; message: string }
   | { type: "complete" };
 
+export interface SequencedSessionEvent {
+  sessionId: string;
+  sequence: number;
+  event: SessionEvent;
+}
+
+export interface PreparedMediaInfo {
+  path: string;
+  fileName: string;
+}
+
 export interface SessionState {
+  sessionId: string;
+  sequence: number;
+  mode?: SessionMode;
+  languages: LanguageSettings;
   phase: SessionPhase;
   segments: SubtitleSegment[];
   speakers: Record<string, SpeakerProfile>;
   translatedThroughMs: number;
   errors: RecoverableError[];
   fatalError?: string;
+  selectedSegmentId?: string;
+  media?: PreparedMediaInfo;
 }
 
-export interface TutorMessage {
-  id: string;
-  role: "user" | "assistant";
-  text: string;
+export interface ModelReadiness {
+  file: boolean;
+  live: boolean;
 }
+
+export const DEFAULT_LANGUAGES: LanguageSettings = {
+  source: "auto",
+  target: "en",
+  explanation: "en",
+};
 
 export const DEFAULT_STYLE: StyleSettings = {
   preset: "clean",
   position: { x: 0.5, y: 0.82 },
+  overlayPosition: { x: 0.5, y: 0.78 },
+  overlayWidth: 900,
   fontFamily: "Inter",
   fontSize: 28,
   backgroundOpacity: 0.58,
@@ -86,6 +147,9 @@ export const DEFAULT_STYLE: StyleSettings = {
 };
 
 export const EMPTY_SESSION: SessionState = {
+  sessionId: "fixture",
+  sequence: 0,
+  languages: { ...DEFAULT_LANGUAGES },
   phase: "idle",
   segments: [],
   speakers: {},

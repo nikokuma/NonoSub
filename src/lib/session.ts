@@ -1,11 +1,25 @@
-import type { SessionEvent, SessionState, SubtitleSegment } from "./contracts";
+import type { SequencedSessionEvent, SessionEvent, SessionState, SubtitleSegment } from "./contracts";
 
 export function reduceSession(state: SessionState, event: SessionEvent): SessionState {
   switch (event.type) {
+    case "session_reset":
+      return {
+        ...state,
+        mode: event.mode,
+        languages: event.languages,
+        phase: "preparing",
+        segments: [],
+        speakers: {},
+        translatedThroughMs: 0,
+        errors: [],
+        fatalError: undefined,
+        selectedSegmentId: undefined,
+      };
     case "phase_changed":
       return { ...state, phase: event.phase };
     case "speaker_discovered":
       return { ...state, speakers: { ...state.speakers, [event.speaker.id]: event.speaker } };
+    case "caption_upserted":
     case "transcript_finalized": {
       const segments = [...state.segments.filter((segment) => segment.id !== event.segment.id), event.segment]
         .sort((left, right) => left.startMs - right.startMs);
@@ -15,11 +29,13 @@ export function reduceSession(state: SessionState, event: SessionEvent): Session
       return {
         ...state,
         segments: state.segments.map((segment) => segment.id === event.segmentId
-          ? { ...segment, naturalEnglish: event.naturalEnglish, ambiguityNote: event.ambiguityNote, translationStatus: "complete" }
+          ? { ...segment, translationText: event.translationText, ambiguityNote: event.ambiguityNote, translationStatus: "complete" }
           : segment),
       };
     case "coverage_changed":
       return { ...state, translatedThroughMs: event.translatedThroughMs };
+    case "lesson_selected":
+      return { ...state, selectedSegmentId: event.segmentId };
     case "recoverable_error":
       return { ...state, errors: [...state.errors, event.error] };
     case "fatal_error":
@@ -29,10 +45,37 @@ export function reduceSession(state: SessionState, event: SessionEvent): Session
   }
 }
 
+export function applySequencedEvent(state: SessionState, envelope: SequencedSessionEvent): SessionState | undefined {
+  if (envelope.sessionId !== state.sessionId || envelope.sequence !== state.sequence + 1) return undefined;
+  return { ...reduceSession(state, envelope.event), sequence: envelope.sequence };
+}
+
 export function activeSegments(segments: SubtitleSegment[], timeMs: number): SubtitleSegment[] {
   return segments
     .filter((segment) => timeMs >= segment.startMs && timeMs < segment.endMs)
     .slice(0, 2);
+}
+
+export function latestLiveSegments(segments: SubtitleSegment[]): SubtitleSegment[] {
+  const provisional = segments.filter((segment) => segment.isProvisional).slice(-1);
+  if (provisional.length > 0) return provisional;
+  return segments.filter((segment) => !segment.isProvisional).slice(-1);
+}
+
+export function captionTail(text: string, maxCharacters: number): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  const characters = Array.from(normalized);
+  if (characters.length <= maxCharacters) return normalized;
+
+  const start = characters.length - maxCharacters;
+  const rawTail = characters.slice(start).join("");
+  let tail = rawTail.trimStart();
+  const firstSpace = tail.indexOf(" ");
+  const startsInsideWord = start > 0 && !/^\s/u.test(rawTail);
+  if (startsInsideWord && /^[\p{L}\p{N}]/u.test(tail) && firstSpace > 0 && firstSpace < maxCharacters / 3) {
+    tail = tail.slice(firstSpace + 1);
+  }
+  return `…${tail}`;
 }
 
 export function shouldPauseForCoverage(timeMs: number, translatedThroughMs: number): boolean {

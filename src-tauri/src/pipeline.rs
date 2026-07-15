@@ -4,67 +4,26 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use serde::Serialize;
-use tauri::ipc::Channel;
-
 use crate::{
     chunking::{normalize_chunk_timestamp, AudioChunk},
+    contracts::{LanguageSettings, RecoverableError, SegmentStatus, SessionEvent, SessionMode, SpeakerProfile, SubtitleSegment},
     media::{write_wav, DecodedAudio},
     openai::{ApiError, ApiErrorKind, DiarizedSegment, OpenAiClient, SpeakerReference, TranslationInput},
 };
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PipelineStatus {
-    Complete,
-    Failed,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct PipelineSegment {
-    pub id: String,
-    pub start_ms: u64,
-    pub end_ms: u64,
-    pub source_text: String,
-    pub natural_english: Option<String>,
-    pub ambiguity_note: Option<String>,
-    pub speaker_id: String,
-    pub transcription_status: PipelineStatus,
-    pub translation_status: PipelineStatus,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PipelineSpeaker {
-    pub id: String,
-    pub display_name: String,
-    pub color: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
-pub enum PipelineEvent {
-    PhaseChanged { phase: &'static str },
-    TranscriptFinalized { segment: PipelineSegment },
-    TranslationFinalized { segment_id: String, natural_english: String, ambiguity_note: Option<String> },
-    SpeakerDiscovered { speaker: PipelineSpeaker },
-    CoverageChanged { translated_through_ms: u64 },
-    RecoverableError { code: String, message: String, segment_id: Option<String> },
-    FatalError { message: String },
-    Complete,
-}
+pub type EventSink = Arc<dyn Fn(SessionEvent) -> Result<(), ApiError> + Send + Sync>;
 
 pub async fn run(
     client: OpenAiClient,
     audio: Arc<DecodedAudio>,
     chunks: Vec<AudioChunk>,
+    languages: LanguageSettings,
     cancelled: Arc<AtomicBool>,
-    events: Channel<PipelineEvent>,
+    events: EventSink,
 ) -> Result<(), ApiError> {
-    let result = run_inner(client, audio, chunks, cancelled, &events).await;
+    let result = run_inner(client, audio, chunks, languages, cancelled, &events).await;
     if let Err(error) = &result {
-        let _ = send(&events, PipelineEvent::FatalError { message: error.message.clone() });
+        let _ = send(&events, SessionEvent::FatalError { message: error.message.clone() });
     }
     result
 }
@@ -73,26 +32,27 @@ async fn run_inner(
     client: OpenAiClient,
     audio: Arc<DecodedAudio>,
     chunks: Vec<AudioChunk>,
+    languages: LanguageSettings,
     cancelled: Arc<AtomicBool>,
-    events: &Channel<PipelineEvent>,
+    events: &EventSink,
 ) -> Result<(), ApiError> {
-    send(events, PipelineEvent::PhaseChanged { phase: "transcribing" })?;
-    let mut all_segments = Vec::<PipelineSegment>::new();
+    send(events, SessionEvent::PhaseChanged { phase: "transcribing".into() })?;
+    let mut all_segments = Vec::<SubtitleSegment>::new();
     let mut speaker_ids = HashMap::<String, String>::new();
     let mut references = Vec::<SpeakerReference>::new();
 
     for chunk in &chunks {
         check_cancelled(&cancelled)?;
-        let remote = retry_transcription(&client, &chunk.path, &references, events).await?;
+        let remote = retry_transcription(&client, &chunk.path, &references, &languages.source, events).await?;
         let mut incoming = Vec::new();
         for remote_segment in remote {
             let stable_speaker = stable_speaker_id(&mut speaker_ids, &remote_segment.speaker);
-            if !all_segments.iter().any(|segment| segment.speaker_id == stable_speaker)
-                && !incoming.iter().any(|segment: &PipelineSegment| segment.speaker_id == stable_speaker)
+            if !all_segments.iter().any(|segment| segment.speaker_id.as_deref() == Some(&stable_speaker))
+                && !incoming.iter().any(|segment: &SubtitleSegment| segment.speaker_id.as_deref() == Some(&stable_speaker))
             {
                 let palette = ["#ff83bd", "#78dfc2", "#a995ff", "#ffbb6e"];
                 let number = speaker_ids.len();
-                send(events, PipelineEvent::SpeakerDiscovered { speaker: PipelineSpeaker {
+                send(events, SessionEvent::SpeakerDiscovered { speaker: SpeakerProfile {
                     id: stable_speaker.clone(),
                     display_name: format!("Speaker {number}"),
                     color: palette[(number - 1).min(palette.len() - 1)].into(),
@@ -101,17 +61,17 @@ async fn run_inner(
             incoming.push(to_pipeline_segment(chunk, remote_segment, stable_speaker));
         }
         merge_boundary_segments(&mut all_segments, incoming);
-        for segment in all_segments.iter().filter(|segment| segment.translation_status == PipelineStatus::Failed) {
-            send(events, PipelineEvent::TranscriptFinalized { segment: segment.clone() })?;
+        for segment in all_segments.iter().filter(|segment| segment.translation_status == SegmentStatus::Failed) {
+            send(events, SessionEvent::TranscriptFinalized { segment: segment.clone() })?;
         }
 
         if chunk.index == 0 {
             references = build_speaker_references(&audio, chunk, &all_segments)?;
         }
-        send(events, PipelineEvent::PhaseChanged { phase: "buffering" })?;
-        translate_pending(&client, &mut all_segments, events, &cancelled).await?;
+        send(events, SessionEvent::PhaseChanged { phase: "buffering".into() })?;
+        translate_pending(&client, &mut all_segments, &languages, events, &cancelled).await?;
     }
-    send(events, PipelineEvent::Complete)?;
+    send(events, SessionEvent::Complete)?;
     Ok(())
 }
 
@@ -119,13 +79,14 @@ async fn retry_transcription(
     client: &OpenAiClient,
     path: &std::path::Path,
     references: &[SpeakerReference],
-    events: &Channel<PipelineEvent>,
+    source_language: &str,
+    events: &EventSink,
 ) -> Result<Vec<DiarizedSegment>, ApiError> {
-    let first = client.transcribe_chunk(path, references).await;
+    let first = client.transcribe_chunk(path, references, source_language).await;
     match first {
         Err(error) if error.retryable => {
-            send(events, PipelineEvent::RecoverableError { code: format!("{:?}", error.kind).to_ascii_lowercase(), message: error.message, segment_id: None })?;
-            client.transcribe_chunk(path, references).await
+            send(events, SessionEvent::RecoverableError { error: RecoverableError { code: format!("{:?}", error.kind).to_ascii_lowercase(), message: error.message, segment_id: None } })?;
+            client.transcribe_chunk(path, references, source_language).await
         },
         result => result,
     }
@@ -133,14 +94,15 @@ async fn retry_transcription(
 
 async fn translate_pending(
     client: &OpenAiClient,
-    segments: &mut [PipelineSegment],
-    events: &Channel<PipelineEvent>,
+    segments: &mut [SubtitleSegment],
+    languages: &LanguageSettings,
+    events: &EventSink,
     cancelled: &AtomicBool,
 ) -> Result<(), ApiError> {
     let pending_indices = segments
         .iter()
         .enumerate()
-        .filter(|(_, segment)| segment.translation_status == PipelineStatus::Failed)
+        .filter(|(_, segment)| segment.translation_status == SegmentStatus::Failed)
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     for indices in pending_indices.chunks(6) {
@@ -152,14 +114,14 @@ async fn translate_pending(
             .map(translation_input)
             .collect::<Vec<_>>();
         let batch = indices.iter().map(|index| translation_input(&segments[*index])).collect::<Vec<_>>();
-        let translations = match client.translate(&context, &batch).await {
+        let translations = match client.translate(&context, &batch, languages).await {
             Ok(output) => output,
-            Err(first) if first.retryable => match client.translate(&context, &batch).await {
+            Err(first) if first.retryable => match client.translate(&context, &batch, languages).await {
                 Ok(output) => output,
                 Err(error) if matches!(error.kind, ApiErrorKind::Authentication | ApiErrorKind::ModelUnavailable) => return Err(error),
                 Err(error) => {
                     for index in indices {
-                        send(events, PipelineEvent::RecoverableError { code: "translation_failed".into(), message: error.message.clone(), segment_id: Some(segments[*index].id.clone()) })?;
+                        send(events, SessionEvent::RecoverableError { error: RecoverableError { code: "translation_failed".into(), message: error.message.clone(), segment_id: Some(segments[*index].id.clone()) } })?;
                     }
                     continue;
                 }
@@ -168,35 +130,35 @@ async fn translate_pending(
         };
         for translation in translations {
             if let Some(segment) = segments.iter_mut().find(|segment| segment.id == translation.segment_id) {
-                segment.natural_english = Some(translation.natural_english.clone());
+                segment.translation_text = Some(translation.translation.clone());
                 segment.ambiguity_note = translation.ambiguity_note.clone();
-                segment.translation_status = PipelineStatus::Complete;
-                send(events, PipelineEvent::TranslationFinalized {
+                segment.translation_status = SegmentStatus::Complete;
+                send(events, SessionEvent::TranslationFinalized {
                     segment_id: segment.id.clone(),
-                    natural_english: translation.natural_english,
+                    translation_text: translation.translation,
                     ambiguity_note: translation.ambiguity_note,
                 })?;
             }
         }
         let translated_through_ms = segments
             .iter()
-            .take_while(|segment| segment.translation_status == PipelineStatus::Complete)
+            .take_while(|segment| segment.translation_status == SegmentStatus::Complete)
             .map(|segment| segment.end_ms)
             .max()
             .unwrap_or(0);
-        send(events, PipelineEvent::CoverageChanged { translated_through_ms })?;
+        send(events, SessionEvent::CoverageChanged { translated_through_ms })?;
         if translated_through_ms >= 15_000 {
-            send(events, PipelineEvent::PhaseChanged { phase: "ready" })?;
+            send(events, SessionEvent::PhaseChanged { phase: "ready".into() })?;
         }
     }
     Ok(())
 }
 
-fn translation_input(segment: &PipelineSegment) -> TranslationInput {
+fn translation_input(segment: &SubtitleSegment) -> TranslationInput {
     TranslationInput {
         segment_id: segment.id.clone(),
-        speaker: segment.speaker_id.clone(),
-        japanese: segment.source_text.clone(),
+        speaker: segment.speaker_id.clone().unwrap_or_else(|| "speaker-unknown".into()),
+        source_text: segment.source_text.clone(),
     }
 }
 
@@ -213,22 +175,24 @@ fn stable_speaker_id(map: &mut HashMap<String, String>, remote: &str) -> String 
     id
 }
 
-fn to_pipeline_segment(chunk: &AudioChunk, remote: DiarizedSegment, speaker_id: String) -> PipelineSegment {
+fn to_pipeline_segment(chunk: &AudioChunk, remote: DiarizedSegment, speaker_id: String) -> SubtitleSegment {
     let id = if remote.id.is_empty() { format!("chunk-{}-{:.0}", chunk.index, remote.start_seconds * 1_000.0) } else { format!("chunk-{}-{}", chunk.index, remote.id) };
-    PipelineSegment {
+    SubtitleSegment {
         id,
+        origin: SessionMode::File,
         start_ms: normalize_chunk_timestamp(chunk, remote.start_seconds),
         end_ms: normalize_chunk_timestamp(chunk, remote.end_seconds),
         source_text: remote.text,
-        natural_english: None,
+        translation_text: None,
         ambiguity_note: None,
-        speaker_id,
-        transcription_status: PipelineStatus::Complete,
-        translation_status: PipelineStatus::Failed,
+        speaker_id: Some(speaker_id),
+        is_provisional: false,
+        transcription_status: SegmentStatus::Complete,
+        translation_status: SegmentStatus::Failed,
     }
 }
 
-pub fn merge_boundary_segments(existing: &mut Vec<PipelineSegment>, incoming: Vec<PipelineSegment>) {
+pub fn merge_boundary_segments(existing: &mut Vec<SubtitleSegment>, incoming: Vec<SubtitleSegment>) {
     for candidate in incoming {
         let duplicate = existing.iter().position(|segment| {
             let overlap_start = segment.start_ms.max(candidate.start_ms);
@@ -251,14 +215,15 @@ pub fn merge_boundary_segments(existing: &mut Vec<PipelineSegment>, incoming: Ve
 fn build_speaker_references(
     audio: &DecodedAudio,
     chunk: &AudioChunk,
-    segments: &[PipelineSegment],
+    segments: &[SubtitleSegment],
 ) -> Result<Vec<SpeakerReference>, ApiError> {
     let mut seen = HashSet::new();
     let mut references = Vec::new();
     let directory = chunk.path.parent().ok_or_else(|| service_error("Temporary chunk directory is missing."))?;
     for segment in segments {
         let duration = segment.end_ms.saturating_sub(segment.start_ms);
-        if !(2_000..=10_000).contains(&duration) || !seen.insert(segment.speaker_id.clone()) {
+        let Some(speaker_id) = segment.speaker_id.as_ref() else { continue };
+        if !(2_000..=10_000).contains(&duration) || !seen.insert(speaker_id.clone()) {
             continue;
         }
         let start = ((segment.start_ms as u128 * audio.sample_rate as u128) / 1_000) as usize;
@@ -270,7 +235,7 @@ fn build_speaker_references(
         write_wav(&path, &audio.samples[start..end], audio.sample_rate).map_err(|message| service_error(&message))?;
         let bytes = std::fs::read(&path).map_err(|error| service_error(&format!("Could not read speaker reference: {error}")))?;
         references.push(SpeakerReference {
-            name: segment.speaker_id.clone(),
+            name: speaker_id.clone(),
             data_url: format!("data:audio/wav;base64,{}", STANDARD.encode(bytes)),
         });
         if references.len() == 4 {
@@ -280,8 +245,8 @@ fn build_speaker_references(
     Ok(references)
 }
 
-fn send(events: &Channel<PipelineEvent>, event: PipelineEvent) -> Result<(), ApiError> {
-    events.send(event).map_err(|error| service_error(&format!("The subtitle display disconnected: {error}")))
+fn send(events: &EventSink, event: SessionEvent) -> Result<(), ApiError> {
+    events(event)
 }
 
 fn check_cancelled(cancelled: &AtomicBool) -> Result<(), ApiError> {
@@ -300,8 +265,8 @@ fn service_error(message: &str) -> ApiError {
 mod tests {
     use super::*;
 
-    fn segment(id: &str, start: u64, end: u64, text: &str) -> PipelineSegment {
-        PipelineSegment { id: id.into(), start_ms: start, end_ms: end, source_text: text.into(), natural_english: None, ambiguity_note: None, speaker_id: "speaker-1".into(), transcription_status: PipelineStatus::Complete, translation_status: PipelineStatus::Failed }
+    fn segment(id: &str, start: u64, end: u64, text: &str) -> SubtitleSegment {
+        SubtitleSegment { id: id.into(), origin: SessionMode::File, start_ms: start, end_ms: end, source_text: text.into(), translation_text: None, ambiguity_note: None, speaker_id: Some("speaker-1".into()), is_provisional: false, transcription_status: SegmentStatus::Complete, translation_status: SegmentStatus::Failed }
     }
 
     #[test]

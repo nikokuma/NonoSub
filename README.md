@@ -2,7 +2,7 @@
 
 > NonoSub turns foreign-language media into an interactive language lesson while you watch.
 
-NonoSub is a privacy-conscious Tauri desktop app for watching Japanese video with synchronized Japanese and contextual English subtitles. Click any past line to pause, inspect the surrounding dialogue, and ask Nono why the speaker said it that way.
+NonoSub is a privacy-conscious, menu-bar-first Tauri desktop app for understanding media in another language. Open a local video for diarized, contextual subtitles or listen to another macOS app through Apple's native system-audio picker. Click any finalized line and Nono turns it into a structured language lesson on a floating chalkboard.
 
 Built from scratch for OpenAI Build Week 2026 in the Education category using Codex, GPT‑5.6, and `gpt-4o-transcribe-diarize`.
 
@@ -10,18 +10,19 @@ Built from scratch for OpenAI Build Week 2026 in the Education category using Co
 
 The repository currently contains:
 
-- a runnable Tauri 2 / Svelte 5 desktop shell;
+- a menu-bar controller plus separate Wired workbench, borderless viewer, compact live overlay, and floating lesson windows;
 - local MP4/MOV playback through Tauri's range-capable scoped asset protocol;
-- the canonical session contract and a deterministic Japanese fixture;
-- synchronized bilingual overlays, transcript history, click-to-pause selection, speaker rename/color, drag placement, and six subtitle presets;
-- Beginner, Intermediate, and Advanced tutoring controls;
-- a Three.js Nono tutor presentation with a text-first fallback;
+- generalized source, subtitle, and explanation languages with an in-memory canonical session shared across every window;
+- synchronized bilingual overlays, transcript history, click-to-pause/resume ownership, speaker rename/color, persistent placement, and six subtitle presets;
+- Beginner, Intermediate, and Advanced structured chalkboard lessons with scroll-preserving follow-up history;
+- a Three.js Nono presentation with a complete text fallback;
 - OS credential-vault storage for the OpenAI key and live model-access validation;
 - pure-Rust MP4/MOV AAC decoding, mono 16 kHz WAV conversion, silence-aware chunking, and temporary-file cleanup;
-- streamed diarized transcription parsing, contextual Structured Output translation, coverage events, cancellation, retry-once behavior, and streamed GPT‑5.6 tutoring;
+- streamed diarized transcription parsing, contextual Structured Output translation, target-only retranslation, coverage events, cancellation, and retry-once behavior;
+- macOS 14 ScreenCaptureKit system-audio capture, 48→24 kHz PCM16 conversion, realtime translation deltas, one automatic reconnect, and graceful drain/close;
 - fixture/unit tests that make no paid API calls.
 
-Still awaiting live acceptance proof: the final indirect-refusal demo video, one-minute transcript review, ten-minute speaker-continuity review, signed-off translation quality, and release packaging. Model access and the first live tutoring review have passed. See [Build Week log](docs/BUILD_WEEK_LOG.md).
+Still awaiting live acceptance proof: the ScreenCaptureKit picker/realtime session, English→Japanese media review, one-minute transcript review, ten-minute speaker-continuity review, signed-off translation quality, and release packaging. Model access and the first live tutoring review have passed. See [Build Week log](docs/BUILD_WEEK_LOG.md).
 
 ## Supported media
 
@@ -29,12 +30,13 @@ Build Week scope is deliberately narrow:
 
 - local `.mp4` or `.mov` files;
 - AAC audio;
-- Japanese speech translated to English;
+- any speech language supported by the selected models, with Auto source detection by default;
+- any configured target/explanation language;
 - Apple Silicon macOS is the only verified release target.
 
 The repository includes [`demo/NonoSubTwoSpeakerFixture.mp4`](demo/NonoSubTwoSpeakerFixture.mp4), an original roughly 34-second, two-voice Japanese test clip. See [`demo/README.md`](demo/README.md) for its provenance, purpose, and reproducible FFmpeg build command.
 
-Livestreams, browser/system audio, YouTube/Twitch URLs, accounts, saved transcripts, vocabulary decks, cloud sync, mobile, and overlapping-speech separation research are post-hackathon work.
+Live Captions require macOS 14+ and use the Apple ScreenCaptureKit picker. URL downloading, embedded browsing, global media control, accounts, saved transcripts, vocabulary decks, cloud sync, mobile, live diarization, and overlapping-speech separation research are outside Build Week scope.
 
 ## Run from source
 
@@ -45,7 +47,7 @@ Requirements:
 - pnpm 10 or newer;
 - stable Rust;
 - Xcode command-line tools;
-- an OpenAI API project with access to `gpt-5.6` and `gpt-4o-transcribe-diarize` for live analysis.
+- an OpenAI API project with access to `gpt-5.6-sol`, `gpt-4o-transcribe-diarize`, and optionally `gpt-realtime-translate`.
 
 ```bash
 pnpm install
@@ -71,6 +73,7 @@ xattr -dr com.apple.quarantine /Applications/NonoSub.app
 
 - The video file remains local and is made readable only through a temporary, user-selected Tauri asset scope.
 - AAC is decoded locally. Temporary WAV chunks are sent to OpenAI's transcription API.
+- Live Captions streams only the selected system audio to OpenAI as short PCM16 batches and never writes it to disk.
 - Transcript context and tutor questions are sent to GPT‑5.6.
 - The API key is stored in the operating-system credential vault and is never returned to the UI.
 - Transcript and tutor history are memory-only for the current app session.
@@ -89,7 +92,15 @@ local MP4/MOV
   → stable speaker/timeline merge
   → GPT-5.6 structured contextual translation
   → canonical session events
-  → Svelte player, transcript, and tutor
+  → canonical Rust session
+  → Svelte viewer, overlay, transcript, and lesson windows
+
+selected macOS system audio
+  → ScreenCaptureKit (NonoSub audio excluded)
+  → stateful 48→24 kHz PCM16
+  → gpt-realtime-translate WebSocket
+  → source/translation deltas
+  → compact always-on-top overlay
 ```
 
 Rust owns local media access, secrets, decoding, chunk scheduling, OpenAI requests, retries, cleanup, and canonical live analysis. Svelte owns playback, synchronized display, tutoring interaction, and non-sensitive preferences. Details: [Architecture](docs/ARCHITECTURE.md).
@@ -108,7 +119,8 @@ Tests cover the TypeScript reducer, active/overlap selection, coverage hysteresi
 ## Model usage
 
 - `gpt-4o-transcribe-diarize`: streamed finalized Japanese segments with timestamps and speaker labels.
-- `gpt-5.6-sol`: the flagship GPT‑5.6 model, used for batched context-aware English subtitles through Structured Outputs and streamed grammar/tone/culture tutoring.
+- `gpt-5.6-sol`: contextual any-language subtitles and validated `LessonCard` Structured Outputs for grammar, tone, meaning, and culture.
+- `gpt-realtime-translate`: streaming source and translated transcript deltas for Live Captions.
 - Responses requests use `store:false`; requested batches contain up to six target lines and at most 80 preceding lines.
 
 References: [speech to text](https://developers.openai.com/api/docs/guides/speech-to-text), [GPT‑5.6 guidance](https://developers.openai.com/api/docs/guides/latest-model), and [Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs).

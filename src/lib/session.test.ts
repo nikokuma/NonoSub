@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { EMPTY_SESSION } from "./contracts";
 import { FIXTURE_EVENTS, FIXTURE_SEGMENTS } from "./fixtures";
-import { activeSegments, canResumeForCoverage, reduceSession, shouldPauseForCoverage } from "./session";
+import { activeSegments, applySequencedEvent, canResumeForCoverage, captionTail, latestLiveSegments, reduceSession, shouldPauseForCoverage } from "./session";
 
 describe("session contract", () => {
   it("reduces fixture events into one canonical session", () => {
@@ -20,5 +20,40 @@ describe("session contract", () => {
     expect(shouldPauseForCoverage(9_000, 10_500)).toBe(true);
     expect(canResumeForCoverage(9_000, 16_999)).toBe(false);
     expect(canResumeForCoverage(9_000, 17_000)).toBe(true);
+  });
+
+  it("requires a snapshot refresh when a window misses an event", () => {
+    const state = { ...EMPTY_SESSION, sessionId: "session-4", sequence: 7 };
+    expect(applySequencedEvent(state, {
+      sessionId: "session-4",
+      sequence: 9,
+      event: { type: "phase_changed", phase: "ready" },
+    })).toBeUndefined();
+    expect(applySequencedEvent(state, {
+      sessionId: "session-4",
+      sequence: 8,
+      event: { type: "phase_changed", phase: "ready" },
+    })?.phase).toBe("ready");
+  });
+
+  it("replaces a provisional live caption and keeps the newest final line", () => {
+    const provisional = { ...FIXTURE_SEGMENTS[0], id: "live-2", origin: "live" as const, isProvisional: true };
+    const finalized = { ...provisional, sourceText: "Final source", isProvisional: false };
+    const withProvisional = reduceSession(EMPTY_SESSION, { type: "caption_upserted", segment: provisional });
+    const withFinal = reduceSession(withProvisional, { type: "transcript_finalized", segment: finalized });
+    expect(withFinal.segments).toHaveLength(1);
+    expect(withFinal.segments[0].sourceText).toBe("Final source");
+    expect(latestLiveSegments(withFinal.segments)).toEqual([finalized]);
+  });
+
+  it("shows only the current live caption while preserving finalized history", () => {
+    const finalized = { ...FIXTURE_SEGMENTS[0], id: "live-1", origin: "live" as const };
+    const provisional = { ...FIXTURE_SEGMENTS[1], id: "live-2", origin: "live" as const, isProvisional: true };
+    expect(latestLiveSegments([finalized, provisional])).toEqual([provisional]);
+  });
+
+  it("keeps the readable tail of long streaming captions", () => {
+    expect(captionTail("one two three four five six", 14)).toBe("…four five six");
+    expect(captionTail("字幕だけ、あと字幕だけちょっと待って", 10)).toBe("…幕だけちょっと待って");
   });
 });

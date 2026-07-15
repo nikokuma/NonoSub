@@ -4,8 +4,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::Path;
 
+use crate::contracts::{LanguageSettings, LessonCard};
+
 pub const TRANSCRIPTION_MODEL: &str = "gpt-4o-transcribe-diarize";
 pub const LANGUAGE_MODEL: &str = "gpt-5.6-sol";
+pub const REALTIME_TRANSLATION_MODEL: &str = "gpt-realtime-translate";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -48,13 +51,13 @@ pub struct DiarizedSegment {
 pub struct TranslationInput {
     pub segment_id: String,
     pub speaker: String,
-    pub japanese: String,
+    pub source_text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TranslationOutput {
     pub segment_id: String,
-    pub natural_english: String,
+    pub translation: String,
     #[serde(default)]
     pub ambiguity_note: Option<String>,
 }
@@ -102,7 +105,21 @@ impl OpenAiClient {
         Ok(())
     }
 
-    pub async fn transcribe_chunk(&self, path: &Path, references: &[SpeakerReference]) -> Result<Vec<DiarizedSegment>, ApiError> {
+    pub async fn model_accessible(&self, model: &str) -> bool {
+        self.http
+            .get(format!("https://api.openai.com/v1/models/{model}"))
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success())
+    }
+
+    pub async fn transcribe_chunk(
+        &self,
+        path: &Path,
+        references: &[SpeakerReference],
+        source_language: &str,
+    ) -> Result<Vec<DiarizedSegment>, ApiError> {
         let bytes = tokio::fs::read(path).await.map_err(|error| ApiError {
             kind: ApiErrorKind::Service,
             message: format!("Could not read a temporary audio chunk: {error}"),
@@ -124,9 +141,12 @@ impl OpenAiClient {
             .text("model", TRANSCRIPTION_MODEL)
             .text("response_format", "diarized_json")
             .text("stream", "true")
-            .text("chunking_strategy", "auto")
-            .text("language", "ja")
-            .text("prompt", "Japanese conversation. Preserve Japanese script, punctuation, hesitations, and unfinished phrases.");
+            .text("chunking_strategy", "auto");
+        if source_language != "auto" {
+            form = form
+                .text("language", source_language.to_owned())
+                .text("prompt", "Preserve the source language, punctuation, hesitations, and unfinished phrases.");
+        }
         if !references.is_empty() {
             form = form
                 .text("known_speaker_names", serde_json::to_string(&references.iter().map(|reference| &reference.name).collect::<Vec<_>>()).unwrap_or_default())
@@ -145,21 +165,20 @@ impl OpenAiClient {
         }
 
         let mut stream = response.bytes_stream();
-        let mut pending = String::new();
+        let mut pending = Vec::new();
         let mut segments = Vec::new();
         while let Some(chunk) = stream.next().await {
             let bytes = chunk.map_err(network_error)?;
-            pending.push_str(&String::from_utf8_lossy(&bytes));
-            while let Some(boundary) = pending.find("\n\n") {
-                let event = pending[..boundary].to_owned();
-                pending.drain(..boundary + 2);
+            pending.extend_from_slice(&bytes);
+            while let Some(event) = take_sse_event(&mut pending)? {
                 if let Some(segment) = parse_diarized_sse_event(&event)? {
                     segments.push(segment);
                 }
             }
         }
-        if !pending.trim().is_empty() {
-            if let Some(segment) = parse_diarized_sse_event(&pending)? {
+        if pending.iter().any(|byte| !byte.is_ascii_whitespace()) {
+            let trailing = String::from_utf8(pending).map_err(|error| malformed_transcription_stream(&error.to_string()))?;
+            if let Some(segment) = parse_diarized_sse_event(&trailing)? {
                 segments.push(segment);
             }
         }
@@ -170,6 +189,7 @@ impl OpenAiClient {
         &self,
         preceding_context: &[TranslationInput],
         segments: &[TranslationInput],
+        languages: &LanguageSettings,
     ) -> Result<Vec<TranslationOutput>, ApiError> {
         if segments.is_empty() || segments.len() > 6 {
             return Err(ApiError {
@@ -183,8 +203,8 @@ impl OpenAiClient {
             "reasoning": { "effort": "low" },
             "store": false,
             "input": [
-                { "role": "system", "content": [{ "type": "input_text", "text": "Translate Japanese dialogue into concise, natural English subtitles. Use speaker and preceding dialogue context. Preserve ambiguity; never invent missing certainty. Return exactly one result for each requested segment." }] },
-                { "role": "user", "content": [{ "type": "input_text", "text": serde_json::to_string(&json!({"preceding_context": preceding_context, "segments_to_translate": segments})).unwrap_or_default() }] }
+                { "role": "system", "content": [{ "type": "input_text", "text": "Translate dialogue into concise, natural subtitles in the requested target language. Use speaker and preceding dialogue context. Preserve ambiguity; never invent missing certainty. Return exactly one result for each requested segment." }] },
+                { "role": "user", "content": [{ "type": "input_text", "text": serde_json::to_string(&json!({"languages": languages, "preceding_context": preceding_context, "segments_to_translate": segments})).unwrap_or_default() }] }
             ],
             "text": { "format": {
                 "type": "json_schema",
@@ -198,10 +218,10 @@ impl OpenAiClient {
                             "type": "object",
                             "properties": {
                                 "segment_id": { "type": "string" },
-                                "natural_english": { "type": "string" },
+                                "translation": { "type": "string" },
                                 "ambiguity_note": { "type": ["string", "null"] }
                             },
-                            "required": ["segment_id", "natural_english", "ambiguity_note"],
+                            "required": ["segment_id", "translation", "ambiguity_note"],
                             "additionalProperties": false
                         }
                     } },
@@ -239,23 +259,45 @@ impl OpenAiClient {
         Ok(envelope.translations)
     }
 
-    pub async fn tutor_stream<F>(
-        &self,
-        lesson_context: &Value,
-        mut on_delta: F,
-    ) -> Result<(), ApiError>
-    where
-        F: FnMut(String) -> Result<(), ApiError>,
-    {
+    pub async fn lesson(&self, lesson_context: &Value) -> Result<LessonCard, ApiError> {
         let request = json!({
             "model": LANGUAGE_MODEL,
             "reasoning": { "effort": "low" },
             "store": false,
-            "stream": true,
             "input": [
-                { "role": "system", "content": [{ "type": "input_text", "text": "You are Nono, an accurate Japanese language tutor. Explain meaning in context at the requested learner level. Cover grammar, literal versus natural meaning, tone, politeness, omitted information, and culture when relevant. Explicitly label ambiguity instead of inventing certainty. Accuracy comes first; then add a light cute, playful, slightly bratty personality. Be concise unless the learner asks for depth." }] },
+                { "role": "system", "content": [{ "type": "input_text", "text": "You are Nono, an accurate language tutor. Teach the source utterance in the requested explanation language at the learner's level. Cover only the grammar, literal versus natural meaning, tone, politeness, omitted information, or culture relevant to the question. Preserve source quotations exactly. Explicitly mark ambiguity instead of inventing certainty. Accuracy comes first; add at most one light cute, playful, slightly bratty aside. Keep the speech bubble to one or two sentences, use at most three board sections with at most five short lines each, and return three useful follow-up prompts." }] },
                 { "role": "user", "content": [{ "type": "input_text", "text": serde_json::to_string(lesson_context).unwrap_or_default() }] }
-            ]
+            ],
+            "text": { "format": {
+                "type": "json_schema",
+                "name": "nonosub_lesson_card",
+                "strict": true,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "selectedSegmentId": { "type": "string" },
+                        "title": { "type": "string" },
+                        "speechBubble": { "type": "string" },
+                        "boardSections": {
+                            "type": "array",
+                            "maxItems": 3,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "heading": { "type": "string" },
+                                    "lines": { "type": "array", "maxItems": 5, "items": { "type": "string" } }
+                                },
+                                "required": ["heading", "lines"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "ambiguityNote": { "type": ["string", "null"] },
+                        "suggestedFollowUps": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "string" } }
+                    },
+                    "required": ["selectedSegmentId", "title", "speechBubble", "boardSections", "ambiguityNote", "suggestedFollowUps"],
+                    "additionalProperties": false
+                }
+            } }
         });
         let response = self
             .http
@@ -268,19 +310,62 @@ impl OpenAiClient {
         if !response.status().is_success() {
             return Err(response_error(response.status(), LANGUAGE_MODEL).await);
         }
-        let mut stream = response.bytes_stream();
-        let mut pending = String::new();
-        while let Some(chunk) = stream.next().await {
-            pending.push_str(&String::from_utf8_lossy(&chunk.map_err(network_error)?));
-            while let Some(boundary) = pending.find("\n\n") {
-                let event = pending[..boundary].to_owned();
-                pending.drain(..boundary + 2);
-                if let Some(delta) = parse_response_delta(&event)? {
-                    on_delta(delta)?;
-                }
-            }
-        }
-        Ok(())
+        let value: Value = response.json().await.map_err(|error| ApiError {
+            kind: ApiErrorKind::MalformedResponse,
+            message: format!("GPT-5.6 returned unreadable lesson output: {error}"),
+            retryable: true,
+        })?;
+        let output_text = extract_response_text(&value).ok_or_else(|| ApiError {
+            kind: ApiErrorKind::MalformedResponse,
+            message: "GPT-5.6 returned no structured lesson text.".into(),
+            retryable: true,
+        })?;
+        let card: LessonCard = serde_json::from_str(output_text).map_err(|error| ApiError {
+            kind: ApiErrorKind::MalformedResponse,
+            message: format!("GPT-5.6 returned a malformed lesson card: {error}"),
+            retryable: true,
+        })?;
+        validate_lesson_card(card)
+    }
+}
+
+fn take_sse_event(pending: &mut Vec<u8>) -> Result<Option<String>, ApiError> {
+    let lf = pending.windows(2).position(|window| window == b"\n\n").map(|index| (index, 2));
+    let crlf = pending.windows(4).position(|window| window == b"\r\n\r\n").map(|index| (index, 4));
+    let Some((boundary, delimiter_len)) = [lf, crlf].into_iter().flatten().min_by_key(|(index, _)| *index) else {
+        return Ok(None);
+    };
+    let event = String::from_utf8(pending[..boundary].to_vec())
+        .map_err(|error| malformed_transcription_stream(&error.to_string()))?;
+    pending.drain(..boundary + delimiter_len);
+    Ok(Some(event))
+}
+
+fn malformed_transcription_stream(detail: &str) -> ApiError {
+    ApiError {
+        kind: ApiErrorKind::MalformedResponse,
+        message: format!("Transcription stream contained invalid text: {detail}"),
+        retryable: true,
+    }
+}
+
+fn validate_lesson_card(card: LessonCard) -> Result<LessonCard, ApiError> {
+    let invalid = card.title.trim().is_empty()
+        || card.speech_bubble.trim().is_empty()
+        || card.board_sections.is_empty()
+        || card.board_sections.len() > 3
+        || card.board_sections.iter().any(|section| {
+            section.heading.trim().is_empty() || section.lines.is_empty() || section.lines.len() > 5
+        })
+        || card.suggested_follow_ups.len() != 3;
+    if invalid {
+        Err(ApiError {
+            kind: ApiErrorKind::MalformedResponse,
+            message: "GPT-5.6 returned an incomplete lesson card.".into(),
+            retryable: true,
+        })
+    } else {
+        Ok(card)
     }
 }
 
@@ -332,6 +417,7 @@ pub fn extract_response_text(value: &Value) -> Option<&str> {
         .find_map(|content| content.get("text").and_then(Value::as_str))
 }
 
+#[cfg(test)]
 pub fn parse_response_delta(event: &str) -> Result<Option<String>, ApiError> {
     let data = event
         .lines()
@@ -389,6 +475,27 @@ mod tests {
     fn ignores_non_segment_and_done_events() {
         assert!(parse_diarized_sse_event("data: [DONE]").unwrap().is_none());
         assert!(parse_diarized_sse_event("data: {\"type\":\"transcript.text.delta\"}").unwrap().is_none());
+    }
+
+    #[test]
+    fn decodes_crlf_and_lf_sse_events_without_joining_json() {
+        let first = "event: transcript.text.segment\r\ndata: {\"type\":\"transcript.text.segment\",\"id\":\"seg_1\",\"start\":0.0,\"end\":1.0,\"speaker\":\"A\",\"text\":\"何ですか？\"}\r\n\r\n";
+        let second = "event: transcript.text.done\ndata: {\"type\":\"transcript.text.done\",\"text\":\"何ですか？\"}\n\n";
+        let mut pending = [first.as_bytes(), second.as_bytes()].concat();
+        let first_event = take_sse_event(&mut pending).unwrap().unwrap();
+        let second_event = take_sse_event(&mut pending).unwrap().unwrap();
+        assert_eq!(parse_diarized_sse_event(&first_event).unwrap().unwrap().text, "何ですか？");
+        assert!(parse_diarized_sse_event(&second_event).unwrap().is_none());
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn waits_for_a_complete_crlf_delimiter_across_network_chunks() {
+        let mut pending = b"event: ping\r\ndata: {\"type\":\"ping\"}\r".to_vec();
+        assert!(take_sse_event(&mut pending).unwrap().is_none());
+        pending.extend_from_slice(b"\n\r\n");
+        assert!(take_sse_event(&mut pending).unwrap().is_some());
+        assert!(pending.is_empty());
     }
 
     #[test]

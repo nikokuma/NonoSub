@@ -2,45 +2,61 @@
 
 ## Trust boundary
 
-The Tauri webview never receives a stored API key. The one-time onboarding value is sent directly to a Rust command, written to the OS credential vault, cleared from UI state, and never returned. All later OpenAI authorization is constructed in Rust.
+The Tauri webviews never receive a stored API key. The onboarding value goes directly to a Rust command, is written to the operating-system credential vault, is cleared from UI state, and is never returned. Rust constructs every later OpenAI request.
 
-Rust owns:
+Rust owns credentials, scoped media access, decoding, temporary audio, ScreenCaptureKit, OpenAI HTTP/WebSocket traffic, retries, cancellation, cleanup, and the canonical session. Svelte owns video playback, the four visual surfaces, transcript/lesson interactions, and non-sensitive preferences.
 
-- credential-vault operations;
-- scoped local media access;
-- AAC demux/decode and resampling;
-- temporary WAV chunks and cleanup;
-- OpenAI HTTP/SSE requests;
-- retry/error classification and cancellation;
-- timeline normalization, boundary merge, stable internal speaker IDs, and live session events.
+## Multi-window session
 
-Svelte owns:
+One Svelte build routes by query string:
 
-- video playback and synchronization;
-- overlay/transcript/tutor rendering;
-- session-event reduction;
-- speaker display names/colors;
-- non-sensitive style and learner preferences.
+- `?surface=workbench`: setup, language routing, progress, transcript, speakers, and styling;
+- `?surface=viewer`: borderless internal video with hidden-on-idle controls;
+- `?surface=overlay`: compact transparent live-caption window;
+- `?surface=lesson`: always-on-top Nono chalkboard.
 
-## Canonical flow
+Rust's `SessionSnapshot` is authoritative. Each window requests a snapshot, then applies sequenced `SessionEvent` envelopes. A session-ID change or event gap forces a fresh snapshot. Starting a file or live session cancels the previous mode. Preferences are local, non-sensitive, and broadcast to every open surface.
+
+The tray calls Rust directly. Closing a window hides it; quitting is explicit. macOS activation policy is `Accessory` for overlay-only operation and `Regular` while the workbench or viewer is visible.
+
+## Analyzed File flow
 
 1. `prepare_media` canonicalizes an MP4/MOV path and dynamically grants only that file to Tauri's range-capable asset protocol.
-2. `prepare_audio` decodes the default AAC track through Symphonia, averages channels to mono, linearly resamples to 16 kHz, and writes signed 16-bit WAV chunks into a process-owned temporary directory.
-3. The first target boundary is 30 seconds. Later targets are 120 seconds. Each searches ±5 seconds for the lowest 200 ms RMS window. If no suitable boundary can be selected, the next chunk overlaps by 1.5 seconds.
-4. `start_analysis` streams each upload through `gpt-4o-transcribe-diarize` using `diarized_json`, Japanese guidance, and automatic server chunking.
-5. Finalized local timestamps receive the chunk's global offset. Boundary duplicates prefer the more complete text; distinct overlaps remain available for two-line stacking.
-6. A clean 2–10 second first-chunk segment per speaker becomes an internal WAV data-URL reference, up to four speakers. UI names remain separate from internal IDs.
-7. Pending lines are translated in batches of at most six. `gpt-5.6-sol` receives speaker IDs and at most 80 preceding lines, uses low reasoning, `store:false`, and a strict JSON schema.
-8. The UI starts after 15 seconds of translated coverage. It pauses below 2 seconds of lead and resumes at 8 seconds.
-9. Tutor calls include the selected line, learner level, up to 80 preceding lines, available following context, and the local question thread. Plain-text deltas stream back to the dock.
+2. `prepare_audio` decodes AAC through Symphonia, mixes to mono, resamples to 16 kHz, and writes signed 16-bit WAV chunks into a process-owned temporary directory.
+3. The first target boundary is 30 seconds and later boundaries are 120 seconds. Each searches ±5 seconds for the quietest suitable 200 ms window. The fallback overlaps by 1.5 seconds.
+4. `gpt-4o-transcribe-diarize` receives each chunk with streamed diarized JSON. Source `auto` omits a language hint; a selected source sends it.
+5. Local timestamps receive the chunk's global offset. Boundary duplicates prefer the more complete text; distinct overlaps remain available for two-line stacking.
+6. One clean 2–10 second first-chunk reference per speaker becomes an internal WAV data URL, up to four speakers. UI names remain separate from stable internal IDs.
+7. Pending lines are translated in batches of at most six. `gpt-5.6-sol` receives the language pair, speaker context, and up to 80 preceding lines with low reasoning, `store:false`, and a strict schema.
+8. Playback starts at 15 seconds of translated coverage, pauses below two seconds of lead, and resumes at eight seconds.
+9. Changing the file target reuses source segments and retranslates them without redecoding or retranscribing.
 
-## Cleanup
+## Live Captions flow
 
-`tempfile::TempDir` owns every chunk and speaker reference. Replacing/cancelling a session drops the directory. Process exit also removes it. The app never persists transcripts or tutor messages.
+Live mode is compiled only on macOS and requires macOS 14 or later.
 
-## Known Build Week risks
+1. `AsyncSCContentSharingPicker` presents Apple's native display/application/window picker.
+2. ScreenCaptureKit captures audio only at 48 kHz mono and excludes NonoSub's own process audio.
+3. A stateful converter averages adjacent float samples into 24 kHz PCM16. Approximately 100 ms is base64 encoded per message; PCM is never written to disk.
+4. Rust authenticates a WebSocket to `/v1/realtime/translations?model=gpt-realtime-translate`, configures `session.audio.output.language`, and appends audio continuously.
+5. Source and translated transcript deltas upsert one provisional `Live Audio` segment. Output completion or a quiet delta interval finalizes it.
+6. One unexpected disconnect triggers a single reconnect and a visible `reconnecting` phase. A second failure becomes recoverable rather than affecting file mode.
+7. Stop sends `session.close`, stops appending audio, drains until `session.closed` or a bounded timeout, then closes capture.
 
-- Symphonia decoding is implemented and fixture-tested at the sample/WAV layer, but original AAC sample media still needs live acceptance.
-- The known-speaker multipart representation must be confirmed against a real account response.
-- Exact long-video speaker stability and retry behavior require the planned ten-minute fixture.
-- Linear resampling is intentionally simple; it is adequate for speech transcription but a dedicated band-limited resampler remains an optional quality improvement.
+Realtime translation currently auto-detects its source language; the source override is honored by file transcription. Changing the live target stops the active stream and asks the user to restart Live Captions with the new language.
+
+## Structured lessons
+
+Clicking any finalized line selects the source utterance, opens the lesson surface, and pauses file playback through a cross-window event. Closing the lesson resumes only when the viewer had been playing. Live capture never pauses.
+
+`gpt-5.6-sol` returns a strict `LessonCard`: a one- or two-sentence speech bubble, at most three board sections with at most five short lines each, an explicit optional ambiguity note, and three follow-ups. Invalid output is retried once and never partially rendered. Cards are cached in memory by segment, learner level, and question. Follow-ups include the selected source, nearby dialogue, up to 80 preceding lines, available following context, and the local lesson thread.
+
+## Cleanup and failure isolation
+
+`tempfile::TempDir` owns file chunks and speaker references. Replacing/cancelling a session or exiting drops the directory. Live PCM is not persisted. Transcripts, speaker names, lesson cards, and chats remain memory-only.
+
+Live capture is a separate module behind `cfg(target_os = "macos")`; permission, picker, WebSocket, and capture failures surface in the workbench without changing file playback. Non-macOS builds return a clear unavailable error for live mode.
+
+## Build Week proof status
+
+Automated decoder, resampler, chunking, merge, event parsing, PCM conversion, canonical sequencing, reducer, and preference tests pass. The native app launches menu-bar-first after adding the macOS Swift runtime search path, and Nico's provided AAC-in-MOV file passes the real decoder test. User-driven ScreenCaptureKit picker/realtime latency and two-direction language acceptance remain manual gates.

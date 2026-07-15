@@ -3,6 +3,7 @@ use std::{fs::File, path::Path};
 use symphonia::core::{
     audio::sample::Sample,
     codecs::audio::AudioDecoderOptions,
+    codecs::video::well_known::CODEC_ID_HEVC,
     errors::Error as SymphoniaError,
     formats::{probe::Hint, FormatOptions, TrackType},
     io::MediaSourceStream,
@@ -15,6 +16,23 @@ pub const TARGET_SAMPLE_RATE: u32 = 16_000;
 pub struct DecodedAudio {
     pub samples: Vec<i16>,
     pub sample_rate: u32,
+}
+
+pub fn needs_macos_playback_proxy(path: &Path) -> Result<bool, String> {
+    let file = File::open(path).map_err(|error| format!("Could not inspect the video: {error}"))?;
+    let source = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
+        hint.with_extension(extension);
+    }
+    let format = symphonia::default::get_probe()
+        .probe(&hint, source, FormatOptions::default(), MetadataOptions::default())
+        .map_err(|error| format!("Unsupported or unreadable media container: {error}"))?;
+    Ok(format
+        .default_track(TrackType::Video)
+        .and_then(|track| track.codec_params.as_ref())
+        .and_then(|parameters| parameters.video())
+        .is_some_and(|parameters| parameters.codec == CODEC_ID_HEVC))
 }
 
 pub fn decode_to_mono_16k(path: &Path) -> Result<DecodedAudio, String> {
@@ -160,5 +178,11 @@ mod tests {
         let audio = decode_to_mono_16k(Path::new(&path)).expect("configured AAC fixture should decode");
         assert_eq!(audio.sample_rate, TARGET_SAMPLE_RATE);
         assert!(!audio.samples.is_empty());
+    }
+
+    #[test]
+    fn inspects_external_video_codec_when_configured() {
+        let Ok(path) = std::env::var("NONOSUB_MEDIA_FIXTURE") else { return };
+        needs_macos_playback_proxy(Path::new(&path)).expect("configured video codec should be inspectable");
     }
 }
