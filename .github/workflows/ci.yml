@@ -25,9 +25,9 @@ jobs:
       - run: pnpm build
 
   rust:
-    # ScreenCaptureKit 8's apple-metal bridge requires the newer Metal SDK to
+    # ScreenCaptureKit 8's apple-metal bridge requires the macOS 26 Metal SDK to
     # compile, while NonoSub itself remains deployable to macOS 14.
-    runs-on: macos-15
+    runs-on: macos-26
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.0"
     steps:
