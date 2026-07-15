@@ -222,13 +222,57 @@ pub struct BoardSection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BoardDemoKind {
+    None,
+    SentenceBreakdown,
+    OmittedMeaning,
+    LiteralToNatural,
+    ToneScale,
+    MiniDialogue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BoardDemoAccent {
+    Source,
+    Meaning,
+    Missing,
+    Tone,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct LessonCard {
-    pub selected_segment_id: String,
+pub struct BoardDemoItem {
+    pub label: String,
+    pub detail: String,
+    pub accent: BoardDemoAccent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BoardDemo {
+    pub kind: BoardDemoKind,
+    pub caption: Option<String>,
+    pub items: Vec<BoardDemoItem>,
+    pub result: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TeachingMoment {
     pub title: String,
     pub speech_bubble: String,
     pub board_sections: Vec<BoardSection>,
+    pub demonstration: BoardDemo,
     pub ambiguity_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LessonCard {
+    pub selected_segment_id: String,
+    pub moments: Vec<TeachingMoment>,
     pub suggested_follow_ups: Vec<String>,
 }
 

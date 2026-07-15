@@ -41,14 +41,53 @@ export const LONG_LIVE_FIXTURE_EVENTS: SessionEvent[] = [
 
 export const FIXTURE_LESSON: LessonCard = {
   selectedSegmentId: "seg-4",
-  title: "A refusal hiding in ちょっと",
-  speechBubble: "The speaker never says ‘no’ outright—the unfinished ちょっと makes the listener do the social homework.",
-  boardSections: [
-    { heading: "Literal pieces", lines: ["今日は — as for today", "ちょっと — a little…", "The ending is deliberately omitted"] },
-    { heading: "Natural meaning", lines: ["Today does not work for me.", "In this context: a soft refusal"] },
-    { heading: "Why it sounds polite", lines: ["A blunt negative is avoided", "The pause invites the listener to infer it"] },
+  moments: [
+    {
+      title: "The sentence leaves a blank",
+      speechBubble: "The speaker stops before the awkward part, but the listener can still hear the refusal hiding in the silence. Sneaky, but polite.",
+      boardSections: [{ heading: "What is spoken", lines: ["今日は — as for today", "ちょっと — a little…"] }],
+      demonstration: {
+        kind: "omitted_meaning",
+        caption: "The uncomfortable ending is understood, not spoken.",
+        items: [
+          { label: "今日は", detail: "as for today", accent: "source" },
+          { label: "ちょっと……", detail: "a little…", accent: "meaning" },
+          { label: "[行けない]", detail: "[I can't go]", accent: "missing" },
+        ],
+        result: "Today doesn't work for me.",
+      },
+      ambiguityNote: "The exact missing ending is uncertain; 行けない and 難しい are plausible readings.",
+    },
+    {
+      title: "Literal words, social meaning",
+      speechBubble: "The dictionary gives you ‘a little,’ but the conversation gives you ‘no for today.’ Context wins this round.",
+      boardSections: [],
+      demonstration: {
+        kind: "literal_to_natural",
+        caption: "A natural translation carries the intended refusal.",
+        items: [
+          { label: "Literal", detail: "As for today, a little…", accent: "source" },
+          { label: "Natural", detail: "Today doesn't work for me.", accent: "meaning" },
+        ],
+        result: "A soft, indirect no",
+      },
+    },
+    {
+      title: "Why the softness matters",
+      speechBubble: "Leaving the refusal unfinished protects the mood and gives the other person room to understand without being blunt.",
+      boardSections: [{ heading: "Politeness strategy", lines: ["Avoid the blunt negative", "Let the listener infer the answer"] }],
+      demonstration: {
+        kind: "tone_scale",
+        caption: "The meaning stays similar while the delivery gets gentler.",
+        items: [
+          { label: "行きません", detail: "direct refusal", accent: "tone" },
+          { label: "今日は難しいです", detail: "soft explanation", accent: "meaning" },
+          { label: "今日はちょっと……", detail: "indirect and gentle", accent: "source" },
+        ],
+        result: "More room for the listener to save face",
+      },
+    },
   ],
-  ambiguityNote: "ちょっと does not always mean no; the setup and trailing pause establish that reading here.",
   suggestedFollowUps: ["Why use んですけど?", "Could this sound rude?", "How would I refuse more directly?"],
 };
 

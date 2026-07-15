@@ -269,7 +269,7 @@ impl OpenAiClient {
             "reasoning": { "effort": "low" },
             "store": false,
             "input": [
-                { "role": "system", "content": [{ "type": "input_text", "text": "You are Nono, an accurate language tutor. Teach the source utterance in the requested explanation language at the learner's level. Cover only the grammar, literal versus natural meaning, tone, politeness, omitted information, or culture relevant to the question. Preserve source quotations exactly. Explicitly mark ambiguity instead of inventing certainty. Accuracy comes first; add at most one light cute, playful, slightly bratty aside. Keep the speech bubble to one or two sentences, use at most three board sections with at most five short lines each, and return three useful follow-up prompts." }] },
+                { "role": "system", "content": [{ "type": "input_text", "text": "You are Nono, an accurate language tutor. Teach the source utterance in the requested explanation language at the learner's level. Preserve source quotations exactly and explicitly mark ambiguity instead of inventing certainty. Accuracy comes first; add at most one light cute, playful, slightly bratty aside. Return one focused teaching moment when that is enough, and two or three ordered moments only when distinct concepts are genuinely necessary. Never overload one moment or repeat a concept across moments. Each speech bubble is one or two sentences. Each moment may use at most two compact board sections with at most four short lines each and one optional deterministic demonstration. Choose sentence_breakdown for phrase-to-meaning pieces, omitted_meaning for an understood blank, literal_to_natural for a meaning transformation, tone_scale for direct-to-soft comparisons, mini_dialogue for a short contextual exchange, or none when prose is clearer. Demonstration items use label for the visible source/speaker/scale point and detail for its meaning or line; result is the takeaway. Return three useful follow-up prompts for the complete lesson." }] },
                 { "role": "user", "content": [{ "type": "input_text", "text": serde_json::to_string(lesson_context).unwrap_or_default() }] }
             ],
             "text": { "format": {
@@ -280,25 +280,61 @@ impl OpenAiClient {
                     "type": "object",
                     "properties": {
                         "selectedSegmentId": { "type": "string" },
-                        "title": { "type": "string" },
-                        "speechBubble": { "type": "string" },
-                        "boardSections": {
+                        "moments": {
                             "type": "array",
+                            "minItems": 1,
                             "maxItems": 3,
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "heading": { "type": "string" },
-                                    "lines": { "type": "array", "maxItems": 5, "items": { "type": "string" } }
+                                    "title": { "type": "string" },
+                                    "speechBubble": { "type": "string" },
+                                    "boardSections": {
+                                        "type": "array",
+                                        "maxItems": 2,
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "heading": { "type": "string" },
+                                                "lines": { "type": "array", "minItems": 1, "maxItems": 4, "items": { "type": "string" } }
+                                            },
+                                            "required": ["heading", "lines"],
+                                            "additionalProperties": false
+                                        }
+                                    },
+                                    "demonstration": {
+                                        "type": "object",
+                                        "properties": {
+                                            "kind": { "type": "string", "enum": ["none", "sentence_breakdown", "omitted_meaning", "literal_to_natural", "tone_scale", "mini_dialogue"] },
+                                            "caption": { "type": ["string", "null"] },
+                                            "items": {
+                                                "type": "array",
+                                                "maxItems": 5,
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "label": { "type": "string" },
+                                                        "detail": { "type": "string" },
+                                                        "accent": { "type": "string", "enum": ["source", "meaning", "missing", "tone"] }
+                                                    },
+                                                    "required": ["label", "detail", "accent"],
+                                                    "additionalProperties": false
+                                                }
+                                            },
+                                            "result": { "type": ["string", "null"] }
+                                        },
+                                        "required": ["kind", "caption", "items", "result"],
+                                        "additionalProperties": false
+                                    },
+                                    "ambiguityNote": { "type": ["string", "null"] }
                                 },
-                                "required": ["heading", "lines"],
+                                "required": ["title", "speechBubble", "boardSections", "demonstration", "ambiguityNote"],
                                 "additionalProperties": false
                             }
                         },
-                        "ambiguityNote": { "type": ["string", "null"] },
                         "suggestedFollowUps": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "string" } }
                     },
-                    "required": ["selectedSegmentId", "title", "speechBubble", "boardSections", "ambiguityNote", "suggestedFollowUps"],
+                    "required": ["selectedSegmentId", "moments", "suggestedFollowUps"],
                     "additionalProperties": false
                 }
             } }
@@ -364,14 +400,40 @@ fn malformed_transcription_stream(detail: &str) -> ApiError {
 }
 
 fn validate_lesson_card(card: LessonCard) -> Result<LessonCard, ApiError> {
-    let invalid = card.title.trim().is_empty()
-        || card.speech_bubble.trim().is_empty()
-        || card.board_sections.is_empty()
-        || card.board_sections.len() > 3
-        || card.board_sections.iter().any(|section| {
-            section.heading.trim().is_empty() || section.lines.is_empty() || section.lines.len() > 5
+    let invalid = card.selected_segment_id.trim().is_empty()
+        || card.moments.is_empty()
+        || card.moments.len() > 3
+        || card.moments.iter().any(|moment| {
+            moment.title.trim().is_empty()
+                || moment.speech_bubble.trim().is_empty()
+                || moment.board_sections.len() > 2
+                || moment.board_sections.iter().any(|section| {
+                    section.heading.trim().is_empty()
+                        || section.lines.is_empty()
+                        || section.lines.len() > 4
+                        || section.lines.iter().any(|line| line.trim().is_empty())
+                })
+                || moment.demonstration.items.len() > 5
+                || moment
+                    .demonstration
+                    .items
+                    .iter()
+                    .any(|item| item.label.trim().is_empty() || item.detail.trim().is_empty())
+                || (matches!(
+                    moment.demonstration.kind,
+                    crate::contracts::BoardDemoKind::None
+                ) && (moment.board_sections.is_empty()
+                    || !moment.demonstration.items.is_empty()))
+                || (!matches!(
+                    moment.demonstration.kind,
+                    crate::contracts::BoardDemoKind::None
+                ) && moment.demonstration.items.is_empty())
         })
-        || card.suggested_follow_ups.len() != 3;
+        || card.suggested_follow_ups.len() != 3
+        || card
+            .suggested_follow_ups
+            .iter()
+            .any(|prompt| prompt.trim().is_empty());
     if invalid {
         Err(ApiError {
             kind: ApiErrorKind::MalformedResponse,
@@ -527,6 +589,9 @@ fn network_error(error: reqwest::Error) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contracts::{
+        BoardDemo, BoardDemoAccent, BoardDemoItem, BoardDemoKind, BoardSection, TeachingMoment,
+    };
 
     #[test]
     fn parses_finalized_diarized_segment_event() {
@@ -622,5 +687,58 @@ mod tests {
         let debug = format!("{form:?}");
         assert!(debug.contains("language"));
         assert!(!debug.contains("prompt"));
+    }
+
+    #[test]
+    fn accepts_a_focused_multi_moment_lesson_deck() {
+        let moment = TeachingMoment {
+            title: "The missing ending".into(),
+            speech_bubble: "The listener fills in the refusal.".into(),
+            board_sections: vec![BoardSection {
+                heading: "Spoken".into(),
+                lines: vec!["今日はちょっと……".into()],
+            }],
+            demonstration: BoardDemo {
+                kind: BoardDemoKind::OmittedMeaning,
+                caption: Some("The ending stays unspoken.".into()),
+                items: vec![BoardDemoItem {
+                    label: "[行けない]".into(),
+                    detail: "[I cannot go]".into(),
+                    accent: BoardDemoAccent::Missing,
+                }],
+                result: Some("Today does not work for me.".into()),
+            },
+            ambiguity_note: None,
+        };
+        let card = LessonCard {
+            selected_segment_id: "seg-4".into(),
+            moments: vec![moment.clone(), moment],
+            suggested_follow_ups: vec!["One?".into(), "Two?".into(), "Three?".into()],
+        };
+        assert!(validate_lesson_card(card).is_ok());
+    }
+
+    #[test]
+    fn rejects_an_empty_or_overloaded_lesson_moment() {
+        let card = LessonCard {
+            selected_segment_id: "seg-4".into(),
+            moments: vec![TeachingMoment {
+                title: "Too much".into(),
+                speech_bubble: "This board is overloaded.".into(),
+                board_sections: vec![BoardSection {
+                    heading: "Crowded".into(),
+                    lines: vec!["1".into(), "2".into(), "3".into(), "4".into(), "5".into()],
+                }],
+                demonstration: BoardDemo {
+                    kind: BoardDemoKind::None,
+                    caption: None,
+                    items: Vec::new(),
+                    result: None,
+                },
+                ambiguity_note: None,
+            }],
+            suggested_follow_ups: vec!["One?".into(), "Two?".into(), "Three?".into()],
+        };
+        assert!(validate_lesson_card(card).is_err());
     }
 }

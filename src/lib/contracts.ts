@@ -74,12 +74,33 @@ export interface BoardSection {
   lines: string[];
 }
 
-export interface LessonCard {
-  selectedSegmentId: string;
+export type BoardDemoKind = "none" | "sentence_breakdown" | "omitted_meaning" | "literal_to_natural" | "tone_scale" | "mini_dialogue";
+export type BoardDemoAccent = "source" | "meaning" | "missing" | "tone";
+
+export interface BoardDemoItem {
+  label: string;
+  detail: string;
+  accent: BoardDemoAccent;
+}
+
+export interface BoardDemo {
+  kind: BoardDemoKind;
+  caption?: string;
+  items: BoardDemoItem[];
+  result?: string;
+}
+
+export interface TeachingMoment {
   title: string;
   speechBubble: string;
   boardSections: BoardSection[];
+  demonstration: BoardDemo;
   ambiguityNote?: string;
+}
+
+export interface LessonCard {
+  selectedSegmentId: string;
+  moments: TeachingMoment[];
   suggestedFollowUps: string[];
 }
 

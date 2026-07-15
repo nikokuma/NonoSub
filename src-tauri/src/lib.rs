@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 mod chunking;
 mod contracts;
 #[cfg(target_os = "macos")]

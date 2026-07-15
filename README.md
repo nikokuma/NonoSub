@@ -14,7 +14,7 @@ The repository currently contains:
 - local MP4/MOV playback through Tauri's range-capable scoped asset protocol;
 - generalized source, subtitle, and explanation languages with an in-memory canonical session shared across every window;
 - synchronized bilingual overlays, transcript history, click-to-pause/resume ownership, speaker rename/color, persistent placement, and six subtitle presets;
-- Beginner, Intermediate, and Advanced structured chalkboard lessons with scroll-preserving follow-up history;
+- Beginner, Intermediate, and Advanced progressive chalkboard lessons with one-to-three focused teaching moments, deterministic diagrams, and scroll-preserving follow-up history;
 - a Three.js Nono presentation with a complete text fallback;
 - OS credential-vault storage for the OpenAI key, a non-sensitive local configured marker, and live model-access validation;
 - pure-Rust MP4/MOV AAC decoding, mono 16 kHz WAV conversion, silence-aware chunking, and temporary-file cleanup;

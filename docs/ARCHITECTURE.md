@@ -50,7 +50,9 @@ Realtime translation currently auto-detects its source language; the source over
 
 Clicking any finalized line selects the source utterance, opens the lesson surface, and pauses file playback through a cross-window event. Closing the lesson resumes only when the viewer had been playing. Live capture never pauses.
 
-`gpt-5.6-sol` returns a strict `LessonCard`: a one- or two-sentence speech bubble, at most three board sections with at most five short lines each, an explicit optional ambiguity note, and three follow-ups. Invalid output is retried once and never partially rendered. Cards are cached in memory by segment, learner level, and question. Follow-ups include the selected source, nearby dialogue, up to 80 preceding lines, available following context, and the local lesson thread.
+`gpt-5.6-sol` returns a strict `LessonCard` deck with one to three ordered teaching moments. Nono presents exactly one moment at a time; each has a short speech bubble, at most two compact text sections, an optional ambiguity note, and one bounded demonstration chosen from sentence breakdown, omitted meaning, literal-to-natural, tone scale, mini dialogue, or none. GPT supplies semantic labels and teaching content, while Svelte owns every coordinate, style, arrow, animation, Next/Skip control, and progress marker.
+
+Follow-up questions begin the API request while the current board erases, then hold a thinking state until the complete validated deck is ready and animate the next moment into place. Invalid output is retried once and never partially rendered; a failed request restores the previous board. Decks are cached in memory by segment, learner level, and question. Follow-ups include the selected source, nearby dialogue, up to 80 preceding lines, available following context, and the local lesson thread.
 
 ## Cleanup and failure isolation
 
