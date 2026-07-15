@@ -44,14 +44,10 @@
     void subscribeSession(() => session, (value) => session = value).then((unlisten) => cleanup.push(unlisten));
     void subscribePreferences((value) => preferences = value).then((unlisten) => cleanup.push(unlisten));
     if (isTauri()) {
-      void invoke<{ present: boolean }>("api_key_status").then(async (status) => {
+      void invoke<{ present: boolean }>("api_key_status").then((status) => {
         onboarding = !status.present;
-        if (!status.present) return;
-        try {
-          const readiness = await invoke<ModelReadiness>("validate_model_access");
-          apiReady = readiness.file;
-          liveReady = readiness.live;
-        } catch (error) { apiMessage = errorMessage(error); }
+        apiReady = status.present;
+        liveReady = status.present;
       });
       void listen<string>("tray-action", ({ payload }) => {
         if (payload === "open_video") void chooseMedia();

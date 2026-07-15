@@ -55,9 +55,16 @@
 - Re-ran `JpTestFemale.mov` through the native Open Video flow after the parser fix. The real pipeline completed without the malformed-JSON error and produced three diarized Japanese segments, three contextual English translations, and a validated Beginner chalkboard lesson from the first transcript line.
 - The native proof also isolated HEVC playback: WebKit advanced the iPhone `.mov` timeline but rendered black, while an H.264 control rendered correctly. NonoSub now detects HEVC with Symphonia and creates a temporary 720p H.264/AAC playback proxy using macOS `avconvert`; the original file remains the transcription source, metadata is filtered, scoped access is limited to the proxy, and the proxy is deleted with the session.
 - Re-ran the untouched `JpTestFemale.mov` after the compatibility change. Its frames, translated overlay, and correct `0:17` duration all rendered in the internal viewer.
+- Checkpointed the implementation in the public GitHub repository on `codex/invisible-viewer-checkpoint` and opened draft PR #1.
+- Built the original 24-second six-turn indirect-refusal fixture from Nico's supplied synthetic Japanese clips, plus a 58-second English-source fixture for reverse-direction acceptance. Both use original NonoSub visuals and have reproducible scripts.
+- Added punctuation-aware splitting for paragraph-sized finalized file turns. Splitting happens before GPT translation, creates contiguous proportional timestamps, and retains every line as an independent lesson target. Focused Japanese regression coverage brings the Rust suite to 25 tests.
+- Removed credential-vault reads from app launch and API-status checks. A non-sensitive local configured marker controls onboarding, while the key remains in Keychain and is fetched only for an explicit model operation. Debug builds also support a process-only `OPENAI_API_KEY` fallback so changing ad-hoc signatures do not block automation; release builds compile it out.
+- Rebuilt and used Computer Use to confirm the fresh native app reaches onboarding without presenting a macOS Keychain password sheet.
+- Rebuilt the current unsigned Apple Silicon `.dmg` and `.app.zip`, confirmed the app is ad-hoc signed with no Team ID, recorded SHA-256 hashes locally, and added exact judge, Gatekeeper, fixture, and source-build instructions.
 
 ### Remaining July 14 manual proof
 
 - [x] Select a real application in Apple's ScreenCaptureKit picker and confirm first realtime subtitles.
 - [ ] Confirm Japanese→English and English→Japanese live translation latency/quality.
 - [ ] Approve the new minimal viewer, compact overlay, chalkboard lesson, and Wired workbench in the native app.
+- [ ] Re-enter the API key once in a stable build, or provide it as a debug-process environment variable, for the remaining paid reverse-direction smoke.

@@ -2,7 +2,7 @@
 
 ## Trust boundary
 
-The Tauri webviews never receive a stored API key. The onboarding value goes directly to a Rust command, is written to the operating-system credential vault, is cleared from UI state, and is never returned. Rust constructs every later OpenAI request.
+The Tauri webviews never receive a stored API key. The onboarding value goes directly to a Rust command, is written to the operating-system credential vault, is cleared from UI state, and is never returned. A separate local marker stores only that setup completed; startup and status checks use that marker and never open Keychain. This prevents changing ad-hoc development builds from blocking launch behind a macOS password sheet. Rust constructs every later OpenAI request. Debug builds may read `OPENAI_API_KEY` from their process environment for local automation; release builds compile out that fallback.
 
 Rust owns credentials, scoped media access, decoding, temporary audio, ScreenCaptureKit, OpenAI HTTP/WebSocket traffic, retries, cancellation, cleanup, and the canonical session. Svelte owns video playback, the four visual surfaces, transcript/lesson interactions, and non-sensitive preferences.
 
@@ -26,10 +26,11 @@ The tray calls Rust directly. Closing a window hides it; quitting is explicit. m
 3. The first target boundary is 30 seconds and later boundaries are 120 seconds. Each searches ±5 seconds for the quietest suitable 200 ms window. The fallback overlaps by 1.5 seconds.
 4. `gpt-4o-transcribe-diarize` receives each chunk with streamed diarized JSON. Source `auto` omits a language hint; a selected source sends it.
 5. Local timestamps receive the chunk's global offset. Boundary duplicates prefer the more complete text; distinct overlaps remain available for two-line stacking.
-6. One clean 2–10 second first-chunk reference per speaker becomes an internal WAV data URL, up to four speakers. UI names remain separate from stable internal IDs.
-7. Pending lines are translated in batches of at most six. `gpt-5.6-sol` receives the language pair, speaker context, and up to 80 preceding lines with low reasoning, `store:false`, and a strict schema.
-8. Playback starts at 15 seconds of translated coverage, pauses below two seconds of lead, and resumes at eight seconds.
-9. Changing the file target reuses source segments and retranslates them without redecoding or retranscribing.
+6. Paragraph-sized turns are split at punctuation or whitespace into display-sized units. Their timestamps are allocated proportionally before translation, preserving click targets and contextual translation while preventing wall-of-text overlays.
+7. One clean 2–10 second first-chunk reference per speaker becomes an internal WAV data URL, up to four speakers. UI names remain separate from stable internal IDs.
+8. Pending lines are translated in batches of at most six. `gpt-5.6-sol` receives the language pair, speaker context, and up to 80 preceding lines with low reasoning, `store:false`, and a strict schema.
+9. Playback starts at 15 seconds of translated coverage, pauses below two seconds of lead, and resumes at eight seconds.
+10. Changing the file target reuses source segments and retranslates them without redecoding or retranscribing.
 
 ## Live Captions flow
 
@@ -59,4 +60,4 @@ Live capture is a separate module behind `cfg(target_os = "macos")`; permission,
 
 ## Build Week proof status
 
-Automated decoder, resampler, chunking, merge, event parsing, PCM conversion, canonical sequencing, reducer, and preference tests pass. The native app launches menu-bar-first after adding the macOS Swift runtime search path, and Nico's provided AAC-in-MOV file passes the real decoder test. User-driven ScreenCaptureKit picker/realtime latency and two-direction language acceptance remain manual gates.
+Automated decoder, resampler, chunking, readable-turn splitting, merge, event parsing, PCM conversion, canonical sequencing, reducer, and preference tests pass. The native app launches without touching Keychain, and Nico's AAC-in-MOV file passes the real decoder and Japanese→English file pipeline. ScreenCaptureKit Japanese→English capture is proven; reverse-direction quality and longer speaker-continuity acceptance remain manual gates.

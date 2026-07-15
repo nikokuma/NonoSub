@@ -1,19 +1,30 @@
 use crate::{
-    contracts::{LanguageSettings, RecoverableError, SegmentStatus, SessionEvent, SessionMode, SubtitleSegment},
+    contracts::{
+        LanguageSettings, RecoverableError, SegmentStatus, SessionEvent, SessionMode,
+        SubtitleSegment,
+    },
     openai::{ApiError, ApiErrorKind},
     record_event,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use futures_util::{stream::{SplitSink, SplitStream}, SinkExt, StreamExt};
+use futures_util::{
+    stream::{SplitSink, SplitStream},
+    SinkExt, StreamExt,
+};
 use screencapturekit::{
     async_api::{AsyncSCContentSharingPicker, AsyncSCStream},
     cm::CMSampleBufferExt,
-    content_sharing_picker::{SCContentSharingPickerConfiguration, SCContentSharingPickerMode, SCPickerOutcome},
+    content_sharing_picker::{
+        SCContentSharingPickerConfiguration, SCContentSharingPickerMode, SCPickerOutcome,
+    },
     stream::{configuration::SCStreamConfiguration, output_type::SCStreamOutputType},
 };
 use serde_json::{json, Value};
 use std::{
-    sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 use tokio_tungstenite::{
@@ -22,7 +33,8 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream,
 };
 
-const REALTIME_URL: &str = "wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate";
+const REALTIME_URL: &str =
+    "wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate";
 const SEND_SAMPLES: usize = 2_400;
 type RealtimeSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 type RealtimeWriter = SplitSink<RealtimeSocket, Message>;
@@ -91,11 +103,16 @@ impl CaptionAssembler {
             start_ms: self.segment_started_ms,
             end_ms: self.elapsed_ms().max(self.segment_started_ms + 250),
             source_text: self.source.trim().to_owned(),
-            translation_text: (!self.translation.trim().is_empty()).then(|| self.translation.trim().to_owned()),
+            translation_text: (!self.translation.trim().is_empty())
+                .then(|| self.translation.trim().to_owned()),
             ambiguity_note: None,
             speaker_id: Some("live-audio".into()),
             is_provisional: provisional,
-            transcription_status: if provisional { SegmentStatus::Pending } else { SegmentStatus::Complete },
+            transcription_status: if provisional {
+                SegmentStatus::Pending
+            } else {
+                SegmentStatus::Complete
+            },
             translation_status: if provisional || self.translation.trim().is_empty() {
                 SegmentStatus::Pending
             } else {
@@ -105,7 +122,9 @@ impl CaptionAssembler {
     }
 
     fn finish(&mut self) -> Option<SubtitleSegment> {
-        if !self.has_text() { return None; }
+        if !self.has_text() {
+            return None;
+        }
         let segment = self.segment(false);
         self.segment_index += 1;
         self.segment_started_ms = segment.end_ms;
@@ -127,19 +146,25 @@ pub async fn start(
     let mut picker_config = SCContentSharingPickerConfiguration::new();
     picker_config.set_allows_changing_selected_content(false);
     picker_config.set_allowed_picker_modes(&[
-            SCContentSharingPickerMode::SingleDisplay,
-            SCContentSharingPickerMode::SingleApplication,
-            SCContentSharingPickerMode::SingleWindow,
-        ]);
+        SCContentSharingPickerMode::SingleDisplay,
+        SCContentSharingPickerMode::SingleApplication,
+        SCContentSharingPickerMode::SingleWindow,
+    ]);
     let picked = AsyncSCContentSharingPicker::show(&picker_config).await;
     let filter = match picked {
         SCPickerOutcome::Picked(result) => result.filter(),
-        SCPickerOutcome::Cancelled => return Err(ApiError {
-            kind: ApiErrorKind::Service,
-            message: "Live caption selection was cancelled.".into(),
-            retryable: true,
-        }),
-        SCPickerOutcome::Error(error) => return Err(capture_error(&format!("Apple's capture picker failed: {error}"))),
+        SCPickerOutcome::Cancelled => {
+            return Err(ApiError {
+                kind: ApiErrorKind::Service,
+                message: "Live caption selection was cancelled.".into(),
+                retryable: true,
+            })
+        }
+        SCPickerOutcome::Error(error) => {
+            return Err(capture_error(&format!(
+                "Apple's capture picker failed: {error}"
+            )))
+        }
     };
 
     let config = SCStreamConfiguration::new()
@@ -151,9 +176,15 @@ pub async fn start(
 
     let (mut writer, mut reader) = connect_translation(&api_key, &languages.target).await?;
 
-    stream.start_capture().await
-        .map_err(|error| capture_error(&format!("System audio capture could not start: {error}")))?;
-    let _ = record_event(&app, SessionEvent::PhaseChanged { phase: "buffering".into() });
+    stream.start_capture().await.map_err(|error| {
+        capture_error(&format!("System audio capture could not start: {error}"))
+    })?;
+    let _ = record_event(
+        &app,
+        SessionEvent::PhaseChanged {
+            phase: "buffering".into(),
+        },
+    );
 
     let cancelled = state.cancelled.clone();
     let task = tauri::async_runtime::spawn(async move {
@@ -170,9 +201,17 @@ pub async fn start(
             if cancelled.load(Ordering::Relaxed) && !closing {
                 closing = true;
                 close_started = Some(Instant::now());
-                let _ = writer.send(Message::Text(json!({ "type": "session.close" }).to_string().into())).await;
+                let _ = writer
+                    .send(Message::Text(
+                        json!({ "type": "session.close" }).to_string().into(),
+                    ))
+                    .await;
             }
-            if closed || close_started.is_some_and(|started| started.elapsed() > Duration::from_secs(2)) { break; }
+            if closed
+                || close_started.is_some_and(|started| started.elapsed() > Duration::from_secs(2))
+            {
+                break;
+            }
 
             tokio::select! {
                 sample = stream.next(), if !closing => {
@@ -298,7 +337,10 @@ pub async fn start(
         let _ = stream.stop_capture().await;
         let _ = record_event(&app, SessionEvent::Complete);
     });
-    *state.task.lock().map_err(|_| capture_error("Live task state is unavailable."))? = Some(task);
+    *state
+        .task
+        .lock()
+        .map_err(|_| capture_error("Live task state is unavailable."))? = Some(task);
     Ok(())
 }
 
@@ -309,23 +351,39 @@ pub fn stop(state: &LiveState) {
 fn abort_previous(state: &LiveState) {
     state.cancelled.store(true, Ordering::Relaxed);
     if let Ok(mut task) = state.task.lock() {
-        if let Some(task) = task.take() { task.abort(); }
+        if let Some(task) = task.take() {
+            task.abort();
+        }
     }
 }
 
-async fn connect_translation(api_key: &str, target: &str) -> Result<(RealtimeWriter, RealtimeReader), ApiError> {
-    let mut request = REALTIME_URL.into_client_request()
-        .map_err(|error| network_error(&format!("Could not prepare realtime connection: {error}")))?;
+async fn connect_translation(
+    api_key: &str,
+    target: &str,
+) -> Result<(RealtimeWriter, RealtimeReader), ApiError> {
+    let mut request = REALTIME_URL.into_client_request().map_err(|error| {
+        network_error(&format!("Could not prepare realtime connection: {error}"))
+    })?;
     request.headers_mut().insert(
         "Authorization",
-        format!("Bearer {api_key}").parse()
+        format!("Bearer {api_key}")
+            .parse()
             .map_err(|_| network_error("Could not authorize the realtime connection."))?,
     );
-    let (socket, _) = connect_async(request).await
-        .map_err(|error| network_error(&format!("Could not connect realtime translation: {error}")))?;
+    let (socket, _) = connect_async(request).await.map_err(|error| {
+        network_error(&format!("Could not connect realtime translation: {error}"))
+    })?;
     let (mut writer, reader) = socket.split();
-    writer.send(Message::Text(realtime_session_update(target).to_string().into())).await
-        .map_err(|error| network_error(&format!("Could not configure realtime translation: {error}")))?;
+    writer
+        .send(Message::Text(
+            realtime_session_update(target).to_string().into(),
+        ))
+        .await
+        .map_err(|error| {
+            network_error(&format!(
+                "Could not configure realtime translation: {error}"
+            ))
+        })?;
     Ok((writer, reader))
 }
 
@@ -344,8 +402,12 @@ fn realtime_session_update(target: &str) -> Value {
 fn append_f32_48k_as_pcm16_24k(bytes: &[u8], output: &mut Vec<i16>) {
     let mut frames = bytes.chunks_exact(4);
     loop {
-        let Some(first) = frames.next() else { break; };
-        let Some(second) = frames.next() else { break; };
+        let Some(first) = frames.next() else {
+            break;
+        };
+        let Some(second) = frames.next() else {
+            break;
+        };
         let a = f32::from_ne_bytes(first.try_into().expect("four-byte float"));
         let b = f32::from_ne_bytes(second.try_into().expect("four-byte float"));
         let averaged = ((a + b) * 0.5).clamp(-1.0, 1.0);
@@ -354,34 +416,75 @@ fn append_f32_48k_as_pcm16_24k(bytes: &[u8], output: &mut Vec<i16>) {
 }
 
 fn parse_realtime_event(text: &str) -> RealtimeEvent {
-    let Ok(value) = serde_json::from_str::<Value>(text) else { return RealtimeEvent::Ignored; };
-    let event_type = value.get("type").and_then(Value::as_str).unwrap_or_default();
-    let delta = || value.get("delta").and_then(Value::as_str).unwrap_or_default().to_owned();
-    let transcript = || value.get("transcript").or_else(|| value.get("text")).and_then(Value::as_str).map(str::to_owned);
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return RealtimeEvent::Ignored;
+    };
+    let event_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let delta = || {
+        value
+            .get("delta")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let transcript = || {
+        value
+            .get("transcript")
+            .or_else(|| value.get("text"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
     match event_type {
         "session.input_transcript.delta" => RealtimeEvent::SourceDelta(delta()),
         "session.output_transcript.delta" => RealtimeEvent::TranslationDelta(delta()),
-        "session.input_transcript.done" | "session.input_transcript.completed" => RealtimeEvent::SourceDone(transcript()),
-        "session.output_transcript.done" | "session.output_transcript.completed" => RealtimeEvent::TranslationDone(transcript()),
+        "session.input_transcript.done" | "session.input_transcript.completed" => {
+            RealtimeEvent::SourceDone(transcript())
+        }
+        "session.output_transcript.done" | "session.output_transcript.completed" => {
+            RealtimeEvent::TranslationDone(transcript())
+        }
         "session.closed" => RealtimeEvent::Closed,
-        "error" => RealtimeEvent::Error(value.pointer("/error/message").and_then(Value::as_str)
-            .unwrap_or("Realtime translation reported an error.").to_owned()),
+        "error" => RealtimeEvent::Error(
+            value
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .unwrap_or("Realtime translation reported an error.")
+                .to_owned(),
+        ),
         _ => RealtimeEvent::Ignored,
     }
 }
 
 fn emit_recoverable(app: &tauri::AppHandle, code: &str, message: &str) {
-    let _ = record_event(app, SessionEvent::RecoverableError { error: RecoverableError {
-        code: code.into(), message: message.into(), segment_id: None,
-    }});
+    let _ = record_event(
+        app,
+        SessionEvent::RecoverableError {
+            error: RecoverableError {
+                code: code.into(),
+                message: message.into(),
+                segment_id: None,
+            },
+        },
+    );
 }
 
 fn capture_error(message: &str) -> ApiError {
-    ApiError { kind: ApiErrorKind::Service, message: message.into(), retryable: true }
+    ApiError {
+        kind: ApiErrorKind::Service,
+        message: message.into(),
+        retryable: true,
+    }
 }
 
 fn network_error(message: &str) -> ApiError {
-    ApiError { kind: ApiErrorKind::Network, message: message.into(), retryable: true }
+    ApiError {
+        kind: ApiErrorKind::Network,
+        message: message.into(),
+        retryable: true,
+    }
 }
 
 #[cfg(test)]
@@ -390,7 +493,10 @@ mod tests {
 
     #[test]
     fn converts_48k_float_audio_to_continuous_24k_pcm16() {
-        let input: Vec<u8> = [0.5_f32, 0.5, -2.0, -2.0].into_iter().flat_map(f32::to_ne_bytes).collect();
+        let input: Vec<u8> = [0.5_f32, 0.5, -2.0, -2.0]
+            .into_iter()
+            .flat_map(f32::to_ne_bytes)
+            .collect();
         let mut output = Vec::new();
         append_f32_48k_as_pcm16_24k(&input, &mut output);
         assert_eq!(output.len(), 2);
@@ -417,7 +523,10 @@ mod tests {
     #[test]
     fn requests_source_transcripts_for_bilingual_live_captions() {
         let event = realtime_session_update("ja");
-        assert_eq!(event["session"]["audio"]["input"]["transcription"]["model"], "gpt-realtime-whisper");
+        assert_eq!(
+            event["session"]["audio"]["input"]["transcription"]["model"],
+            "gpt-realtime-whisper"
+        );
         assert_eq!(event["session"]["audio"]["output"]["language"], "ja");
     }
 }

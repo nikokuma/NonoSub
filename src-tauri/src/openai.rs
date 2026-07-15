@@ -135,7 +135,11 @@ impl OpenAiClient {
         let file = multipart::Part::bytes(bytes)
             .file_name("chunk.wav")
             .mime_str("audio/wav")
-            .map_err(|error| ApiError { kind: ApiErrorKind::Service, message: error.to_string(), retryable: false })?;
+            .map_err(|error| ApiError {
+                kind: ApiErrorKind::Service,
+                message: error.to_string(),
+                retryable: false,
+            })?;
         let mut form = multipart::Form::new()
             .part("file", file)
             .text("model", TRANSCRIPTION_MODEL)
@@ -143,14 +147,33 @@ impl OpenAiClient {
             .text("stream", "true")
             .text("chunking_strategy", "auto");
         if source_language != "auto" {
-            form = form
-                .text("language", source_language.to_owned())
-                .text("prompt", "Preserve the source language, punctuation, hesitations, and unfinished phrases.");
+            form = form.text("language", source_language.to_owned()).text(
+                "prompt",
+                "Preserve the source language, punctuation, hesitations, and unfinished phrases.",
+            );
         }
         if !references.is_empty() {
             form = form
-                .text("known_speaker_names", serde_json::to_string(&references.iter().map(|reference| &reference.name).collect::<Vec<_>>()).unwrap_or_default())
-                .text("known_speaker_references", serde_json::to_string(&references.iter().map(|reference| &reference.data_url).collect::<Vec<_>>()).unwrap_or_default());
+                .text(
+                    "known_speaker_names",
+                    serde_json::to_string(
+                        &references
+                            .iter()
+                            .map(|reference| &reference.name)
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap_or_default(),
+                )
+                .text(
+                    "known_speaker_references",
+                    serde_json::to_string(
+                        &references
+                            .iter()
+                            .map(|reference| &reference.data_url)
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap_or_default(),
+                );
         }
         let response = self
             .http
@@ -177,7 +200,8 @@ impl OpenAiClient {
             }
         }
         if pending.iter().any(|byte| !byte.is_ascii_whitespace()) {
-            let trailing = String::from_utf8(pending).map_err(|error| malformed_transcription_stream(&error.to_string()))?;
+            let trailing = String::from_utf8(pending)
+                .map_err(|error| malformed_transcription_stream(&error.to_string()))?;
             if let Some(segment) = parse_diarized_sse_event(&trailing)? {
                 segments.push(segment);
             }
@@ -251,11 +275,12 @@ impl OpenAiClient {
             message: "GPT-5.6 returned no structured translation text.".into(),
             retryable: true,
         })?;
-        let envelope: TranslationEnvelope = serde_json::from_str(output_text).map_err(|error| ApiError {
-            kind: ApiErrorKind::MalformedResponse,
-            message: format!("GPT-5.6 returned malformed structured translations: {error}"),
-            retryable: true,
-        })?;
+        let envelope: TranslationEnvelope =
+            serde_json::from_str(output_text).map_err(|error| ApiError {
+                kind: ApiErrorKind::MalformedResponse,
+                message: format!("GPT-5.6 returned malformed structured translations: {error}"),
+                retryable: true,
+            })?;
         Ok(envelope.translations)
     }
 
@@ -330,9 +355,19 @@ impl OpenAiClient {
 }
 
 fn take_sse_event(pending: &mut Vec<u8>) -> Result<Option<String>, ApiError> {
-    let lf = pending.windows(2).position(|window| window == b"\n\n").map(|index| (index, 2));
-    let crlf = pending.windows(4).position(|window| window == b"\r\n\r\n").map(|index| (index, 4));
-    let Some((boundary, delimiter_len)) = [lf, crlf].into_iter().flatten().min_by_key(|(index, _)| *index) else {
+    let lf = pending
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .map(|index| (index, 2));
+    let crlf = pending
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| (index, 4));
+    let Some((boundary, delimiter_len)) = [lf, crlf]
+        .into_iter()
+        .flatten()
+        .min_by_key(|(index, _)| *index)
+    else {
         return Ok(None);
     };
     let event = String::from_utf8(pending[..boundary].to_vec())
@@ -389,7 +424,11 @@ pub fn parse_diarized_sse_event(event: &str) -> Result<Option<DiarizedSegment>, 
     }
     let segment = value.get("segment").unwrap_or(&value);
     Ok(Some(DiarizedSegment {
-        id: segment.get("id").and_then(Value::as_str).unwrap_or_default().to_owned(),
+        id: segment
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
         start_seconds: required_f64(segment, "start")?,
         end_seconds: required_f64(segment, "end")?,
         text: required_string(segment, "text")?,
@@ -398,22 +437,39 @@ pub fn parse_diarized_sse_event(event: &str) -> Result<Option<DiarizedSegment>, 
 }
 
 fn required_f64(value: &Value, key: &str) -> Result<f64, ApiError> {
-    value.get(key).and_then(Value::as_f64).ok_or_else(|| malformed_field(key))
+    value
+        .get(key)
+        .and_then(Value::as_f64)
+        .ok_or_else(|| malformed_field(key))
 }
 
 fn required_string(value: &Value, key: &str) -> Result<String, ApiError> {
-    value.get(key).and_then(Value::as_str).map(str::to_owned).ok_or_else(|| malformed_field(key))
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| malformed_field(key))
 }
 
 fn malformed_field(field: &str) -> ApiError {
-    ApiError { kind: ApiErrorKind::MalformedResponse, message: format!("Transcription segment omitted {field}."), retryable: true }
+    ApiError {
+        kind: ApiErrorKind::MalformedResponse,
+        message: format!("Transcription segment omitted {field}."),
+        retryable: true,
+    }
 }
 
 pub fn extract_response_text(value: &Value) -> Option<&str> {
-    value.get("output")?
+    value
+        .get("output")?
         .as_array()?
         .iter()
-        .flat_map(|item| item.get("content").and_then(Value::as_array).into_iter().flatten())
+        .flat_map(|item| {
+            item.get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
         .find_map(|content| content.get("text").and_then(Value::as_str))
 }
 
@@ -436,7 +492,10 @@ pub fn parse_response_delta(event: &str) -> Result<Option<String>, ApiError> {
     if value.get("type").and_then(Value::as_str) != Some("response.output_text.delta") {
         return Ok(None);
     }
-    Ok(value.get("delta").and_then(Value::as_str).map(str::to_owned))
+    Ok(value
+        .get("delta")
+        .and_then(Value::as_str)
+        .map(str::to_owned))
 }
 
 async fn response_error(status: StatusCode, model: &str) -> ApiError {
@@ -445,17 +504,45 @@ async fn response_error(status: StatusCode, model: &str) -> ApiError {
 
 fn classify_status(status: StatusCode, model: &str) -> ApiError {
     let (kind, retryable, message) = match status {
-        StatusCode::UNAUTHORIZED => (ApiErrorKind::Authentication, false, "The OpenAI API key was rejected.".to_string()),
-        StatusCode::NOT_FOUND | StatusCode::FORBIDDEN => (ApiErrorKind::ModelUnavailable, false, format!("This API project cannot access {model}.")),
-        StatusCode::TOO_MANY_REQUESTS => (ApiErrorKind::RateLimited, true, "OpenAI rate-limited this request. NonoSub will retry once.".to_string()),
-        status if status.is_server_error() => (ApiErrorKind::Service, true, "OpenAI is temporarily unavailable.".to_string()),
-        _ => (ApiErrorKind::Service, false, format!("OpenAI rejected the request ({status}).")),
+        StatusCode::UNAUTHORIZED => (
+            ApiErrorKind::Authentication,
+            false,
+            "The OpenAI API key was rejected.".to_string(),
+        ),
+        StatusCode::NOT_FOUND | StatusCode::FORBIDDEN => (
+            ApiErrorKind::ModelUnavailable,
+            false,
+            format!("This API project cannot access {model}."),
+        ),
+        StatusCode::TOO_MANY_REQUESTS => (
+            ApiErrorKind::RateLimited,
+            true,
+            "OpenAI rate-limited this request. NonoSub will retry once.".to_string(),
+        ),
+        status if status.is_server_error() => (
+            ApiErrorKind::Service,
+            true,
+            "OpenAI is temporarily unavailable.".to_string(),
+        ),
+        _ => (
+            ApiErrorKind::Service,
+            false,
+            format!("OpenAI rejected the request ({status})."),
+        ),
     };
-    ApiError { kind, message, retryable }
+    ApiError {
+        kind,
+        message,
+        retryable,
+    }
 }
 
 fn network_error(error: reqwest::Error) -> ApiError {
-    ApiError { kind: ApiErrorKind::Network, message: format!("Could not reach OpenAI: {error}"), retryable: true }
+    ApiError {
+        kind: ApiErrorKind::Network,
+        message: format!("Could not reach OpenAI: {error}"),
+        retryable: true,
+    }
 }
 
 #[cfg(test)]
@@ -474,7 +561,11 @@ mod tests {
     #[test]
     fn ignores_non_segment_and_done_events() {
         assert!(parse_diarized_sse_event("data: [DONE]").unwrap().is_none());
-        assert!(parse_diarized_sse_event("data: {\"type\":\"transcript.text.delta\"}").unwrap().is_none());
+        assert!(
+            parse_diarized_sse_event("data: {\"type\":\"transcript.text.delta\"}")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -484,7 +575,13 @@ mod tests {
         let mut pending = [first.as_bytes(), second.as_bytes()].concat();
         let first_event = take_sse_event(&mut pending).unwrap().unwrap();
         let second_event = take_sse_event(&mut pending).unwrap().unwrap();
-        assert_eq!(parse_diarized_sse_event(&first_event).unwrap().unwrap().text, "何ですか？");
+        assert_eq!(
+            parse_diarized_sse_event(&first_event)
+                .unwrap()
+                .unwrap()
+                .text,
+            "何ですか？"
+        );
         assert!(parse_diarized_sse_event(&second_event).unwrap().is_none());
         assert!(pending.is_empty());
     }
@@ -500,14 +597,18 @@ mod tests {
 
     #[test]
     fn extracts_structured_output_text() {
-        let value = json!({"output":[{"content":[{"type":"output_text","text":"{\"translations\":[]}"}]}]});
+        let value =
+            json!({"output":[{"content":[{"type":"output_text","text":"{\"translations\":[]}"}]}]});
         assert_eq!(extract_response_text(&value), Some("{\"translations\":[]}"));
     }
 
     #[test]
     fn parses_tutor_text_delta() {
         let event = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"何 means what.\"}";
-        assert_eq!(parse_response_delta(event).unwrap(), Some("何 means what.".into()));
+        assert_eq!(
+            parse_response_delta(event).unwrap(),
+            Some("何 means what.".into())
+        );
     }
 
     #[test]

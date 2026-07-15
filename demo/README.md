@@ -15,3 +15,26 @@ Rebuild it on macOS with FFmpeg:
 ```
 
 The generated media is test/demo material. The repository's MIT license applies to the fixture-building script; use of synthetic voice output remains subject to the applicable OpenAI terms.
+
+## Indirect-refusal demo fixture
+
+`NonoSubIndirectRefusalDemo.mp4` is the primary teaching fixture. It uses six separately recorded synthetic Japanese turns—three per speaker—assembled over original NonoSub test-card visuals with no source subtitles baked into the video.
+
+The dialogue is the Build Week teaching script centered on `今日はちょっと……` as a context-dependent indirect refusal. Rebuild it with:
+
+```bash
+./scripts/build_indirect_refusal_fixture.sh \
+  /path/to/jp-a-01.mov /path/to/jp-b-01.mov \
+  /path/to/jp-a-02.mov /path/to/jp-b-02.mov \
+  /path/to/jp-a-03.mov /path/to/jp-b-03.mov
+```
+
+## English-to-Japanese fixture
+
+`NonoSubEnglishFixture.mp4` wraps Nico's original English voice recording in an original NonoSub test card. It is the reverse-direction acceptance fixture: English source audio is transcribed, then translated into Japanese. No transcript is baked into the video.
+
+Rebuild it with:
+
+```bash
+./scripts/build_english_fixture.sh /path/to/EnglishNonoSubTest.m4a
+```

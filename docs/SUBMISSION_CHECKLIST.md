@@ -4,7 +4,7 @@ Deadline: **Tuesday, July 21, 2026 at 5:00 PM PT**. Target implementation finish
 
 ## Product proof
 
-- [ ] Original 45–60 second synthetic Japanese clip generated and disclosed as AI speech.
+- [x] Original 24-second synthetic Japanese indirect-refusal clip generated and disclosed as AI speech.
 - [ ] First translated coverage within 20 seconds on the development Mac/network.
 - [ ] Subtitle authored-marker timing within ±500 ms.
 - [ ] Two speakers stable across three or more chunks in the ten-minute fixture.
@@ -19,13 +19,13 @@ Deadline: **Tuesday, July 21, 2026 at 5:00 PM PT**. Target implementation finish
 
 ## Release
 
-- [ ] Dependency/license notice reviewed.
+- [x] Direct dependency/license notice generated and reviewed; locked transitive metadata remains reproducible.
 - [ ] No secret or transcript appears in source, build output, or logs.
 - [ ] Clean clone source build tested.
 - [x] Unsigned Apple Silicon `.dmg` built.
 - [x] Unsigned Apple Silicon `.app.zip` built.
 - [ ] Gatekeeper instructions verified on a second Mac/user account.
-- [ ] Public repository created and judge instructions tested.
+- [x] Public GitHub repository and draft checkpoint PR created.
 
 ## Devpost
 

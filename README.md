@@ -16,13 +16,14 @@ The repository currently contains:
 - synchronized bilingual overlays, transcript history, click-to-pause/resume ownership, speaker rename/color, persistent placement, and six subtitle presets;
 - Beginner, Intermediate, and Advanced structured chalkboard lessons with scroll-preserving follow-up history;
 - a Three.js Nono presentation with a complete text fallback;
-- OS credential-vault storage for the OpenAI key and live model-access validation;
+- OS credential-vault storage for the OpenAI key, a non-sensitive local configured marker, and live model-access validation;
 - pure-Rust MP4/MOV AAC decoding, mono 16 kHz WAV conversion, silence-aware chunking, and temporary-file cleanup;
 - streamed diarized transcription parsing, contextual Structured Output translation, target-only retranslation, coverage events, cancellation, and retry-once behavior;
 - macOS 14 ScreenCaptureKit system-audio capture, 48→24 kHz PCM16 conversion, realtime translation deltas, one automatic reconnect, and graceful drain/close;
-- fixture/unit tests that make no paid API calls.
+- readable timed splitting for paragraph-sized transcription turns, before contextual translation;
+- original Japanese indirect-refusal and English reverse-direction fixtures plus fixture/unit tests that make no paid API calls.
 
-Still awaiting live acceptance proof: the ScreenCaptureKit picker/realtime session, English→Japanese media review, one-minute transcript review, ten-minute speaker-continuity review, signed-off translation quality, and release packaging. Model access and the first live tutoring review have passed. See [Build Week log](docs/BUILD_WEEK_LOG.md).
+Japanese→English file analysis, tutoring, HEVC compatibility playback, and real ScreenCaptureKit live translation have passed on the development Mac. Remaining manual gates are English→Japanese review, longer speaker-continuity proof, failure-path hardening, and final release review. See [Build Week log](docs/BUILD_WEEK_LOG.md).
 
 ## Supported media
 
@@ -34,7 +35,7 @@ Build Week scope is deliberately narrow:
 - any configured target/explanation language;
 - Apple Silicon macOS is the only verified release target.
 
-The repository includes [`demo/NonoSubTwoSpeakerFixture.mp4`](demo/NonoSubTwoSpeakerFixture.mp4), an original roughly 34-second, two-voice Japanese test clip. See [`demo/README.md`](demo/README.md) for its provenance, purpose, and reproducible FFmpeg build command.
+The repository includes three original, reproducible fixtures: a roughly 34-second two-voice technical clip, a 24-second indirect-refusal teaching clip, and a roughly 58-second English reverse-direction clip. See [`demo/README.md`](demo/README.md) for provenance and FFmpeg build commands.
 
 Live Captions require macOS 14+ and use the Apple ScreenCaptureKit picker. URL downloading, embedded browsing, global media control, accounts, saved transcripts, vocabulary decks, cloud sync, mobile, live diarization, and overlapping-speech separation research are outside Build Week scope.
 
@@ -57,6 +58,17 @@ pnpm tauri dev
 
 The browser-only `pnpm dev` preview demonstrates the deterministic fixture. Native file access, keychain storage, media decoding, and OpenAI calls require `pnpm tauri dev`.
 
+Repeated ad-hoc debug rebuilds have a changing macOS code identity, which can make Keychain ask for the Mac password again. NonoSub never reads Keychain during launch, so the workbench remains usable. For local development only, a key may instead be supplied to the Rust process without passing through the webview:
+
+```bash
+read -s OPENAI_API_KEY
+export OPENAI_API_KEY
+pnpm tauri dev
+unset OPENAI_API_KEY
+```
+
+Release builds ignore this environment fallback and use the operating-system credential vault.
+
 Build the unsigned macOS artifact with:
 
 ```bash
@@ -69,6 +81,8 @@ For an unsigned Build Week download, macOS may quarantine the app. Prefer buildi
 xattr -dr com.apple.quarantine /Applications/NonoSub.app
 ```
 
+The complete review flow is in [Judge instructions](docs/JUDGE_INSTRUCTIONS.md).
+
 ## Privacy
 
 - The video file remains local and is made readable only through a temporary, user-selected Tauri asset scope.
@@ -76,6 +90,7 @@ xattr -dr com.apple.quarantine /Applications/NonoSub.app
 - Live Captions streams only the selected system audio to OpenAI as short PCM16 batches and never writes it to disk.
 - Transcript context and tutor questions are sent to GPT‑5.6.
 - The API key is stored in the operating-system credential vault and is never returned to the UI.
+- A local marker records only that a key was configured, allowing launch without a Keychain access prompt; it contains no key material.
 - Transcript and tutor history are memory-only for the current app session.
 - Temporary audio is deleted when the prepared session is replaced, cancelled, or the process exits.
 - There are no NonoSub accounts, analytics, subscriptions, hosted proxy, or cloud database.
@@ -118,7 +133,7 @@ Tests cover the TypeScript reducer, active/overlap selection, coverage hysteresi
 
 ## Model usage
 
-- `gpt-4o-transcribe-diarize`: streamed finalized Japanese segments with timestamps and speaker labels.
+- `gpt-4o-transcribe-diarize`: streamed finalized source-language segments with timestamps and speaker labels.
 - `gpt-5.6-sol`: contextual any-language subtitles and validated `LessonCard` Structured Outputs for grammar, tone, meaning, and culture.
 - `gpt-realtime-translate`: streaming source and translated transcript deltas for Live Captions.
 - Responses requests use `store:false`; requested batches contain up to six target lines and at most 80 preceding lines.
@@ -131,4 +146,4 @@ This implementation was created in the primary Codex task used for the Build Wee
 
 ## License
 
-Source code is MIT licensed. Nono's model, character, name, likeness, artwork, logos, and brand assets are excluded from the MIT license and remain all rights reserved. See [LICENSE](LICENSE) and [ASSET_LICENSE.md](ASSET_LICENSE.md).
+Source code is MIT licensed. Nono's model, character, name, likeness, artwork, logos, and brand assets are excluded from the MIT license and remain all rights reserved. See [LICENSE](LICENSE), [ASSET_LICENSE.md](ASSET_LICENSE.md), and [Third-party notices](THIRD_PARTY_NOTICES.md).

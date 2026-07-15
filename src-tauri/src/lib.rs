@@ -28,6 +28,7 @@ use tauri::{
 
 const KEYRING_SERVICE: &str = "com.nono.nonosub";
 const KEYRING_ACCOUNT: &str = "openai-api-key";
+const API_KEY_MARKER: &str = "api-key-configured";
 
 #[derive(Debug)]
 struct AppState {
@@ -97,7 +98,55 @@ fn keyring_entry() -> Result<keyring::Entry, String> {
         .map_err(|error| format!("Could not access the operating-system credential vault: {error}"))
 }
 
+fn development_api_key() -> Option<String> {
+    #[cfg(debug_assertions)]
+    {
+        std::env::var("OPENAI_API_KEY")
+            .ok()
+            .map(|key| key.trim().to_owned())
+            .filter(|key| !key.is_empty())
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        None
+    }
+}
+
+fn api_key_marker_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|directory| directory.join(API_KEY_MARKER))
+        .map_err(|error| format!("Could not locate NonoSub's local settings: {error}"))
+}
+
+fn api_key_marker_exists(app: &tauri::AppHandle) -> bool {
+    development_api_key().is_some() || api_key_marker_path(app).is_ok_and(|path| path.is_file())
+}
+
+fn write_api_key_marker(app: &tauri::AppHandle) -> Result<(), String> {
+    let path = api_key_marker_path(app)?;
+    let directory = path
+        .parent()
+        .ok_or_else(|| "Could not locate NonoSub's local settings directory.".to_string())?;
+    std::fs::create_dir_all(directory)
+        .map_err(|error| format!("Could not create NonoSub's local settings: {error}"))?;
+    std::fs::write(path, b"configured\n")
+        .map_err(|error| format!("Could not update the API key status: {error}"))
+}
+
+fn remove_api_key_marker(app: &tauri::AppHandle) -> Result<(), String> {
+    let path = api_key_marker_path(app)?;
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Could not clear the API key status: {error}")),
+    }
+}
+
 fn api_key() -> Result<String, openai::ApiError> {
+    if let Some(key) = development_api_key() {
+        return Ok(key);
+    }
     keyring_entry()
         .map_err(|message| openai::ApiError {
             kind: openai::ApiErrorKind::Authentication,
@@ -113,17 +162,14 @@ fn api_key() -> Result<String, openai::ApiError> {
 }
 
 #[tauri::command]
-fn api_key_status() -> Result<ApiKeyStatus, String> {
-    let present = match keyring_entry()?.get_password() {
-        Ok(value) => !value.trim().is_empty(),
-        Err(keyring::Error::NoEntry) => false,
-        Err(error) => return Err(format!("Could not read the API key status: {error}")),
-    };
-    Ok(ApiKeyStatus { present })
+fn api_key_status(app: tauri::AppHandle) -> ApiKeyStatus {
+    ApiKeyStatus {
+        present: api_key_marker_exists(&app),
+    }
 }
 
 #[tauri::command]
-fn save_api_key(api_key: String) -> Result<ApiKeyStatus, String> {
+fn save_api_key(app: tauri::AppHandle, api_key: String) -> Result<ApiKeyStatus, String> {
     let trimmed = api_key.trim();
     if !trimmed.starts_with("sk-") || trimmed.len() < 20 {
         return Err("Enter a valid OpenAI API key beginning with sk-.".into());
@@ -131,6 +177,7 @@ fn save_api_key(api_key: String) -> Result<ApiKeyStatus, String> {
     keyring_entry()?
         .set_password(trimmed)
         .map_err(|error| format!("Could not save the API key: {error}"))?;
+    write_api_key_marker(&app)?;
     Ok(ApiKeyStatus { present: true })
 }
 
@@ -138,21 +185,30 @@ fn save_api_key(api_key: String) -> Result<ApiKeyStatus, String> {
 async fn validate_model_access() -> Result<ModelReadiness, openai::ApiError> {
     let client = openai::OpenAiClient::new(api_key()?)?;
     client.validate_model_access().await?;
-    let live = client.model_accessible(openai::REALTIME_TRANSLATION_MODEL).await;
+    let live = client
+        .model_accessible(openai::REALTIME_TRANSLATION_MODEL)
+        .await;
     Ok(ModelReadiness { file: true, live })
 }
 
 #[tauri::command]
-fn remove_api_key() -> Result<ApiKeyStatus, String> {
+fn remove_api_key(app: tauri::AppHandle) -> Result<ApiKeyStatus, String> {
     match keyring_entry()?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(ApiKeyStatus { present: false }),
+        Ok(()) | Err(keyring::Error::NoEntry) => {
+            remove_api_key_marker(&app)?;
+            Ok(ApiKeyStatus { present: false })
+        }
         Err(error) => Err(format!("Could not remove the API key: {error}")),
     }
 }
 
 #[tauri::command]
 fn get_session_snapshot(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
-    state.canonical.lock().map(|snapshot| snapshot.clone()).map_err(|_| "Session state is unavailable.".into())
+    state
+        .canonical
+        .lock()
+        .map(|snapshot| snapshot.clone())
+        .map_err(|_| "Session state is unavailable.".into())
 }
 
 #[tauri::command]
@@ -180,9 +236,12 @@ async fn prepare_media(
     #[cfg(target_os = "macos")]
     let (playback_path, playback_directory) = if media::needs_macos_playback_proxy(&canonical)? {
         let source = canonical.clone();
-        let converted = tauri::async_runtime::spawn_blocking(move || create_macos_playback_proxy(&source))
-            .await
-            .map_err(|error| format!("Video compatibility preparation stopped unexpectedly: {error}"))??;
+        let converted =
+            tauri::async_runtime::spawn_blocking(move || create_macos_playback_proxy(&source))
+                .await
+                .map_err(|error| {
+                    format!("Video compatibility preparation stopped unexpectedly: {error}")
+                })??;
         (converted.1.clone(), Some(converted.0))
     } else {
         (canonical.clone(), None)
@@ -194,30 +253,56 @@ async fn prepare_media(
     scope
         .allow_file(&playback_path)
         .map_err(|error| format!("Could not grant temporary access to this video: {error}"))?;
-    if let Some(previous) = state.playback_media.lock().map_err(|_| "Media state is unavailable.")?.take() {
+    if let Some(previous) = state
+        .playback_media
+        .lock()
+        .map_err(|_| "Media state is unavailable.")?
+        .take()
+    {
         if previous != playback_path {
             let _ = scope.forbid_file(previous);
         }
     }
-    *state.selected_media.lock().map_err(|_| "Media state is unavailable.")? = Some(canonical.clone());
-    *state.playback_media.lock().map_err(|_| "Media state is unavailable.")? = Some(playback_path.clone());
-    *state.playback_directory.lock().map_err(|_| "Media state is unavailable.")? = playback_directory;
-    *state.prepared_session.lock().map_err(|_| "Audio state is unavailable.")? = None;
+    *state
+        .selected_media
+        .lock()
+        .map_err(|_| "Media state is unavailable.")? = Some(canonical.clone());
+    *state
+        .playback_media
+        .lock()
+        .map_err(|_| "Media state is unavailable.")? = Some(playback_path.clone());
+    *state
+        .playback_directory
+        .lock()
+        .map_err(|_| "Media state is unavailable.")? = playback_directory;
+    *state
+        .prepared_session
+        .lock()
+        .map_err(|_| "Audio state is unavailable.")? = None;
 
     let file_name = canonical
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("Selected video")
         .to_owned();
-    state.canonical.lock().map_err(|_| "Session state is unavailable.")?.media = Some(PreparedMediaInfo {
+    state
+        .canonical
+        .lock()
+        .map_err(|_| "Session state is unavailable.")?
+        .media = Some(PreparedMediaInfo {
         path: playback_path.to_string_lossy().into_owned(),
         file_name: file_name.clone(),
     });
-    Ok(PreparedMedia { path: playback_path.to_string_lossy().into_owned(), file_name })
+    Ok(PreparedMedia {
+        path: playback_path.to_string_lossy().into_owned(),
+        file_name,
+    })
 }
 
 #[cfg(target_os = "macos")]
-fn create_macos_playback_proxy(source: &std::path::Path) -> Result<(tempfile::TempDir, PathBuf), String> {
+fn create_macos_playback_proxy(
+    source: &std::path::Path,
+) -> Result<(tempfile::TempDir, PathBuf), String> {
     let directory = tempfile::Builder::new()
         .prefix("nonosub-playback-")
         .tempdir()
@@ -233,7 +318,9 @@ fn create_macos_playback_proxy(source: &std::path::Path) -> Result<(tempfile::Te
         .arg("--replace")
         .arg("--disableMetadataFilter")
         .output()
-        .map_err(|error| format!("Could not start macOS video compatibility conversion: {error}"))?;
+        .map_err(|error| {
+            format!("Could not start macOS video compatibility conversion: {error}")
+        })?;
     if !output.status.success() || !output_path.is_file() {
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         return Err(if detail.is_empty() {
@@ -255,7 +342,9 @@ async fn prepare_audio(state: State<'_, AppState>) -> Result<PreparedAudio, Stri
         .clone()
         .ok_or_else(|| "Choose a video before starting analysis.".to_string())?;
     let (directory, audio, chunks) = tauri::async_runtime::spawn_blocking(move || {
-        let directory = tempfile::Builder::new().prefix("nonosub-session-").tempdir()
+        let directory = tempfile::Builder::new()
+            .prefix("nonosub-session-")
+            .tempdir()
             .map_err(|error| format!("Could not create secure temporary audio storage: {error}"))?;
         let audio = media::decode_to_mono_16k(&path)?;
         let chunks = chunking::create_chunks(&audio, directory.path())?;
@@ -266,12 +355,19 @@ async fn prepare_audio(state: State<'_, AppState>) -> Result<PreparedAudio, Stri
     let duration_ms = (audio.samples.len() as u64 * 1_000) / audio.sample_rate as u64;
     let sample_rate = audio.sample_rate;
     let chunk_count = chunks.len();
-    *state.prepared_session.lock().map_err(|_| "Audio state is unavailable.")? = Some(PreparedSession {
+    *state
+        .prepared_session
+        .lock()
+        .map_err(|_| "Audio state is unavailable.")? = Some(PreparedSession {
         _directory: directory,
         audio: Arc::new(audio),
         chunks,
     });
-    Ok(PreparedAudio { duration_ms, chunk_count, sample_rate })
+    Ok(PreparedAudio {
+        duration_ms,
+        chunk_count,
+        sample_rate,
+    })
 }
 
 #[tauri::command]
@@ -282,15 +378,28 @@ async fn start_analysis(
 ) -> Result<(), openai::ApiError> {
     state.cancelled.store(false, Ordering::Relaxed);
     let (audio, chunks) = {
-        let guard = state.prepared_session.lock().map_err(|_| service_error("Prepared audio state is unavailable."))?;
-        let session = guard.as_ref().ok_or_else(|| service_error("Prepare audio before starting analysis."))?;
+        let guard = state
+            .prepared_session
+            .lock()
+            .map_err(|_| service_error("Prepared audio state is unavailable."))?;
+        let session = guard
+            .as_ref()
+            .ok_or_else(|| service_error("Prepare audio before starting analysis."))?;
         (Arc::clone(&session.audio), session.chunks.clone())
     };
     begin_session(&app, SessionMode::File, languages.clone())?;
     let client = openai::OpenAiClient::new(api_key()?)?;
     let sink_app = app.clone();
     let sink: pipeline::EventSink = Arc::new(move |event| record_event(&sink_app, event));
-    pipeline::run(client, audio, chunks, languages, Arc::clone(&state.cancelled), sink).await
+    pipeline::run(
+        client,
+        audio,
+        chunks,
+        languages,
+        Arc::clone(&state.cancelled),
+        sink,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -305,9 +414,24 @@ async fn request_lesson(
     if question.trim().is_empty() {
         return Err(service_error("Ask Nono a question first."));
     }
-    let languages = state.canonical.lock().map_err(|_| service_error("Session state is unavailable."))?.languages.clone();
-    let cache_key = format!("{}::{learner_level:?}::{}", selected.id, question.trim().to_ascii_lowercase());
-    if let Some(card) = state.lesson_cache.lock().map_err(|_| service_error("Lesson cache is unavailable."))?.get(&cache_key).cloned() {
+    let languages = state
+        .canonical
+        .lock()
+        .map_err(|_| service_error("Session state is unavailable."))?
+        .languages
+        .clone();
+    let cache_key = format!(
+        "{}::{learner_level:?}::{}",
+        selected.id,
+        question.trim().to_ascii_lowercase()
+    );
+    if let Some(card) = state
+        .lesson_cache
+        .lock()
+        .map_err(|_| service_error("Lesson cache is unavailable."))?
+        .get(&cache_key)
+        .cloned()
+    {
         return Ok(card);
     }
     let client = openai::OpenAiClient::new(api_key()?)?;
@@ -324,81 +448,154 @@ async fn request_lesson(
         Err(error) if error.retryable => client.lesson(&lesson_context).await?,
         result => result?,
     };
-    state.lesson_cache.lock().map_err(|_| service_error("Lesson cache is unavailable."))?.insert(cache_key, card.clone());
+    state
+        .lesson_cache
+        .lock()
+        .map_err(|_| service_error("Lesson cache is unavailable."))?
+        .insert(cache_key, card.clone());
     Ok(card)
 }
 
 #[tauri::command]
-fn select_lesson_segment(app: tauri::AppHandle, segment_id: Option<String>) -> Result<(), openai::ApiError> {
+fn select_lesson_segment(
+    app: tauri::AppHandle,
+    segment_id: Option<String>,
+) -> Result<(), openai::ApiError> {
     record_event(&app, SessionEvent::LessonSelected { segment_id })?;
     show_surface(&app, "lesson").map_err(|message| service_error(&message))?;
-    app.emit("lesson-opened", ()).map_err(|error| service_error(&format!("Could not notify the player: {error}")))
+    app.emit("lesson-opened", ())
+        .map_err(|error| service_error(&format!("Could not notify the player: {error}")))
 }
 
 #[tauri::command]
-fn update_languages(app: tauri::AppHandle, state: State<'_, AppState>, languages: LanguageSettings) -> Result<(), String> {
+fn update_languages(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    languages: LanguageSettings,
+) -> Result<(), String> {
     let (previous, mode, segments, speakers) = {
-        let mut snapshot = state.canonical.lock().map_err(|_| "Session state is unavailable.")?;
+        let mut snapshot = state
+            .canonical
+            .lock()
+            .map_err(|_| "Session state is unavailable.")?;
         let previous = snapshot.languages.clone();
         snapshot.languages = languages.clone();
-        (previous, snapshot.mode.clone(), snapshot.segments.clone(), snapshot.speakers.clone())
+        (
+            previous,
+            snapshot.mode.clone(),
+            snapshot.segments.clone(),
+            snapshot.speakers.clone(),
+        )
     };
-    if mode == Some(SessionMode::File) && previous.target != languages.target && !segments.is_empty() {
+    if mode == Some(SessionMode::File)
+        && previous.target != languages.target
+        && !segments.is_empty()
+    {
         let key = api_key().map_err(|error| error.message)?;
         tauri::async_runtime::spawn(async move {
-            let _ = record_event(&app, SessionEvent::PhaseChanged { phase: "translating".into() });
+            let _ = record_event(
+                &app,
+                SessionEvent::PhaseChanged {
+                    phase: "translating".into(),
+                },
+            );
             let client = match openai::OpenAiClient::new(key) {
                 Ok(client) => client,
                 Err(error) => {
-                    let _ = record_event(&app, SessionEvent::RecoverableError { error: RecoverableError {
-                        code: "retranslation_setup".into(), message: error.message, segment_id: None,
-                    }});
+                    let _ = record_event(
+                        &app,
+                        SessionEvent::RecoverableError {
+                            error: RecoverableError {
+                                code: "retranslation_setup".into(),
+                                message: error.message,
+                                segment_id: None,
+                            },
+                        },
+                    );
                     return;
                 }
             };
-            let inputs: Vec<openai::TranslationInput> = segments.iter().map(|segment| openai::TranslationInput {
-                segment_id: segment.id.clone(),
-                speaker: segment.speaker_id.as_ref().and_then(|id| speakers.get(id))
-                    .map(|speaker| speaker.display_name.clone()).unwrap_or_else(|| "Speaker".into()),
-                source_text: segment.source_text.clone(),
-            }).collect();
+            let inputs: Vec<openai::TranslationInput> = segments
+                .iter()
+                .map(|segment| openai::TranslationInput {
+                    segment_id: segment.id.clone(),
+                    speaker: segment
+                        .speaker_id
+                        .as_ref()
+                        .and_then(|id| speakers.get(id))
+                        .map(|speaker| speaker.display_name.clone())
+                        .unwrap_or_else(|| "Speaker".into()),
+                    source_text: segment.source_text.clone(),
+                })
+                .collect();
             for (batch_index, batch) in inputs.chunks(6).enumerate() {
                 let start = batch_index * 6;
                 let preceding_start = start.saturating_sub(80);
                 let preceding = &inputs[preceding_start..start];
                 let first = client.translate(preceding, batch, &languages).await;
                 let outputs = match first {
-                    Err(error) if error.retryable => client.translate(preceding, batch, &languages).await,
+                    Err(error) if error.retryable => {
+                        client.translate(preceding, batch, &languages).await
+                    }
                     result => result,
                 };
                 match outputs {
-                    Ok(outputs) => for output in outputs {
-                        let _ = record_event(&app, SessionEvent::TranslationFinalized {
-                            segment_id: output.segment_id,
-                            translation_text: output.translation,
-                            ambiguity_note: output.ambiguity_note,
-                        });
-                    },
+                    Ok(outputs) => {
+                        for output in outputs {
+                            let _ = record_event(
+                                &app,
+                                SessionEvent::TranslationFinalized {
+                                    segment_id: output.segment_id,
+                                    translation_text: output.translation,
+                                    ambiguity_note: output.ambiguity_note,
+                                },
+                            );
+                        }
+                    }
                     Err(error) => {
-                        let _ = record_event(&app, SessionEvent::RecoverableError { error: RecoverableError {
-                            code: "retranslation_failed".into(), message: error.message,
-                            segment_id: batch.first().map(|segment| segment.segment_id.clone()),
-                        }});
+                        let _ = record_event(
+                            &app,
+                            SessionEvent::RecoverableError {
+                                error: RecoverableError {
+                                    code: "retranslation_failed".into(),
+                                    message: error.message,
+                                    segment_id: batch
+                                        .first()
+                                        .map(|segment| segment.segment_id.clone()),
+                                },
+                            },
+                        );
                     }
                 }
             }
             let translated_through_ms = segments.last().map_or(0, |segment| segment.end_ms);
-            let _ = record_event(&app, SessionEvent::CoverageChanged { translated_through_ms });
-            let _ = record_event(&app, SessionEvent::PhaseChanged { phase: "ready".into() });
+            let _ = record_event(
+                &app,
+                SessionEvent::CoverageChanged {
+                    translated_through_ms,
+                },
+            );
+            let _ = record_event(
+                &app,
+                SessionEvent::PhaseChanged {
+                    phase: "ready".into(),
+                },
+            );
         });
     } else if mode == Some(SessionMode::Live) && previous.target != languages.target {
         #[cfg(target_os = "macos")]
         live::stop(&state.live);
-        let _ = record_event(&app, SessionEvent::RecoverableError { error: RecoverableError {
-            code: "live_language_changed".into(),
-            message: "Target language changed. Start Live Captions again to apply it.".into(),
-            segment_id: None,
-        }});
+        let _ = record_event(
+            &app,
+            SessionEvent::RecoverableError {
+                error: RecoverableError {
+                    code: "live_language_changed".into(),
+                    message: "Target language changed. Start Live Captions again to apply it."
+                        .into(),
+                    segment_id: None,
+                },
+            },
+        );
     }
     Ok(())
 }
@@ -428,13 +625,31 @@ fn cancel_session(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(
     state.cancelled.store(true, Ordering::Relaxed);
     #[cfg(target_os = "macos")]
     live::stop(&state.live);
-    *state.selected_media.lock().map_err(|_| "Media state is unavailable.")? = None;
-    if let Some(path) = state.playback_media.lock().map_err(|_| "Media state is unavailable.")?.take() {
+    *state
+        .selected_media
+        .lock()
+        .map_err(|_| "Media state is unavailable.")? = None;
+    if let Some(path) = state
+        .playback_media
+        .lock()
+        .map_err(|_| "Media state is unavailable.")?
+        .take()
+    {
         let _ = app.asset_protocol_scope().forbid_file(path);
     }
-    *state.playback_directory.lock().map_err(|_| "Media state is unavailable.")? = None;
-    *state.prepared_session.lock().map_err(|_| "Audio state is unavailable.")? = None;
-    state.lesson_cache.lock().map_err(|_| "Lesson cache is unavailable.")?.clear();
+    *state
+        .playback_directory
+        .lock()
+        .map_err(|_| "Media state is unavailable.")? = None;
+    *state
+        .prepared_session
+        .lock()
+        .map_err(|_| "Audio state is unavailable.")? = None;
+    state
+        .lesson_cache
+        .lock()
+        .map_err(|_| "Lesson cache is unavailable.")?
+        .clear();
     record_event(&app, SessionEvent::Complete).map_err(|error| error.message)
 }
 
@@ -450,12 +665,19 @@ async fn start_live_capture(
     match live::start(app.clone(), &state.live, key, languages).await {
         Ok(()) => Ok(()),
         Err(error) => {
-            let _ = record_event(&app, SessionEvent::RecoverableError { error: RecoverableError {
-                code: "live_start_failed".into(),
-                message: error.message.clone(),
-                segment_id: None,
-            }});
-            if let Some(window) = app.get_webview_window("overlay") { let _ = window.hide(); }
+            let _ = record_event(
+                &app,
+                SessionEvent::RecoverableError {
+                    error: RecoverableError {
+                        code: "live_start_failed".into(),
+                        message: error.message.clone(),
+                        segment_id: None,
+                    },
+                },
+            );
+            if let Some(window) = app.get_webview_window("overlay") {
+                let _ = window.hide();
+            }
             let _ = show_surface(&app, "workbench");
             Err(error)
         }
@@ -465,7 +687,9 @@ async fn start_live_capture(
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
 async fn start_live_capture(_languages: LanguageSettings) -> Result<(), openai::ApiError> {
-    Err(service_error("Live system-audio captions are available on macOS 14 or later."))
+    Err(service_error(
+        "Live system-audio captions are available on macOS 14 or later.",
+    ))
 }
 
 #[tauri::command]
@@ -476,34 +700,65 @@ fn stop_live_capture(app: tauri::AppHandle, state: State<'_, AppState>) -> Resul
     Ok(())
 }
 
-fn begin_session(app: &tauri::AppHandle, mode: SessionMode, languages: LanguageSettings) -> Result<(), openai::ApiError> {
+fn begin_session(
+    app: &tauri::AppHandle,
+    mode: SessionMode,
+    languages: LanguageSettings,
+) -> Result<(), openai::ApiError> {
     let state = app.state::<AppState>();
     state.cancelled.store(true, Ordering::Relaxed);
     #[cfg(target_os = "macos")]
     live::stop(&state.live);
     state.cancelled.store(false, Ordering::Relaxed);
-    state.lesson_cache.lock().map_err(|_| service_error("Lesson cache is unavailable."))?.clear();
+    state
+        .lesson_cache
+        .lock()
+        .map_err(|_| service_error("Lesson cache is unavailable."))?
+        .clear();
     let id = state.session_counter.fetch_add(1, Ordering::Relaxed) + 1;
-    let media = state.canonical.lock().map_err(|_| service_error("Session state is unavailable."))?.media.clone();
-    *state.canonical.lock().map_err(|_| service_error("Session state is unavailable."))? = SessionSnapshot {
+    let media = state
+        .canonical
+        .lock()
+        .map_err(|_| service_error("Session state is unavailable."))?
+        .media
+        .clone();
+    *state
+        .canonical
+        .lock()
+        .map_err(|_| service_error("Session state is unavailable."))? = SessionSnapshot {
         session_id: format!("session-{id}"),
         mode: Some(mode.clone()),
         languages: languages.clone(),
-        media: if mode == SessionMode::File { media } else { None },
+        media: if mode == SessionMode::File {
+            media
+        } else {
+            None
+        },
         ..SessionSnapshot::default()
     };
     record_event(app, SessionEvent::SessionReset { mode, languages })
 }
 
-pub(crate) fn record_event(app: &tauri::AppHandle, event: SessionEvent) -> Result<(), openai::ApiError> {
+pub(crate) fn record_event(
+    app: &tauri::AppHandle,
+    event: SessionEvent,
+) -> Result<(), openai::ApiError> {
     let state = app.state::<AppState>();
     let envelope = {
-        let mut snapshot = state.canonical.lock().map_err(|_| service_error("Session state is unavailable."))?;
+        let mut snapshot = state
+            .canonical
+            .lock()
+            .map_err(|_| service_error("Session state is unavailable."))?;
         snapshot.sequence += 1;
         apply_event(&mut snapshot, &event);
-        SequencedSessionEvent { session_id: snapshot.session_id.clone(), sequence: snapshot.sequence, event }
+        SequencedSessionEvent {
+            session_id: snapshot.session_id.clone(),
+            sequence: snapshot.sequence,
+            event,
+        }
     };
-    app.emit("session-event", envelope).map_err(|error| service_error(&format!("Could not update subtitle windows: {error}")))
+    app.emit("session-event", envelope)
+        .map_err(|error| service_error(&format!("Could not update subtitle windows: {error}")))
 }
 
 fn apply_event(snapshot: &mut SessionSnapshot, event: &SessionEvent) {
@@ -514,23 +769,40 @@ fn apply_event(snapshot: &mut SessionSnapshot, event: &SessionEvent) {
             snapshot.phase = "preparing".into();
         }
         SessionEvent::PhaseChanged { phase } => snapshot.phase = phase.clone(),
-        SessionEvent::CaptionUpserted { segment } | SessionEvent::TranscriptFinalized { segment } => {
-            snapshot.segments.retain(|existing| existing.id != segment.id);
+        SessionEvent::CaptionUpserted { segment }
+        | SessionEvent::TranscriptFinalized { segment } => {
+            snapshot
+                .segments
+                .retain(|existing| existing.id != segment.id);
             snapshot.segments.push(segment.clone());
             snapshot.segments.sort_by_key(|segment| segment.start_ms);
         }
-        SessionEvent::TranslationFinalized { segment_id, translation_text, ambiguity_note } => {
-            if let Some(segment) = snapshot.segments.iter_mut().find(|segment| &segment.id == segment_id) {
+        SessionEvent::TranslationFinalized {
+            segment_id,
+            translation_text,
+            ambiguity_note,
+        } => {
+            if let Some(segment) = snapshot
+                .segments
+                .iter_mut()
+                .find(|segment| &segment.id == segment_id)
+            {
                 segment.translation_text = Some(translation_text.clone());
                 segment.ambiguity_note = ambiguity_note.clone();
                 segment.translation_status = contracts::SegmentStatus::Complete;
             }
         }
         SessionEvent::SpeakerDiscovered { speaker } => {
-            snapshot.speakers.insert(speaker.id.clone(), speaker.clone());
+            snapshot
+                .speakers
+                .insert(speaker.id.clone(), speaker.clone());
         }
-        SessionEvent::CoverageChanged { translated_through_ms } => snapshot.translated_through_ms = *translated_through_ms,
-        SessionEvent::LessonSelected { segment_id } => snapshot.selected_segment_id = segment_id.clone(),
+        SessionEvent::CoverageChanged {
+            translated_through_ms,
+        } => snapshot.translated_through_ms = *translated_through_ms,
+        SessionEvent::LessonSelected { segment_id } => {
+            snapshot.selected_segment_id = segment_id.clone()
+        }
         SessionEvent::RecoverableError { error } => snapshot.errors.push(error.clone()),
         SessionEvent::FatalError { message } => snapshot.fatal_error = Some(message.clone()),
         SessionEvent::Complete => snapshot.phase = "complete".into(),
@@ -548,10 +820,29 @@ fn show_surface(app: &tauri::AppHandle, surface: &str) -> Result<(), String> {
     let url = WebviewUrl::App(surface_path(surface).into());
     let mut builder = WebviewWindowBuilder::new(app, label, url).title("NonoSub");
     builder = match surface {
-        "viewer" => builder.inner_size(1180.0, 720.0).min_inner_size(720.0, 440.0).decorations(false).resizable(true),
-        "overlay" => builder.inner_size(900.0, 220.0).min_inner_size(520.0, 130.0).decorations(false).transparent(true).shadow(false).always_on_top(true).resizable(true),
-        "lesson" => builder.inner_size(780.0, 620.0).min_inner_size(620.0, 480.0).decorations(false).always_on_top(true).resizable(true),
-        "workbench" => builder.inner_size(1320.0, 840.0).min_inner_size(960.0, 680.0).resizable(true),
+        "viewer" => builder
+            .inner_size(1180.0, 720.0)
+            .min_inner_size(720.0, 440.0)
+            .decorations(false)
+            .resizable(true),
+        "overlay" => builder
+            .inner_size(900.0, 220.0)
+            .min_inner_size(520.0, 130.0)
+            .decorations(false)
+            .transparent(true)
+            .shadow(false)
+            .always_on_top(true)
+            .resizable(true),
+        "lesson" => builder
+            .inner_size(780.0, 620.0)
+            .min_inner_size(620.0, 480.0)
+            .decorations(false)
+            .always_on_top(true)
+            .resizable(true),
+        "workbench" => builder
+            .inner_size(1320.0, 840.0)
+            .min_inner_size(960.0, 680.0)
+            .resizable(true),
         _ => return Err("Unknown NonoSub surface.".into()),
     };
     builder.build().map_err(|error| error.to_string())?;
@@ -577,9 +868,15 @@ fn update_activation_policy(app: &tauri::AppHandle) {
     #[cfg(target_os = "macos")]
     {
         let regular = ["main", "viewer"].iter().any(|label| {
-            app.get_webview_window(label).and_then(|window| window.is_visible().ok()).unwrap_or(false)
+            app.get_webview_window(label)
+                .and_then(|window| window.is_visible().ok())
+                .unwrap_or(false)
         });
-        let _ = app.set_activation_policy(if regular { tauri::ActivationPolicy::Regular } else { tauri::ActivationPolicy::Accessory });
+        let _ = app.set_activation_policy(if regular {
+            tauri::ActivationPolicy::Regular
+        } else {
+            tauri::ActivationPolicy::Accessory
+        });
     }
 }
 
@@ -613,8 +910,13 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         .text("quit", "Quit NonoSub")
         .build()?;
     let icon = app.default_window_icon().cloned();
-    let mut tray = TrayIconBuilder::with_id("nonosub").menu(&menu).tooltip("NonoSub").icon_as_template(true);
-    if let Some(icon) = icon { tray = tray.icon(icon); }
+    let mut tray = TrayIconBuilder::with_id("nonosub")
+        .menu(&menu)
+        .tooltip("NonoSub")
+        .icon_as_template(true);
+    if let Some(icon) = icon {
+        tray = tray.icon(icon);
+    }
     tray.on_menu_event(|app, event| {
         let id = event.id().as_ref();
         match id {
@@ -635,19 +937,30 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
             }
             "toggle_subtitles" | "arrange_overlay" | "play_pause" | "languages" => {
                 let _ = app.emit("tray-action", id);
-                if id == "languages" { let _ = show_surface(app, "workbench"); }
+                if id == "languages" {
+                    let _ = show_surface(app, "workbench");
+                }
             }
-            "show_workbench" => { let _ = show_surface(app, "workbench"); }
+            "show_workbench" => {
+                let _ = show_surface(app, "workbench");
+            }
             "quit" => app.exit(0),
-            value if value.starts_with("preset_") || value.starts_with("level_") => { let _ = app.emit("tray-action", value); }
+            value if value.starts_with("preset_") || value.starts_with("level_") => {
+                let _ = app.emit("tray-action", value);
+            }
             _ => {}
         }
-    }).build(app)?;
+    })
+    .build(app)?;
     Ok(())
 }
 
 fn service_error(message: &str) -> openai::ApiError {
-    openai::ApiError { kind: openai::ApiErrorKind::Service, message: message.into(), retryable: false }
+    openai::ApiError {
+        kind: openai::ApiErrorKind::Service,
+        message: message.into(),
+        retryable: false,
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -658,12 +971,15 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             setup_tray(app)?;
-            let has_key = keyring_entry().ok().and_then(|entry| entry.get_password().ok()).is_some_and(|key| !key.trim().is_empty());
-            let show_debug_workbench = cfg!(debug_assertions) && std::env::var_os("NONOSUB_SHOW_WORKBENCH").is_some();
+            let has_key = api_key_marker_exists(app.handle());
+            let show_debug_workbench =
+                cfg!(debug_assertions) && std::env::var_os("NONOSUB_SHOW_WORKBENCH").is_some();
             if has_key && !show_debug_workbench {
                 let _ = app.get_webview_window("main").map(|window| window.hide());
                 #[cfg(target_os = "macos")]
-                let _ = app.handle().set_activation_policy(tauri::ActivationPolicy::Accessory);
+                let _ = app
+                    .handle()
+                    .set_activation_policy(tauri::ActivationPolicy::Accessory);
             } else if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
             }
@@ -732,6 +1048,9 @@ mod tests {
 
     #[test]
     fn learner_levels_are_stable_snake_case_values() {
-        assert_eq!(serde_json::to_string(&LearnerLevel::Advanced).unwrap(), "\"advanced\"");
+        assert_eq!(
+            serde_json::to_string(&LearnerLevel::Advanced).unwrap(),
+            "\"advanced\""
+        );
     }
 }

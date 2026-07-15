@@ -59,16 +59,28 @@ fn mean_square(samples: &[i16], range: Range<usize>) -> u128 {
         / slice.len() as u128
 }
 
-pub fn create_chunks(audio: &DecodedAudio, directory: &std::path::Path) -> Result<Vec<AudioChunk>, String> {
+pub fn create_chunks(
+    audio: &DecodedAudio,
+    directory: &std::path::Path,
+) -> Result<Vec<AudioChunk>, String> {
     let rate = audio.sample_rate as usize;
     let mut chunks = Vec::new();
     let mut start = 0usize;
     while start < audio.samples.len() {
-        let target_seconds = if chunks.is_empty() { FIRST_TARGET_SECONDS } else { NEXT_TARGET_SECONDS };
+        let target_seconds = if chunks.is_empty() {
+            FIRST_TARGET_SECONDS
+        } else {
+            NEXT_TARGET_SECONDS
+        };
         let target = start.saturating_add(target_seconds * rate);
         let (end, overlapped) = if target >= audio.samples.len() {
             (audio.samples.len(), false)
-        } else if let Some(boundary) = select_quiet_boundary(&audio.samples, audio.sample_rate, target, SEARCH_SECONDS * rate) {
+        } else if let Some(boundary) = select_quiet_boundary(
+            &audio.samples,
+            audio.sample_rate,
+            target,
+            SEARCH_SECONDS * rate,
+        ) {
             (boundary, false)
         } else {
             (target.min(audio.samples.len()), true)
@@ -117,14 +129,24 @@ mod tests {
 
     #[test]
     fn global_timestamp_includes_chunk_offset() {
-        let chunk = AudioChunk { index: 2, start_sample: 0, end_sample: 1, timeline_start_ms: 150_000, overlapped: false, path: PathBuf::new() };
+        let chunk = AudioChunk {
+            index: 2,
+            start_sample: 0,
+            end_sample: 1,
+            timeline_start_ms: 150_000,
+            overlapped: false,
+            path: PathBuf::new(),
+        };
         assert_eq!(normalize_chunk_timestamp(&chunk, 2.25), 152_250);
     }
 
     #[test]
     fn sustained_loud_audio_uses_fallback_overlap() {
         let directory = tempfile::tempdir().unwrap();
-        let audio = DecodedAudio { samples: vec![12_000; 35_000], sample_rate: 1_000 };
+        let audio = DecodedAudio {
+            samples: vec![12_000; 35_000],
+            sample_rate: 1_000,
+        };
         let chunks = create_chunks(&audio, directory.path()).unwrap();
         assert!(chunks[0].overlapped);
         assert_eq!(chunks[1].start_sample, chunks[0].end_sample - 1_500);

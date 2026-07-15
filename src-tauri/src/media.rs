@@ -26,7 +26,12 @@ pub fn needs_macos_playback_proxy(path: &Path) -> Result<bool, String> {
         hint.with_extension(extension);
     }
     let format = symphonia::default::get_probe()
-        .probe(&hint, source, FormatOptions::default(), MetadataOptions::default())
+        .probe(
+            &hint,
+            source,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
         .map_err(|error| format!("Unsupported or unreadable media container: {error}"))?;
     Ok(format
         .default_track(TrackType::Video)
@@ -43,7 +48,12 @@ pub fn decode_to_mono_16k(path: &Path) -> Result<DecodedAudio, String> {
         hint.with_extension(extension);
     }
     let mut format = symphonia::default::get_probe()
-        .probe(&hint, source, FormatOptions::default(), MetadataOptions::default())
+        .probe(
+            &hint,
+            source,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
         .map_err(|error| format!("Unsupported or unreadable media container: {error}"))?;
     let track = format
         .default_track(TrackType::Audio)
@@ -59,7 +69,9 @@ pub fn decode_to_mono_16k(path: &Path) -> Result<DecodedAudio, String> {
         .ok_or_else(|| "The audio track does not declare a sample rate.".to_string())?;
     let mut decoder = symphonia::default::get_codecs()
         .make_audio_decoder(audio_parameters, &AudioDecoderOptions::default())
-        .map_err(|error| format!("Unsupported audio codec (AAC is required for the MVP): {error}"))?;
+        .map_err(|error| {
+            format!("Unsupported audio codec (AAC is required for the MVP): {error}")
+        })?;
     let mut mono = Vec::<f32>::new();
 
     loop {
@@ -95,7 +107,10 @@ pub fn decode_to_mono_16k(path: &Path) -> Result<DecodedAudio, String> {
         .into_iter()
         .map(|sample| (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16)
         .collect();
-    Ok(DecodedAudio { samples, sample_rate: TARGET_SAMPLE_RATE })
+    Ok(DecodedAudio {
+        samples,
+        sample_rate: TARGET_SAMPLE_RATE,
+    })
 }
 
 pub fn resample_linear(input: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32> {
@@ -164,7 +179,10 @@ mod tests {
     #[test]
     fn temporary_audio_directory_is_removed_on_drop() {
         let path = {
-            let directory = tempfile::Builder::new().prefix("nonosub-cleanup-test-").tempdir().unwrap();
+            let directory = tempfile::Builder::new()
+                .prefix("nonosub-cleanup-test-")
+                .tempdir()
+                .unwrap();
             let path = directory.path().to_owned();
             write_wav(&path.join("chunk.wav"), &[0, 1, -1], TARGET_SAMPLE_RATE).unwrap();
             path
@@ -174,15 +192,21 @@ mod tests {
 
     #[test]
     fn decodes_external_aac_fixture_when_configured() {
-        let Ok(path) = std::env::var("NONOSUB_MEDIA_FIXTURE") else { return };
-        let audio = decode_to_mono_16k(Path::new(&path)).expect("configured AAC fixture should decode");
+        let Ok(path) = std::env::var("NONOSUB_MEDIA_FIXTURE") else {
+            return;
+        };
+        let audio =
+            decode_to_mono_16k(Path::new(&path)).expect("configured AAC fixture should decode");
         assert_eq!(audio.sample_rate, TARGET_SAMPLE_RATE);
         assert!(!audio.samples.is_empty());
     }
 
     #[test]
     fn inspects_external_video_codec_when_configured() {
-        let Ok(path) = std::env::var("NONOSUB_MEDIA_FIXTURE") else { return };
-        needs_macos_playback_proxy(Path::new(&path)).expect("configured video codec should be inspectable");
+        let Ok(path) = std::env::var("NONOSUB_MEDIA_FIXTURE") else {
+            return;
+        };
+        needs_macos_playback_proxy(Path::new(&path))
+            .expect("configured video codec should be inspectable");
     }
 }

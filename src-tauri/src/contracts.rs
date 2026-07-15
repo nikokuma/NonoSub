@@ -34,7 +34,11 @@ pub struct LanguageSettings {
 
 impl Default for LanguageSettings {
     fn default() -> Self {
-        Self { source: "auto".into(), target: "en".into(), explanation: "en".into() }
+        Self {
+            source: "auto".into(),
+            target: "en".into(),
+            explanation: "en".into(),
+        }
     }
 }
 
@@ -71,18 +75,45 @@ pub struct RecoverableError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum SessionEvent {
-    SessionReset { mode: SessionMode, languages: LanguageSettings },
-    PhaseChanged { phase: String },
-    CaptionUpserted { segment: SubtitleSegment },
-    TranscriptFinalized { segment: SubtitleSegment },
-    TranslationFinalized { segment_id: String, translation_text: String, ambiguity_note: Option<String> },
-    SpeakerDiscovered { speaker: SpeakerProfile },
-    CoverageChanged { translated_through_ms: u64 },
-    LessonSelected { segment_id: Option<String> },
-    RecoverableError { error: RecoverableError },
-    FatalError { message: String },
+    SessionReset {
+        mode: SessionMode,
+        languages: LanguageSettings,
+    },
+    PhaseChanged {
+        phase: String,
+    },
+    CaptionUpserted {
+        segment: SubtitleSegment,
+    },
+    TranscriptFinalized {
+        segment: SubtitleSegment,
+    },
+    TranslationFinalized {
+        segment_id: String,
+        translation_text: String,
+        ambiguity_note: Option<String>,
+    },
+    SpeakerDiscovered {
+        speaker: SpeakerProfile,
+    },
+    CoverageChanged {
+        translated_through_ms: u64,
+    },
+    LessonSelected {
+        segment_id: Option<String>,
+    },
+    RecoverableError {
+        error: RecoverableError,
+    },
+    FatalError {
+        message: String,
+    },
     Complete,
 }
 
