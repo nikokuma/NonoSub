@@ -23,7 +23,7 @@ The repository currently contains:
 - readable timed splitting for paragraph-sized transcription turns, before contextual translation;
 - original Japanese indirect-refusal and English reverse-direction fixtures plus fixture/unit tests that make no paid API calls.
 
-Japanese→English and English→Japanese file analysis, structured tutoring, HEVC compatibility playback, and Japanese→English ScreenCaptureKit live translation have passed on the development Mac. Remaining manual gates are English→Japanese live review, longer speaker-continuity proof, failure-path hardening, and final release review. See [Build Week log](docs/BUILD_WEEK_LOG.md).
+Japanese→English and English→Japanese file analysis, structured tutoring, HEVC compatibility playback, bidirectional ScreenCaptureKit live translation, and three-chunk speaker continuity on the 10:30 fixture have passed on the development Mac. Remaining manual gates are timing/preset review, failure-path hardening, and final release review. See [Build Week log](docs/BUILD_WEEK_LOG.md).
 
 ## Supported media
 
@@ -38,6 +38,8 @@ Build Week scope is deliberately narrow:
 The repository includes three original, reproducible fixtures: a roughly 34-second two-voice technical clip, a 24-second indirect-refusal teaching clip, and a roughly 58-second English reverse-direction clip. See [`demo/README.md`](demo/README.md) for provenance and FFmpeg build commands.
 
 Live Captions require macOS 14+ and use the Apple ScreenCaptureKit picker. URL downloading, embedded browsing, global media control, accounts, saved transcripts, vocabulary decks, cloud sync, mobile, live diarization, and overlapping-speech separation research are outside Build Week scope.
+
+For the most reliable file-mode speaker continuity, each recurring speaker should appear in the first roughly 30-second chunk used to build internal reference samples. Build Week does not attempt to discover a brand-new speaker late in a file.
 
 ## Run from source
 

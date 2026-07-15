@@ -81,3 +81,11 @@
 - Made debug bundles always show the workbench while release bundles remain menu-bar-first, giving acceptance and development runs a reliable visible control surface.
 - Fixed cross-line lesson isolation: each selected subtitle now restores only its own in-memory thread and board, and an in-flight answer cannot land on a newly selected line.
 - Fixed coverage recovery in the viewer so a video paused on an empty translation buffer resumes reactively when coverage arrives or analysis completes, even though a paused video no longer emits time-update events.
+
+## July 15, 2026 — reverse live and long-speaker acceptance
+
+- Proved English→Japanese Live Captions from QuickTime through Apple's ScreenCaptureKit picker. The compact overlay showed bounded source/target rows, finalized lines remained clickable in the transcript, and Stop Current Session drained and closed the live session cleanly. Very long uninterrupted speech can still make the rolling source and translated tails feel slightly offset; the canonical finalized transcript remains complete.
+- Generated a reproducible 10:30 H.264/AAC fixture by looping the original two-voice 33-second clip. NonoSub decoded it into seven silence-aware chunks and completed a full paid analysis through 10:28.
+- The long run exposed three concrete diarization-contract defects. Known-speaker arrays were sent as JSON strings instead of repeated multipart `known_speaker_names[]` and `known_speaker_references[]` fields; explicit source-language mode also sent the unsupported `prompt` field; punctuation-only tails could create a false identity. All three now have focused regression coverage.
+- After the multipart fix, the two core voice identities survived chunk boundaries. The full diagnostic run still showed OpenAI occasionally assigning a new remote label to a short trailing fragment of the immediately preceding voice; NonoSub now freezes discovery after the first chunk and attaches later unmatched fragments to the adjacent known voice instead of inventing Speaker 5.
+- Rebuilt the native app and reran the 10:30 fixture through three consecutive chunk boundaries. The corrected run produced 90 lines through 4:17 with only Speaker 1 and Speaker 2, including the formerly broken 0:28 boundary, with no swaps or fabricated third identity.

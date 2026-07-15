@@ -147,33 +147,12 @@ impl OpenAiClient {
             .text("stream", "true")
             .text("chunking_strategy", "auto");
         if source_language != "auto" {
-            form = form.text("language", source_language.to_owned()).text(
-                "prompt",
-                "Preserve the source language, punctuation, hesitations, and unfinished phrases.",
-            );
+            form = form.text("language", source_language.to_owned());
         }
-        if !references.is_empty() {
+        for reference in references {
             form = form
-                .text(
-                    "known_speaker_names",
-                    serde_json::to_string(
-                        &references
-                            .iter()
-                            .map(|reference| &reference.name)
-                            .collect::<Vec<_>>(),
-                    )
-                    .unwrap_or_default(),
-                )
-                .text(
-                    "known_speaker_references",
-                    serde_json::to_string(
-                        &references
-                            .iter()
-                            .map(|reference| &reference.data_url)
-                            .collect::<Vec<_>>(),
-                    )
-                    .unwrap_or_default(),
-                );
+                .text("known_speaker_names[]", reference.name.clone())
+                .text("known_speaker_references[]", reference.data_url.clone());
         }
         let response = self
             .http
@@ -619,5 +598,29 @@ mod tests {
         let rate_limit = classify_status(StatusCode::TOO_MANY_REQUESTS, LANGUAGE_MODEL);
         assert_eq!(rate_limit.kind, ApiErrorKind::RateLimited);
         assert!(rate_limit.retryable);
+    }
+
+    #[test]
+    fn known_speakers_use_repeated_multipart_array_fields() {
+        let reference = SpeakerReference {
+            name: "speaker-1".into(),
+            data_url: "data:audio/wav;base64,AAAA".into(),
+        };
+        let form = multipart::Form::new()
+            .text("known_speaker_names[]", reference.name)
+            .text("known_speaker_references[]", reference.data_url);
+        let debug = format!("{form:?}");
+        assert!(debug.contains("known_speaker_names[]"));
+        assert!(debug.contains("known_speaker_references[]"));
+    }
+
+    #[test]
+    fn diarized_transcription_uses_language_without_unsupported_prompt() {
+        let form = multipart::Form::new()
+            .text("model", TRANSCRIPTION_MODEL)
+            .text("language", "ja");
+        let debug = format!("{form:?}");
+        assert!(debug.contains("language"));
+        assert!(!debug.contains("prompt"));
     }
 }

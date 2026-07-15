@@ -65,27 +65,45 @@ async fn run_inner(
             retry_transcription(&client, &chunk.path, &references, &languages.source, events)
                 .await?;
         let mut incoming = Vec::new();
+        let mut last_stable_speaker = all_segments
+            .iter()
+            .rev()
+            .find_map(|segment| segment.speaker_id.clone());
         for remote_segment in remote {
-            let stable_speaker = stable_speaker_id(&mut speaker_ids, &remote_segment.speaker);
-            if !all_segments
-                .iter()
-                .any(|segment| segment.speaker_id.as_deref() == Some(&stable_speaker))
-                && !incoming.iter().any(|segment: &SubtitleSegment| {
-                    segment.speaker_id.as_deref() == Some(&stable_speaker)
-                })
-            {
-                let palette = ["#ff83bd", "#78dfc2", "#a995ff", "#ffbb6e"];
-                let number = speaker_ids.len();
-                send(
-                    events,
-                    SessionEvent::SpeakerDiscovered {
-                        speaker: SpeakerProfile {
-                            id: stable_speaker.clone(),
-                            display_name: format!("Speaker {number}"),
-                            color: palette[(number - 1).min(palette.len() - 1)].into(),
+            if !has_speech_content(&remote_segment.text) {
+                continue;
+            }
+            let stable_speaker = stable_speaker_id(
+                &mut speaker_ids,
+                &remote_segment.speaker,
+                chunk.index == 0,
+                last_stable_speaker.as_deref(),
+            );
+            if let Some(stable_speaker) = stable_speaker.as_ref() {
+                last_stable_speaker = Some(stable_speaker.clone());
+                if !all_segments
+                    .iter()
+                    .any(|segment| segment.speaker_id.as_deref() == Some(stable_speaker))
+                    && !incoming.iter().any(|segment: &SubtitleSegment| {
+                        segment.speaker_id.as_deref() == Some(stable_speaker)
+                    })
+                {
+                    let palette = ["#ff83bd", "#78dfc2", "#a995ff", "#ffbb6e"];
+                    let number = stable_speaker
+                        .strip_prefix("speaker-")
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .unwrap_or(1);
+                    send(
+                        events,
+                        SessionEvent::SpeakerDiscovered {
+                            speaker: SpeakerProfile {
+                                id: stable_speaker.clone(),
+                                display_name: format!("Speaker {number}"),
+                                color: palette[(number - 1).min(palette.len() - 1)].into(),
+                            },
                         },
-                    },
-                )?;
+                    )?;
+                }
             }
             incoming.extend(split_long_segment(to_pipeline_segment(
                 chunk,
@@ -261,23 +279,36 @@ fn translation_input(segment: &SubtitleSegment) -> TranslationInput {
     }
 }
 
-fn stable_speaker_id(map: &mut HashMap<String, String>, remote: &str) -> String {
+fn stable_speaker_id(
+    map: &mut HashMap<String, String>,
+    remote: &str,
+    allow_new: bool,
+    fallback: Option<&str>,
+) -> Option<String> {
     if let Some(existing) = map.get(remote) {
-        return existing.clone();
+        return Some(existing.clone());
     }
-    if remote.starts_with("speaker-") {
+    if remote.starts_with("speaker-") && map.values().any(|stable| stable == remote) {
         map.insert(remote.to_owned(), remote.to_owned());
-        return remote.to_owned();
+        return Some(remote.to_owned());
     }
-    let id = format!("speaker-{}", map.len() + 1);
+    if !allow_new {
+        return fallback.map(str::to_owned);
+    }
+    let stable_count = map.values().collect::<HashSet<_>>().len();
+    let id = format!("speaker-{}", stable_count + 1);
     map.insert(remote.to_owned(), id.clone());
-    id
+    Some(id)
+}
+
+fn has_speech_content(text: &str) -> bool {
+    text.chars().any(char::is_alphanumeric)
 }
 
 fn to_pipeline_segment(
     chunk: &AudioChunk,
     remote: DiarizedSegment,
-    speaker_id: String,
+    speaker_id: Option<String>,
 ) -> SubtitleSegment {
     let id = if remote.id.is_empty() {
         format!(
@@ -296,7 +327,7 @@ fn to_pipeline_segment(
         source_text: remote.text,
         translation_text: None,
         ambiguity_note: None,
-        speaker_id: Some(speaker_id),
+        speaker_id,
         is_provisional: false,
         transcription_status: SegmentStatus::Complete,
         translation_status: SegmentStatus::Failed,
@@ -567,5 +598,44 @@ mod tests {
     fn short_turn_is_not_split() {
         let original = segment("short", 1_000, 3_500, "何ですか？");
         assert_eq!(split_long_segment(original.clone()), vec![original]);
+    }
+
+    #[test]
+    fn punctuation_only_diarization_tail_is_not_a_speaker() {
+        assert!(!has_speech_content(" 。…… "));
+        assert!(has_speech_content("え……"));
+        assert!(has_speech_content("Wait—"));
+    }
+
+    #[test]
+    fn later_unmatched_speaker_inherits_the_adjacent_known_voice() {
+        let mut speakers = HashMap::new();
+        assert_eq!(
+            stable_speaker_id(&mut speakers, "A", true, None),
+            Some("speaker-1".into())
+        );
+        assert_eq!(
+            stable_speaker_id(&mut speakers, "B", true, Some("speaker-1")),
+            Some("speaker-2".into())
+        );
+        assert_eq!(
+            stable_speaker_id(&mut speakers, "C", false, Some("speaker-2")),
+            Some("speaker-2".into())
+        );
+    }
+
+    #[test]
+    fn known_speaker_aliases_do_not_advance_numbering() {
+        let mut speakers = HashMap::new();
+        stable_speaker_id(&mut speakers, "A", true, None);
+        stable_speaker_id(&mut speakers, "B", true, Some("speaker-1"));
+        assert_eq!(
+            stable_speaker_id(&mut speakers, "speaker-1", false, Some("speaker-2")),
+            Some("speaker-1".into())
+        );
+        assert_eq!(
+            stable_speaker_id(&mut speakers, "C", true, Some("speaker-1")),
+            Some("speaker-3".into())
+        );
     }
 }

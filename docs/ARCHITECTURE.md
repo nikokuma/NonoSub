@@ -27,7 +27,7 @@ The tray calls Rust directly. Closing a window hides it; quitting is explicit. m
 4. `gpt-4o-transcribe-diarize` receives each chunk with streamed diarized JSON. Source `auto` omits a language hint; a selected source sends it.
 5. Local timestamps receive the chunk's global offset. Boundary duplicates prefer the more complete text; distinct overlaps remain available for two-line stacking.
 6. Paragraph-sized turns are split at punctuation or whitespace into display-sized units. Their timestamps are allocated proportionally before translation, preserving click targets and contextual translation while preventing wall-of-text overlays.
-7. One clean 2–10 second first-chunk reference per speaker becomes an internal WAV data URL, up to four speakers. UI names remain separate from stable internal IDs.
+7. One clean 2–10 second first-chunk reference per speaker becomes an internal WAV data URL, up to four speakers. UI names remain separate from stable internal IDs. Build Week speaker discovery is then frozen; later unmatched trailing fragments inherit the adjacent known voice rather than creating a false identity.
 8. Pending lines are translated in batches of at most six. `gpt-5.6-sol` receives the language pair, speaker context, and up to 80 preceding lines with low reasoning, `store:false`, and a strict schema.
 9. Playback starts at 15 seconds of translated coverage, pauses below two seconds of lead, and resumes at eight seconds.
 10. Changing the file target reuses source segments and retranslates them without redecoding or retranscribing.
@@ -60,4 +60,4 @@ Live capture is a separate module behind `cfg(target_os = "macos")`; permission,
 
 ## Build Week proof status
 
-Automated decoder, resampler, chunking, readable-turn splitting, merge, event parsing, PCM conversion, canonical sequencing, reducer, and preference tests pass. The native app launches without touching Keychain, and Nico's AAC-in-MOV file passes the real decoder and Japanese→English file pipeline. ScreenCaptureKit Japanese→English capture is proven; reverse-direction quality and longer speaker-continuity acceptance remain manual gates.
+Automated decoder, resampler, chunking, readable-turn splitting, merge, event parsing, PCM conversion, canonical sequencing, reducer, and preference tests pass. The native app launches without touching Keychain, and Nico's AAC-in-MOV file passes the real decoder and Japanese→English file pipeline. ScreenCaptureKit translation is proven in both directions, and the 10:30 two-voice fixture retained only Speaker 1/Speaker 2 across three consecutive chunks in the corrected native rerun.
