@@ -401,10 +401,7 @@ fn realtime_session_update(target: &str) -> Value {
 
 fn append_f32_48k_as_pcm16_24k(bytes: &[u8], output: &mut Vec<i16>) {
     let mut frames = bytes.chunks_exact(4);
-    loop {
-        let Some(first) = frames.next() else {
-            break;
-        };
+    while let Some(first) = frames.next() {
         let Some(second) = frames.next() else {
             break;
         };
