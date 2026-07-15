@@ -61,6 +61,7 @@
 - Removed credential-vault reads from app launch and API-status checks. A non-sensitive local configured marker controls onboarding, while the key remains in Keychain and is fetched only for an explicit model operation. Debug builds also support a process-only `OPENAI_API_KEY` fallback so changing ad-hoc signatures do not block automation; release builds compile it out.
 - Rebuilt and used Computer Use to confirm the fresh native app reaches onboarding without presenting a macOS Keychain password sheet.
 - Rebuilt the current unsigned Apple Silicon `.dmg` and `.app.zip`, confirmed the app is ad-hoc signed with no Team ID, recorded SHA-256 hashes locally, and added exact judge, Gatekeeper, fixture, and source-build instructions.
+- Cloned the pushed GitHub checkpoint into a fresh directory and proved `pnpm install --frozen-lockfile`, Svelte diagnostics, 10 frontend tests, the production web build, 25 Rust tests, and warning-free Clippy from that clean checkout.
 
 ### Remaining July 14 manual proof
 

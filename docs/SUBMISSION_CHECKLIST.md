@@ -21,7 +21,7 @@ Deadline: **Tuesday, July 21, 2026 at 5:00 PM PT**. Target implementation finish
 
 - [x] Direct dependency/license notice generated and reviewed; locked transitive metadata remains reproducible.
 - [ ] No secret or transcript appears in source, build output, or logs.
-- [ ] Clean clone source build tested.
+- [x] Exact pushed branch passed a frozen install, frontend checks/tests/build, 25 Rust tests, and warning-free Clippy from a fresh clone.
 - [x] Unsigned Apple Silicon `.dmg` built.
 - [x] Unsigned Apple Silicon `.app.zip` built.
 - [ ] Gatekeeper instructions verified on a second Mac/user account.
