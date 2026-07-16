@@ -15,7 +15,6 @@
     "verify": "pnpm check && pnpm test && pnpm build && pnpm check:rust",
     "tauri": "tauri"
   },
-  "license": "MIT",
   "dependencies": {
     "@fontsource/dotgothic16": "^5.2.8",
     "@fontsource/jetbrains-mono": "^5.2.8",

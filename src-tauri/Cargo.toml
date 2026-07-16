@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "Interactive subtitles that turn foreign-language media into a language lesson"
 authors = ["Nico"]
 edition = "2021"
-license = "MIT"
 repository = "https://github.com/nikokuma/NonoSub"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

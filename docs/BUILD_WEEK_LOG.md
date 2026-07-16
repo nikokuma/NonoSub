@@ -5,7 +5,7 @@
 - Created `/Users/nico/Projects/NonoSub` from the Tauri 2 Svelte/TypeScript template.
 - Confirmed the old NonoSub source was not imported.
 - Copied only Nico-owned `Nono.glb` and recorded its matching SHA-256.
-- Added strict checks, focused tests, CI, MIT/source versus reserved-brand licensing, privacy docs, and submission checklist.
+- Added strict checks, focused tests, CI, asset-rights documentation, privacy docs, and submission checklist.
 - Built the canonical TypeScript/Rust contracts and deterministic Japanese indirect-refusal fixture.
 - Implemented the player workspace, bilingual overlay, transcript rail, speaker controls, six focused presets, movable placement, tutor dock, and 3D fallback.
 - Visually checked the 1280×720 layout and fixed a grid-row collapse found during browser QA.

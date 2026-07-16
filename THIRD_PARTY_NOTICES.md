@@ -23,4 +23,4 @@ NonoSub uses the following direct runtime dependencies. Transitive versions are 
 
 NonoSub does not modify Symphonia. Its corresponding source is available from the pinned crate version and upstream repository above. SPDX license texts are available at <https://spdx.org/licenses/>.
 
-Nico-owned Nono character assets are not third-party dependencies and are governed by [ASSET_LICENSE.md](ASSET_LICENSE.md), not the source-code MIT license.
+Nico-owned Nono character assets are not third-party dependencies and are governed by [ASSET_RIGHTS.md](ASSET_RIGHTS.md).

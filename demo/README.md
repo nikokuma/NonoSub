@@ -14,7 +14,7 @@ Rebuild it on macOS with FFmpeg:
   /path/to/JpTestMale.mov
 ```
 
-The generated media is test/demo material. The repository's MIT license applies to the fixture-building script; use of synthetic voice output remains subject to the applicable OpenAI terms.
+The generated media is test/demo material. No repository license is granted for the fixture-building script; use of synthetic voice output remains subject to the applicable OpenAI terms.
 
 ## Indirect-refusal demo fixture
 

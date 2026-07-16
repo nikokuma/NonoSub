@@ -155,8 +155,6 @@ References: [speech to text](https://developers.openai.com/api/docs/guides/speec
 
 ## Codex and provenance
 
-This implementation was created in the primary Codex task used for the Build Week `/feedback` submission. It was scaffolded into a new repository and does not import source from the older experimental NonoSub. The only reused product asset is Nico-owned `static/assets/Nono.glb`; its SHA-256 is recorded in [Asset rights](ASSET_LICENSE.md).
+This implementation was created in the primary Codex task used for the Build Week `/feedback` submission. It was scaffolded into a new repository and does not import source from the older experimental NonoSub. The only reused product asset is Nico-owned `static/assets/Nono.glb`; its SHA-256 is recorded in [Asset rights](ASSET_RIGHTS.md).
 
-## License
-
-Source code is MIT licensed. Nono's model, character, name, likeness, artwork, logos, and brand assets are excluded from the MIT license and remain all rights reserved. See [LICENSE](LICENSE), [ASSET_LICENSE.md](ASSET_LICENSE.md), and [Third-party notices](THIRD_PARTY_NOTICES.md).
+No license is granted for this repository. Nono's model, character, name, likeness, artwork, logos, and brand assets remain all rights reserved. Third-party components retain their respective terms; see [Third-party notices](THIRD_PARTY_NOTICES.md).
