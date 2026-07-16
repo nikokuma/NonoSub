@@ -7,6 +7,7 @@
   import { EMPTY_SESSION } from "./contracts";
   import { FIXTURE_EVENTS } from "./fixtures";
   import { reduceSession, visibleLiveSegments } from "./session";
+  import { effectiveStyle } from "./preferences";
   import { initialSession, loadPreferences, savePreferences, subscribePreferences, subscribeSession } from "./runtime";
   import LiveSubtitleStack from "./LiveSubtitleStack.svelte";
 
@@ -15,8 +16,11 @@
   let arranging = $state(false);
   let visible = $state(true);
   const captions = $derived(session.mode === "live" ? visibleLiveSegments(session.segments, session.liveSync) : session.segments.slice(-1));
+  const activeStyle = $derived(effectiveStyle(preferences.style, session.processingMode));
   const waitingLabel = $derived(session.phase === "reconnecting"
     ? "Reconnecting to Nono…"
+    : session.processingMode === "original_only"
+      ? "Listening for original speech…"
     : session.mode === "live" && session.segments.length > 0
       ? "Nono is coordinating subtitles…"
       : "Listening for speech…");
@@ -89,7 +93,7 @@
 
 <div class="overlay-shell" class:hidden={!visible} class:arranging>
   {#if arranging}<button class="grip" onpointerdown={startDragging}>⠿ MOVE NONOSUB</button>{/if}
-  {#if captions.length > 0}<LiveSubtitleStack segment={captions[0]} speaker={captions[0].speakerId ? session.speakers[captions[0].speakerId] : undefined} style={preferences.style} sync={session.liveSync} onselect={selectLine} />{:else}<div class="waiting"><i></i>{waitingLabel}</div>{/if}
+  {#if captions.length > 0}<LiveSubtitleStack segment={captions[0]} speaker={captions[0].speakerId ? session.speakers[captions[0].speakerId] : undefined} style={activeStyle} sync={session.liveSync} processingMode={session.processingMode} onselect={selectLine} />{:else}<div class="waiting"><i></i>{waitingLabel}</div>{/if}
   {#if session.fatalError}<div class="error">{session.fatalError}</div>{/if}
 </div>
 

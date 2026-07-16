@@ -13,13 +13,13 @@ The repository currently contains:
 - a menu-bar controller plus separate Wired workbench, borderless viewer, compact live overlay, and floating lesson windows;
 - local MP4/MOV playback through Tauri's range-capable scoped asset protocol;
 - generalized source, subtitle, and explanation languages with an in-memory canonical session shared across every window;
-- synchronized bilingual overlays, transcript history, click-to-pause/resume ownership, speaker rename/color, persistent placement, and six subtitle presets;
+- synchronized bilingual or fast original-only overlays, transcript history, click-to-pause/resume ownership, speaker rename/color, persistent placement, live Settings previews, and six focused subtitle presets: Clean, Classic Outline, Yellow Drop, Arcade, Momento Cutout, and Cyberia;
 - Beginner, Intermediate, and Advanced progressive chalkboard lessons with one-to-three focused teaching moments, deterministic diagrams, and scroll-preserving follow-up history;
 - a Three.js Nono presentation with a complete text fallback;
 - OS credential-vault storage for the OpenAI key, a non-sensitive local configured marker, and live model-access validation;
 - pure-Rust MP4/MOV AAC decoding, mono 16 kHz WAV conversion, silence-aware chunking, and temporary-file cleanup;
 - streamed diarized transcription parsing, contextual Structured Output translation, target-only retranslation, coverage events, cancellation, and retry-once behavior;
-- macOS 14 ScreenCaptureKit system-audio capture, 48→24 kHz PCM16 conversion, realtime translation deltas, one automatic reconnect, and graceful drain/close;
+- macOS 14 ScreenCaptureKit system-audio capture, 48→24 kHz PCM16 conversion, realtime translation or low-latency transcription-only sessions, one automatic reconnect, and graceful drain/close;
 - readable timed splitting for paragraph-sized transcription turns, before contextual translation;
 - original Japanese indirect-refusal and English reverse-direction fixtures plus fixture/unit tests that make no paid API calls.
 
@@ -91,6 +91,7 @@ The complete review flow is in [Judge instructions](docs/JUDGE_INSTRUCTIONS.md).
 - AAC is decoded locally. Temporary WAV chunks are sent to OpenAI's transcription API.
 - Live Captions streams only the selected system audio to OpenAI as short PCM16 batches and never writes it to disk.
 - Transcript context and tutor questions are sent to GPT‑5.6.
+- Original-only mode skips automatic GPT‑5.6 translation; finalized source captions remain clickable, and translation or cultural help is requested only when the user asks Nono.
 - The API key is stored in the operating-system credential vault and is never returned to the UI.
 - A local marker records only that a key was configured, allowing launch without a Keychain access prompt; it contains no key material.
 - Transcript and tutor history are memory-only for the current app session.
@@ -112,12 +113,22 @@ local MP4/MOV
   → canonical Rust session
   → Svelte viewer, overlay, transcript, and lesson windows
 
+original-only local MP4/MOV
+  → the same diarized transcription and timeline merge
+  → no automatic GPT-5.6 translation
+  → immediately usable source captions and on-demand Nono lessons
+
 selected macOS system audio
   → ScreenCaptureKit (NonoSub audio excluded)
   → stateful 48→24 kHz PCM16
   → gpt-realtime-translate WebSocket
   → source/translation deltas
   → compact always-on-top overlay
+
+selected macOS system audio (original only)
+  → ScreenCaptureKit and stateful 24 kHz PCM16
+  → gpt-realtime-whisper transcription-only WebSocket
+  → immediate source captions with no translation output
 ```
 
 Rust owns local media access, secrets, decoding, chunk scheduling, OpenAI requests, retries, cleanup, and canonical live analysis. Svelte owns playback, synchronized display, tutoring interaction, and non-sensitive preferences. Details: [Architecture](docs/ARCHITECTURE.md).

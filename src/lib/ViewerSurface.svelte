@@ -7,6 +7,7 @@
   import { EMPTY_SESSION } from "./contracts";
   import { FIXTURE_EVENTS } from "./fixtures";
   import { activeSegments, canResumeForCoverage, formatTime, reduceSession, shouldPauseForCoverage, subtitleTimelineTime } from "./session";
+  import { effectiveStyle } from "./preferences";
   import { initialSession, loadPreferences, savePreferences, subscribePreferences, subscribeSession } from "./runtime";
   import SubtitleStack from "./SubtitleStack.svelte";
 
@@ -14,7 +15,10 @@
   let preferences = $state(loadPreferences());
   let video = $state<HTMLVideoElement>();
   let stage = $state<HTMLDivElement>();
-  let currentMs = $state(0);
+  const fixtureTimeMs = typeof window !== "undefined" && !isTauri()
+    ? Math.max(0, Number(new URLSearchParams(window.location.search).get("fixtureTimeMs") ?? 0) || 0)
+    : 0;
+  let currentMs = $state(fixtureTimeMs);
   let durationMs = $state(0);
   let playing = $state(false);
   let catchingUp = $state(false);
@@ -28,6 +32,7 @@
   let offsetSessionId = "";
 
   const active = $derived(activeSegments(session.segments, subtitleTimelineTime(currentMs, manualSubtitleOffsetMs)));
+  const activeStyle = $derived(effectiveStyle(preferences.style, session.processingMode));
   const mediaUrl = $derived(session.media?.path ? convertFileSrc(session.media.path) : undefined);
 
   onMount(() => {
@@ -73,9 +78,9 @@
   });
 
   $effect(() => {
-    const translatedThroughMs = session.translatedThroughMs;
+    const readyThroughMs = session.readyThroughMs;
     if (!catchingUp || !video?.paused) return;
-    if (session.phase === "complete" || canResumeForCoverage(currentMs, translatedThroughMs)) {
+    if (session.phase === "complete" || canResumeForCoverage(currentMs, readyThroughMs)) {
       catchingUp = false;
       void video.play();
     }
@@ -123,11 +128,11 @@
   function updateTime() {
     if (!video) return;
     currentMs = video.currentTime * 1000;
-    if (session.phase !== "complete" && !video.paused && shouldPauseForCoverage(currentMs, session.translatedThroughMs)) {
+    if (session.phase !== "complete" && !video.paused && shouldPauseForCoverage(currentMs, session.readyThroughMs)) {
       video.pause();
       catchingUp = true;
     }
-    if (catchingUp && canResumeForCoverage(currentMs, session.translatedThroughMs)) {
+    if (catchingUp && canResumeForCoverage(currentMs, session.readyThroughMs)) {
       catchingUp = false;
       void video.play();
     }
@@ -179,7 +184,7 @@
   {:else}<div class="fixture-backdrop"><span>駅前</span><small>NONOSUB VIEWER FIXTURE</small></div>{/if}
 
   <div role="group" aria-label="Movable subtitle overlay" class="subtitle-position" style={`left:${preferences.style.position.x * 100}%;top:${preferences.style.position.y * 100}%`} onpointerdown={beginDrag} onpointermove={moveDrag} onpointerup={finishDrag} onpointercancel={finishDrag}>
-    <SubtitleStack segments={active} speakers={session.speakers} style={preferences.style} movable onselect={selectLine} />
+    <SubtitleStack segments={active} speakers={session.speakers} style={activeStyle} movable onselect={selectLine} />
   </div>
 
   {#if catchingUp}<div class="catching"><i>の</i>Nono is catching up…</div>{/if}

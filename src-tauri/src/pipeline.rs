@@ -9,8 +9,8 @@ use std::{
 use crate::{
     chunking::{normalize_chunk_timestamp, AudioChunk},
     contracts::{
-        LanguageSettings, RecoverableError, SegmentStatus, SessionEvent, SessionMode,
-        SpeakerProfile, SubtitleSegment,
+        CaptionProcessingMode, LanguageSettings, RecoverableError, SegmentStatus, SessionEvent,
+        SessionMode, SpeakerProfile, SubtitleSegment,
     },
     media::{write_wav, DecodedAudio},
     openai::{
@@ -26,10 +26,20 @@ pub async fn run(
     audio: Arc<DecodedAudio>,
     chunks: Vec<AudioChunk>,
     languages: LanguageSettings,
+    processing_mode: CaptionProcessingMode,
     cancelled: Arc<AtomicBool>,
     events: EventSink,
 ) -> Result<(), ApiError> {
-    let result = run_inner(client, audio, chunks, languages, cancelled, &events).await;
+    let result = run_inner(
+        client,
+        audio,
+        chunks,
+        languages,
+        processing_mode,
+        cancelled,
+        &events,
+    )
+    .await;
     if let Err(error) = &result {
         let _ = send(
             &events,
@@ -46,6 +56,7 @@ async fn run_inner(
     audio: Arc<DecodedAudio>,
     chunks: Vec<AudioChunk>,
     languages: LanguageSettings,
+    processing_mode: CaptionProcessingMode,
     cancelled: Arc<AtomicBool>,
     events: &EventSink,
 ) -> Result<(), ApiError> {
@@ -58,6 +69,7 @@ async fn run_inner(
     let mut all_segments = Vec::<SubtitleSegment>::new();
     let mut speaker_ids = HashMap::<String, String>::new();
     let mut references = Vec::<SpeakerReference>::new();
+    let mut emitted_sources = HashMap::<String, String>::new();
 
     for chunk in &chunks {
         check_cancelled(&cancelled)?;
@@ -112,10 +124,21 @@ async fn run_inner(
             )));
         }
         merge_boundary_segments(&mut all_segments, incoming);
-        for segment in all_segments
-            .iter()
-            .filter(|segment| segment.translation_status == SegmentStatus::Failed)
-        {
+        if processing_mode == CaptionProcessingMode::OriginalOnly {
+            for segment in &mut all_segments {
+                if segment.translation_status == SegmentStatus::Failed {
+                    segment.translation_status = SegmentStatus::Skipped;
+                }
+            }
+        }
+        for segment in all_segments.iter().filter(|segment| {
+            if emitted_sources.get(&segment.id) == Some(&segment.source_text) {
+                false
+            } else {
+                emitted_sources.insert(segment.id.clone(), segment.source_text.clone());
+                true
+            }
+        }) {
             send(
                 events,
                 SessionEvent::TranscriptFinalized {
@@ -133,7 +156,23 @@ async fn run_inner(
                 phase: "buffering".into(),
             },
         )?;
-        translate_pending(&client, &mut all_segments, &languages, events, &cancelled).await?;
+        if processing_mode == CaptionProcessingMode::Translated {
+            translate_pending(&client, &mut all_segments, &languages, events, &cancelled).await?;
+        } else {
+            let ready_through_ms = all_segments.last().map_or(0, |segment| segment.end_ms);
+            send(
+                events,
+                SessionEvent::CoverageChanged { ready_through_ms },
+            )?;
+            if ready_through_ms >= 15_000 {
+                send(
+                    events,
+                    SessionEvent::PhaseChanged {
+                        phase: "ready".into(),
+                    },
+                )?;
+            }
+        }
     }
     send(events, SessionEvent::Complete)?;
     Ok(())
@@ -244,7 +283,7 @@ async fn translate_pending(
                 )?;
             }
         }
-        let translated_through_ms = segments
+        let ready_through_ms = segments
             .iter()
             .take_while(|segment| segment.translation_status == SegmentStatus::Complete)
             .map(|segment| segment.end_ms)
@@ -253,10 +292,10 @@ async fn translate_pending(
         send(
             events,
             SessionEvent::CoverageChanged {
-                translated_through_ms,
+                ready_through_ms,
             },
         )?;
-        if translated_through_ms >= 15_000 {
+        if ready_through_ms >= 15_000 {
             send(
                 events,
                 SessionEvent::PhaseChanged {

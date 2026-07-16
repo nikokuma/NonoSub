@@ -7,11 +7,12 @@ export function reduceSession(state: SessionState, event: SessionEvent): Session
       return {
         ...state,
         mode: event.mode,
+        processingMode: event.processingMode,
         languages: event.languages,
         phase: "preparing",
         segments: [],
         speakers: {},
-        translatedThroughMs: 0,
+        readyThroughMs: 0,
         liveSync: event.mode === "live" ? { ...DEFAULT_LIVE_SYNC } : undefined,
         errors: [],
         fatalError: undefined,
@@ -35,7 +36,7 @@ export function reduceSession(state: SessionState, event: SessionEvent): Session
           : segment),
       };
     case "coverage_changed":
-      return { ...state, translatedThroughMs: event.translatedThroughMs };
+      return { ...state, readyThroughMs: event.readyThroughMs };
     case "live_sync_changed":
       return { ...state, liveSync: event.sync };
     case "lesson_selected":
@@ -92,12 +93,12 @@ export function captionTail(text: string, maxCharacters: number): string {
   return `…${tail}`;
 }
 
-export function shouldPauseForCoverage(timeMs: number, translatedThroughMs: number): boolean {
-  return translatedThroughMs - timeMs < 2_000;
+export function shouldPauseForCoverage(timeMs: number, readyThroughMs: number): boolean {
+  return readyThroughMs - timeMs < 2_000;
 }
 
-export function canResumeForCoverage(timeMs: number, translatedThroughMs: number): boolean {
-  return translatedThroughMs - timeMs >= 8_000;
+export function canResumeForCoverage(timeMs: number, readyThroughMs: number): boolean {
+  return readyThroughMs - timeMs >= 8_000;
 }
 
 export function formatTime(milliseconds: number): string {

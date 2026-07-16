@@ -11,7 +11,7 @@ import {
   type SessionState,
   type StyleSettings,
 } from "./contracts";
-import { FIXTURE_EVENTS, LONG_LIVE_FIXTURE_EVENTS } from "./fixtures";
+import { FIXTURE_EVENTS, LONG_LIVE_FIXTURE_EVENTS, ORIGINAL_ONLY_FIXTURE_EVENTS } from "./fixtures";
 import { parsePreferences, serializePreferences, type Preferences } from "./preferences";
 import { applySequencedEvent, reduceSession } from "./session";
 
@@ -23,6 +23,7 @@ export function defaultPreferences(): Preferences {
     level: "beginner",
     languages: { ...DEFAULT_LANGUAGES },
     sync: { ...DEFAULT_SYNC },
+    processingMode: "translated",
     onboardingComplete: false,
   };
 }
@@ -48,9 +49,12 @@ export async function subscribePreferences(onPreferences: (preferences: Preferen
 
 export async function initialSession(): Promise<SessionState> {
   if (!isTauri()) {
-    const fixture = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("fixture") === "live-long"
+    const fixtureName = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("fixture") : undefined;
+    const fixture = fixtureName === "live-long"
       ? LONG_LIVE_FIXTURE_EVENTS
-      : FIXTURE_EVENTS;
+      : fixtureName === "original-only"
+        ? ORIGINAL_ONLY_FIXTURE_EVENTS
+        : FIXTURE_EVENTS;
     return fixture.reduce(reduceSession, structuredClone(EMPTY_SESSION));
   }
   return invoke<SessionState>("get_session_snapshot");

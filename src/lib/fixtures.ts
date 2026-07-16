@@ -10,16 +10,16 @@ export const FIXTURE_SEGMENTS: SubtitleSegment[] = [
 ];
 
 export const FIXTURE_EVENTS: SessionEvent[] = [
-  { type: "session_reset", mode: "file", languages: { source: "ja", target: "en", explanation: "en" } },
+  { type: "session_reset", mode: "file", languages: { source: "ja", target: "en", explanation: "en" }, processingMode: "translated" },
   { type: "phase_changed", phase: "ready" },
   { type: "speaker_discovered", speaker: { id: "speaker-1", displayName: "Aiko", color: "#ff83bd" } },
   { type: "speaker_discovered", speaker: { id: "speaker-2", displayName: "Sato", color: "#78dfc2" } },
   ...FIXTURE_SEGMENTS.map((segment): SessionEvent => ({ type: "transcript_finalized", segment })),
-  { type: "coverage_changed", translatedThroughMs: 60_000 },
+  { type: "coverage_changed", readyThroughMs: 60_000 },
 ];
 
 export const LONG_LIVE_FIXTURE_EVENTS: SessionEvent[] = [
-  { type: "session_reset", mode: "live", languages: { source: "auto", target: "en", explanation: "en" } },
+  { type: "session_reset", mode: "live", languages: { source: "auto", target: "en", explanation: "en" }, processingMode: "translated" },
   { type: "phase_changed", phase: "ready" },
   {
     type: "transcript_finalized",
@@ -37,6 +37,26 @@ export const LONG_LIVE_FIXTURE_EVENTS: SessionEvent[] = [
     },
   },
   { type: "live_sync_changed", sync: { targetDelayMs: 2_800, observedLagMs: 2_200, status: "steady", visibleSegmentId: "live-long" } },
+];
+
+export const ORIGINAL_ONLY_FIXTURE_EVENTS: SessionEvent[] = [
+  { type: "session_reset", mode: "live", languages: { source: "ja", target: "en", explanation: "en" }, processingMode: "original_only" },
+  { type: "phase_changed", phase: "ready" },
+  {
+    type: "transcript_finalized",
+    segment: {
+      id: "live-original-fixture",
+      origin: "live",
+      startMs: 1_000,
+      endMs: 3_400,
+      sourceText: "今日はちょっと……。",
+      speakerId: "live-audio",
+      isProvisional: false,
+      transcriptionStatus: "complete",
+      translationStatus: "skipped",
+    },
+  },
+  { type: "live_sync_changed", sync: { targetDelayMs: 0, observedLagMs: 0, status: "steady", visibleSegmentId: "live-original-fixture" } },
 ];
 
 export const FIXTURE_LESSON: LessonCard = {
@@ -91,4 +111,4 @@ export const FIXTURE_LESSON: LessonCard = {
   suggestedFollowUps: ["Why use んですけど?", "Could this sound rude?", "How would I refuse more directly?"],
 };
 
-export const QUICK_PROMPTS = ["Break it down", "Literal vs natural", "Tone & politeness", "What is omitted?"] as const;
+export const QUICK_PROMPTS = ["Break it down", "Translate this", "Cultural context", "Literal vs natural", "Tone & politeness", "What is omitted?"] as const;

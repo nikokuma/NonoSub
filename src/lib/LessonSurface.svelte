@@ -181,7 +181,7 @@
           <span>{currentMoment?.title ?? "Understanding the line"}</span>
           <div><i>{preferences.level}</i>{#if latestCard && currentMoment}<b>{activeMomentIndex + 1} / {latestCard.moments.length}</b>{/if}</div>
         </div>
-        {#if selected}<div class="selected"><b>{selected.sourceText}</b><small>{selected.translationText}</small></div>{/if}
+        {#if selected}<div class="selected"><b>{selected.sourceText}</b>{#if selected.translationText}<small>{selected.translationText}</small>{/if}</div>{/if}
         {#if boardPhase === "thinking"}
           <div class="board-empty waiting"><span></span><span></span><span></span><p>Choosing the next teaching moment…</p></div>
         {:else if currentMoment}
@@ -214,7 +214,7 @@
         {#if error}<div class="message error"><span>CONNECTION</span>{error}<button onclick={() => ask(messages.findLast((message) => message.role === "user")?.text ?? "Break it down")}>Retry</button></div>{/if}
       </div>
       {#if latestCard}<div class="suggestions">{#each latestCard.suggestedFollowUps as prompt}<button onclick={() => ask(prompt)}>{prompt}</button>{/each}</div>{/if}
-      <form onsubmit={(event) => { event.preventDefault(); void ask(input); }}><textarea bind:value={input} placeholder="Ask about grammar, tone, or culture…" disabled={!selected || loading}></textarea><button disabled={!input.trim() || loading}>↑</button></form>
+      <form onsubmit={(event) => { event.preventDefault(); void ask(input); }}><textarea bind:value={input} placeholder="Ask for a translation, grammar, tone, or culture…" disabled={!selected || loading}></textarea><button disabled={!input.trim() || loading}>↑</button></form>
     </aside>
   </main>
 </div>

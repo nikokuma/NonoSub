@@ -1,6 +1,7 @@
 export type LearnerLevel = "beginner" | "intermediate" | "advanced";
 export type SubtitleDisplayMode = "source" | "translation" | "both";
-export type SegmentStatus = "pending" | "complete" | "failed";
+export type CaptionProcessingMode = "translated" | "original_only";
+export type SegmentStatus = "pending" | "complete" | "failed" | "skipped";
 export type SessionMode = "file" | "live";
 export type LiveSyncMode = "coordinated" | "fast_source";
 export type LiveSyncStatus = "steady" | "catching_up" | "degraded";
@@ -15,7 +16,13 @@ export type SessionPhase =
   | "reconnecting"
   | "complete";
 
-export type SubtitlePreset = "clean" | "cinema" | "contrast" | "nono-pop" | "manga" | "retro";
+export type SubtitlePreset =
+  | "clean"
+  | "classic-outline"
+  | "yellow-drop"
+  | "arcade"
+  | "momento"
+  | "cyberia";
 export type AppSurface = "workbench" | "viewer" | "overlay" | "lesson";
 
 export interface LanguageSettings {
@@ -56,6 +63,20 @@ export interface SpeakerProfile {
   reference?: { startMs: number; endMs: number };
 }
 
+export interface CyberiaColors {
+  panel: string;
+  wash: string;
+  sourceText: string;
+  translationText: string;
+  metadata: string;
+  fallbackAccent: string;
+}
+
+export interface ArcadeColors {
+  text: string;
+  panel: string;
+}
+
 export interface StyleSettings {
   preset: SubtitlePreset;
   position: { x: number; y: number };
@@ -67,6 +88,8 @@ export interface StyleSettings {
   effect: "none" | "outline" | "shadow";
   displayMode: SubtitleDisplayMode;
   showSpeakerNames: boolean;
+  cyberiaColors: CyberiaColors;
+  arcadeColors: ArcadeColors;
 }
 
 export interface BoardSection {
@@ -118,13 +141,13 @@ export interface RecoverableError {
 }
 
 export type SessionEvent =
-  | { type: "session_reset"; mode: SessionMode; languages: LanguageSettings }
+  | { type: "session_reset"; mode: SessionMode; languages: LanguageSettings; processingMode: CaptionProcessingMode }
   | { type: "phase_changed"; phase: SessionPhase }
   | { type: "caption_upserted"; segment: SubtitleSegment }
   | { type: "transcript_finalized"; segment: SubtitleSegment }
   | { type: "translation_finalized"; segmentId: string; translationText: string; ambiguityNote?: string }
   | { type: "speaker_discovered"; speaker: SpeakerProfile }
-  | { type: "coverage_changed"; translatedThroughMs: number }
+  | { type: "coverage_changed"; readyThroughMs: number }
   | { type: "live_sync_changed"; sync: LiveSyncState }
   | { type: "lesson_selected"; segmentId?: string }
   | { type: "recoverable_error"; error: RecoverableError }
@@ -146,11 +169,12 @@ export interface SessionState {
   sessionId: string;
   sequence: number;
   mode?: SessionMode;
+  processingMode: CaptionProcessingMode;
   languages: LanguageSettings;
   phase: SessionPhase;
   segments: SubtitleSegment[];
   speakers: Record<string, SpeakerProfile>;
-  translatedThroughMs: number;
+  readyThroughMs: number;
   liveSync?: LiveSyncState;
   errors: RecoverableError[];
   fatalError?: string;
@@ -180,7 +204,7 @@ export const DEFAULT_LIVE_SYNC: LiveSyncState = {
 };
 
 export const DEFAULT_STYLE: StyleSettings = {
-  preset: "clean",
+  preset: "momento",
   position: { x: 0.5, y: 0.82 },
   overlayPosition: { x: 0.5, y: 0.78 },
   overlayWidth: 900,
@@ -190,15 +214,28 @@ export const DEFAULT_STYLE: StyleSettings = {
   effect: "outline",
   displayMode: "both",
   showSpeakerNames: true,
+  cyberiaColors: {
+    panel: "#05081c",
+    wash: "#0b2944",
+    sourceText: "#c9e6fa",
+    translationText: "#ffffff",
+    metadata: "#5fa8dc",
+    fallbackAccent: "#4ac8ff",
+  },
+  arcadeColors: {
+    text: "#f0a14a",
+    panel: "#0b0d08",
+  },
 };
 
 export const EMPTY_SESSION: SessionState = {
   sessionId: "fixture",
   sequence: 0,
+  processingMode: "translated",
   languages: { ...DEFAULT_LANGUAGES },
   phase: "idle",
   segments: [],
   speakers: {},
-  translatedThroughMs: 0,
+  readyThroughMs: 0,
   errors: [],
 };

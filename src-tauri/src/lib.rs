@@ -9,9 +9,9 @@ mod openai;
 mod pipeline;
 
 use contracts::{
-    LanguageSettings, LearnerLevel, LessonCard, LiveSyncMode, LiveSyncState, PreparedMediaInfo,
-    RecoverableError, SequencedSessionEvent, SessionEvent, SessionMode, SessionSnapshot,
-    SpeakerProfile, SubtitleSegment, TutorMessage,
+    CaptionProcessingMode, LanguageSettings, LearnerLevel, LessonCard, LiveSyncMode,
+    LiveSyncState, PreparedMediaInfo, RecoverableError, SequencedSessionEvent, SessionEvent,
+    SessionMode, SessionSnapshot, SpeakerProfile, SubtitleSegment, TutorMessage,
 };
 use serde::Serialize;
 use std::{
@@ -377,6 +377,7 @@ async fn start_analysis(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     languages: LanguageSettings,
+    processing_mode: CaptionProcessingMode,
 ) -> Result<(), openai::ApiError> {
     state.cancelled.store(false, Ordering::Relaxed);
     let (audio, chunks) = {
@@ -389,7 +390,12 @@ async fn start_analysis(
             .ok_or_else(|| service_error("Prepare audio before starting analysis."))?;
         (Arc::clone(&session.audio), session.chunks.clone())
     };
-    begin_session(&app, SessionMode::File, languages.clone())?;
+    begin_session(
+        &app,
+        SessionMode::File,
+        languages.clone(),
+        processing_mode.clone(),
+    )?;
     let client = openai::OpenAiClient::new(api_key()?)?;
     let sink_app = app.clone();
     let sink: pipeline::EventSink = Arc::new(move |event| record_event(&sink_app, event));
@@ -398,6 +404,7 @@ async fn start_analysis(
         audio,
         chunks,
         languages,
+        processing_mode,
         Arc::clone(&state.cancelled),
         sink,
     )
@@ -475,7 +482,7 @@ fn update_languages(
     state: State<'_, AppState>,
     languages: LanguageSettings,
 ) -> Result<(), String> {
-    let (previous, mode, segments, speakers) = {
+    let (previous, mode, processing_mode, segments, speakers) = {
         let mut snapshot = state
             .canonical
             .lock()
@@ -485,11 +492,13 @@ fn update_languages(
         (
             previous,
             snapshot.mode.clone(),
+            snapshot.processing_mode.clone(),
             snapshot.segments.clone(),
             snapshot.speakers.clone(),
         )
     };
-    if mode == Some(SessionMode::File)
+    if processing_mode == CaptionProcessingMode::Translated
+        && mode == Some(SessionMode::File)
         && previous.target != languages.target
         && !segments.is_empty()
     {
@@ -570,11 +579,11 @@ fn update_languages(
                     }
                 }
             }
-            let translated_through_ms = segments.last().map_or(0, |segment| segment.end_ms);
+            let ready_through_ms = segments.last().map_or(0, |segment| segment.end_ms);
             let _ = record_event(
                 &app,
                 SessionEvent::CoverageChanged {
-                    translated_through_ms,
+                    ready_through_ms,
                 },
             );
             let _ = record_event(
@@ -584,7 +593,10 @@ fn update_languages(
                 },
             );
         });
-    } else if mode == Some(SessionMode::Live) && previous.target != languages.target {
+    } else if processing_mode == CaptionProcessingMode::Translated
+        && mode == Some(SessionMode::Live)
+        && previous.target != languages.target
+    {
         #[cfg(target_os = "macos")]
         live::stop(&state.live);
         let _ = record_event(
@@ -662,10 +674,25 @@ async fn start_live_capture(
     state: State<'_, AppState>,
     languages: LanguageSettings,
     sync_mode: LiveSyncMode,
+    processing_mode: CaptionProcessingMode,
 ) -> Result<(), openai::ApiError> {
-    begin_session(&app, SessionMode::Live, languages.clone())?;
+    begin_session(
+        &app,
+        SessionMode::Live,
+        languages.clone(),
+        processing_mode.clone(),
+    )?;
     let key = api_key()?;
-    match live::start(app.clone(), &state.live, key, languages, sync_mode).await {
+    match live::start(
+        app.clone(),
+        &state.live,
+        key,
+        languages,
+        sync_mode,
+        processing_mode,
+    )
+    .await
+    {
         Ok(()) => Ok(()),
         Err(error) => {
             let _ = record_event(
@@ -692,6 +719,7 @@ async fn start_live_capture(
 async fn start_live_capture(
     _languages: LanguageSettings,
     _sync_mode: LiveSyncMode,
+    _processing_mode: CaptionProcessingMode,
 ) -> Result<(), openai::ApiError> {
     Err(service_error(
         "Live system-audio captions are available on macOS 14 or later.",
@@ -710,6 +738,7 @@ fn begin_session(
     app: &tauri::AppHandle,
     mode: SessionMode,
     languages: LanguageSettings,
+    processing_mode: CaptionProcessingMode,
 ) -> Result<(), openai::ApiError> {
     let state = app.state::<AppState>();
     state.cancelled.store(true, Ordering::Relaxed);
@@ -742,7 +771,14 @@ fn begin_session(
         },
         ..SessionSnapshot::default()
     };
-    record_event(app, SessionEvent::SessionReset { mode, languages })
+    record_event(
+        app,
+        SessionEvent::SessionReset {
+            mode,
+            languages,
+            processing_mode,
+        },
+    )
 }
 
 pub(crate) fn record_event(
@@ -769,8 +805,13 @@ pub(crate) fn record_event(
 
 fn apply_event(snapshot: &mut SessionSnapshot, event: &SessionEvent) {
     match event {
-        SessionEvent::SessionReset { mode, languages } => {
+        SessionEvent::SessionReset {
+            mode,
+            languages,
+            processing_mode,
+        } => {
             snapshot.mode = Some(mode.clone());
+            snapshot.processing_mode = processing_mode.clone();
             snapshot.languages = languages.clone();
             snapshot.phase = "preparing".into();
             snapshot.live_sync = (mode == &SessionMode::Live).then(LiveSyncState::default);
@@ -805,8 +846,8 @@ fn apply_event(snapshot: &mut SessionSnapshot, event: &SessionEvent) {
                 .insert(speaker.id.clone(), speaker.clone());
         }
         SessionEvent::CoverageChanged {
-            translated_through_ms,
-        } => snapshot.translated_through_ms = *translated_through_ms,
+            ready_through_ms,
+        } => snapshot.ready_through_ms = *ready_through_ms,
         SessionEvent::LiveSyncChanged { sync } => snapshot.live_sync = Some(sync.clone()),
         SessionEvent::LessonSelected { segment_id } => {
             snapshot.selected_segment_id = segment_id.clone()
@@ -896,11 +937,11 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         .build()?;
     let presets = SubmenuBuilder::new(app, "Subtitle preset")
         .text("preset_clean", "Clean")
-        .text("preset_cinema", "Cinema")
-        .text("preset_contrast", "High Contrast")
-        .text("preset_nono-pop", "Nono Pop")
-        .text("preset_manga", "Manga")
-        .text("preset_retro", "Retro Pixel")
+        .text("preset_classic-outline", "Classic Outline")
+        .text("preset_yellow-drop", "Yellow Drop")
+        .text("preset_arcade", "Arcade")
+        .text("preset_momento", "Momento Cutout")
+        .text("preset_cyberia", "Cyberia")
         .build()?;
     let timing = SubmenuBuilder::new(app, "Subtitle timing")
         .text("subtitle_earlier", "100 ms Earlier")

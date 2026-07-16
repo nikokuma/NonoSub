@@ -15,6 +15,15 @@ pub enum SegmentStatus {
     Pending,
     Complete,
     Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptionProcessingMode {
+    #[default]
+    Translated,
+    OriginalOnly,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -125,6 +134,7 @@ pub enum SessionEvent {
     SessionReset {
         mode: SessionMode,
         languages: LanguageSettings,
+        processing_mode: CaptionProcessingMode,
     },
     PhaseChanged {
         phase: String,
@@ -144,7 +154,7 @@ pub enum SessionEvent {
         speaker: SpeakerProfile,
     },
     CoverageChanged {
-        translated_through_ms: u64,
+        ready_through_ms: u64,
     },
     LiveSyncChanged {
         sync: LiveSyncState,
@@ -182,11 +192,12 @@ pub struct SessionSnapshot {
     pub session_id: String,
     pub sequence: u64,
     pub mode: Option<SessionMode>,
+    pub processing_mode: CaptionProcessingMode,
     pub languages: LanguageSettings,
     pub phase: String,
     pub segments: Vec<SubtitleSegment>,
     pub speakers: HashMap<String, SpeakerProfile>,
-    pub translated_through_ms: u64,
+    pub ready_through_ms: u64,
     pub live_sync: Option<LiveSyncState>,
     pub errors: Vec<RecoverableError>,
     pub fatal_error: Option<String>,
@@ -200,11 +211,12 @@ impl Default for SessionSnapshot {
             session_id: "idle".into(),
             sequence: 0,
             mode: None,
+            processing_mode: CaptionProcessingMode::Translated,
             languages: LanguageSettings::default(),
             phase: "idle".into(),
             segments: Vec::new(),
             speakers: HashMap::new(),
-            translated_through_ms: 0,
+            ready_through_ms: 0,
             live_sync: None,
             errors: Vec::new(),
             fatal_error: None,
