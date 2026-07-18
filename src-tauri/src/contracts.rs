@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LearnerLevel {
     Beginner,
@@ -230,7 +230,49 @@ impl Default for SessionSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct BoardSection {
     pub heading: String,
-    pub lines: Vec<String>,
+    pub lines: Vec<ChalkPhrase>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChalkColor {
+    White,
+    BabyBlue,
+    Yellow,
+    Pink,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChalkMark {
+    None,
+    Box,
+    Bracket,
+    Strike,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TailCue {
+    None,
+    Point,
+    Underline,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChalkPhrase {
+    pub text: String,
+    pub color: ChalkColor,
+    pub mark: ChalkMark,
+    pub tail_cue: TailCue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceFocus {
+    pub color: ChalkColor,
+    pub tail_cue: TailCue,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -245,20 +287,13 @@ pub enum BoardDemoKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum BoardDemoAccent {
-    Source,
-    Meaning,
-    Missing,
-    Tone,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BoardDemoItem {
     pub label: String,
     pub detail: String,
-    pub accent: BoardDemoAccent,
+    pub color: ChalkColor,
+    pub mark: ChalkMark,
+    pub tail_cue: TailCue,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -267,7 +302,7 @@ pub struct BoardDemo {
     pub kind: BoardDemoKind,
     pub caption: Option<String>,
     pub items: Vec<BoardDemoItem>,
-    pub result: Option<String>,
+    pub result: Option<ChalkPhrase>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -275,14 +310,16 @@ pub struct BoardDemo {
 pub struct TeachingMoment {
     pub title: String,
     pub speech_bubble: String,
+    pub source_focus: SourceFocus,
     pub board_sections: Vec<BoardSection>,
     pub demonstration: BoardDemo,
-    pub ambiguity_note: Option<String>,
+    pub ambiguity_note: Option<ChalkPhrase>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LessonCard {
+    pub schema_version: u8,
     pub selected_segment_id: String,
     pub moments: Vec<TeachingMoment>,
     pub suggested_follow_ups: Vec<String>,

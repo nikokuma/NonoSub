@@ -9,6 +9,13 @@ NonoSub uses the following direct runtime dependencies. Transitive versions are 
 | Tauri JavaScript API | Apache-2.0 OR MIT | <https://github.com/tauri-apps/tauri> |
 | Tauri dialog and opener plugins | Apache-2.0 OR MIT | <https://github.com/tauri-apps/plugins-workspace> |
 | Three.js | MIT | <https://github.com/mrdoob/three.js> |
+| Fontsource packages | MIT | <https://github.com/fontsource/fontsource> |
+| Klee One | SIL Open Font License 1.1 | <https://github.com/fontworks-fonts/Klee> |
+| NonToon shader research reference | zlib | <https://github.com/lilxyzw/NonToon> |
+
+Klee One is bundled unmodified for multilingual chalkboard text. Copyright 2020 The Klee Project Authors. Its full [SIL Open Font License 1.1](licenses/KLEE_ONE_OFL.txt) notice is included with this repository.
+
+NonoSub's development-only `nontoon` comparison material is an altered Three.js/WebGL implementation inspired by NonToon's ramp-shade, rim-light, hair-specular, and basic-specular concepts. It is not a Unity shader port and is not part of normal user settings. Copyright 2026-present lilxyzw. The full [zlib notice](licenses/NONTOON_ZLIB.txt) is included with this repository. This notice applies to that referenced shader work and does not grant a license to NonoSub or Nico-owned assets.
 
 ## Native runtime
 

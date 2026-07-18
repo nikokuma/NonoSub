@@ -60,51 +60,67 @@ export const ORIGINAL_ONLY_FIXTURE_EVENTS: SessionEvent[] = [
 ];
 
 export const FIXTURE_LESSON: LessonCard = {
+  schemaVersion: 2,
   selectedSegmentId: "seg-4",
   moments: [
     {
       title: "The sentence leaves a blank",
       speechBubble: "The speaker stops before the awkward part, but the listener can still hear the refusal hiding in the silence. Sneaky, but polite.",
-      boardSections: [{ heading: "What is spoken", lines: ["今日は — as for today", "ちょっと — a little…"] }],
+      sourceFocus: { color: "white", tailCue: "none" },
+      boardSections: [{
+        heading: "What is spoken",
+        lines: [
+          { text: "今日は — as for today", color: "white", mark: "none", tailCue: "none" },
+          { text: "ちょっと — a little…", color: "baby_blue", mark: "none", tailCue: "point" },
+        ],
+      }],
       demonstration: {
         kind: "omitted_meaning",
         caption: "The uncomfortable ending is understood, not spoken.",
         items: [
-          { label: "今日は", detail: "as for today", accent: "source" },
-          { label: "ちょっと……", detail: "a little…", accent: "meaning" },
-          { label: "[行けない]", detail: "[I can't go]", accent: "missing" },
+          { label: "今日は", detail: "as for today", color: "white", mark: "none", tailCue: "none" },
+          { label: "ちょっと……", detail: "a little…", color: "baby_blue", mark: "none", tailCue: "none" },
+          { label: "[行けない]", detail: "[I can't go]", color: "pink", mark: "bracket", tailCue: "none" },
         ],
-        result: "Today doesn't work for me.",
+        result: { text: "Today doesn't work for me.", color: "yellow", mark: "none", tailCue: "underline" },
       },
-      ambiguityNote: "The exact missing ending is uncertain; 行けない and 難しい are plausible readings.",
+      ambiguityNote: { text: "The exact missing ending is uncertain; 行けない and 難しい are plausible readings.", color: "pink", mark: "bracket", tailCue: "none" },
     },
     {
       title: "Literal words, social meaning",
       speechBubble: "The dictionary gives you ‘a little,’ but the conversation gives you ‘no for today.’ Context wins this round.",
+      sourceFocus: { color: "baby_blue", tailCue: "point" },
       boardSections: [],
       demonstration: {
         kind: "literal_to_natural",
         caption: "A natural translation carries the intended refusal.",
         items: [
-          { label: "Literal", detail: "As for today, a little…", accent: "source" },
-          { label: "Natural", detail: "Today doesn't work for me.", accent: "meaning" },
+          { label: "Literal", detail: "As for today, a little…", color: "white", mark: "none", tailCue: "none" },
+          { label: "Natural", detail: "Today doesn't work for me.", color: "yellow", mark: "none", tailCue: "none" },
         ],
-        result: "A soft, indirect no",
+        result: { text: "A soft, indirect no", color: "yellow", mark: "none", tailCue: "underline" },
       },
     },
     {
       title: "Why the softness matters",
       speechBubble: "Leaving the refusal unfinished protects the mood and gives the other person room to understand without being blunt.",
-      boardSections: [{ heading: "Politeness strategy", lines: ["Avoid the blunt negative", "Let the listener infer the answer"] }],
+      sourceFocus: { color: "white", tailCue: "none" },
+      boardSections: [{
+        heading: "Politeness strategy",
+        lines: [
+          { text: "Avoid the blunt negative", color: "pink", mark: "bracket", tailCue: "none" },
+          { text: "Let the listener infer the answer", color: "white", mark: "none", tailCue: "none" },
+        ],
+      }],
       demonstration: {
         kind: "tone_scale",
         caption: "The meaning stays similar while the delivery gets gentler.",
         items: [
-          { label: "行きません", detail: "direct refusal", accent: "tone" },
-          { label: "今日は難しいです", detail: "soft explanation", accent: "meaning" },
-          { label: "今日はちょっと……", detail: "indirect and gentle", accent: "source" },
+          { label: "行きません", detail: "direct refusal", color: "pink", mark: "none", tailCue: "none" },
+          { label: "今日は難しいです", detail: "soft explanation", color: "white", mark: "none", tailCue: "none" },
+          { label: "今日はちょっと……", detail: "indirect and gentle", color: "baby_blue", mark: "none", tailCue: "point" },
         ],
-        result: "More room for the listener to save face",
+        result: { text: "More room for the listener to save face", color: "yellow", mark: "none", tailCue: "underline" },
       },
     },
   ],

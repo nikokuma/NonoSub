@@ -11,3 +11,6 @@ node_modules
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+/static/assets/NonoCandidate.glb
+__pycache__/
+*.py[cod]

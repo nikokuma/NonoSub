@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::Path;
 
-use crate::contracts::{LanguageSettings, LessonCard};
+use crate::contracts::{
+    ChalkColor, ChalkMark, ChalkPhrase, LanguageSettings, LessonCard, TailCue, TeachingMoment,
+};
 
 pub const TRANSCRIPTION_MODEL: &str = "gpt-4o-transcribe-diarize";
 pub const LANGUAGE_MODEL: &str = "gpt-5.6-sol";
@@ -264,12 +266,35 @@ impl OpenAiClient {
     }
 
     pub async fn lesson(&self, lesson_context: &Value) -> Result<LessonCard, ApiError> {
+        let chalk_phrase_schema = json!({
+            "type": "object",
+            "properties": {
+                "text": { "type": "string", "maxLength": 90 },
+                "color": { "type": "string", "enum": ["white", "baby_blue", "yellow", "pink"] },
+                "mark": { "type": "string", "enum": ["none", "box", "bracket", "strike"] },
+                "tailCue": { "type": "string", "enum": ["none", "point", "underline"] }
+            },
+            "required": ["text", "color", "mark", "tailCue"],
+            "additionalProperties": false
+        });
+        let demo_item_schema = json!({
+            "type": "object",
+            "properties": {
+                "label": { "type": "string", "maxLength": 30 },
+                "detail": { "type": "string", "maxLength": 80 },
+                "color": { "type": "string", "enum": ["white", "baby_blue", "yellow", "pink"] },
+                "mark": { "type": "string", "enum": ["none", "box", "bracket", "strike"] },
+                "tailCue": { "type": "string", "enum": ["none", "point", "underline"] }
+            },
+            "required": ["label", "detail", "color", "mark", "tailCue"],
+            "additionalProperties": false
+        });
         let request = json!({
             "model": LANGUAGE_MODEL,
             "reasoning": { "effort": "low" },
             "store": false,
             "input": [
-                { "role": "system", "content": [{ "type": "input_text", "text": "You are Nono, an accurate language tutor. Teach the source utterance in the requested explanation language at the learner's level. The selected line may intentionally have no precomputed translation. When the user asks, translate it directly and explain literal versus natural meaning. Answer cultural and pragmatic questions using the nearby dialogue, clearly separating broadly established usage from context-dependent interpretation. Preserve source quotations exactly and explicitly mark ambiguity instead of inventing certainty. Accuracy comes first; add at most one light cute, playful, slightly bratty aside. Return one focused teaching moment when that is enough, and two or three ordered moments only when distinct concepts are genuinely necessary. Never overload one moment or repeat a concept across moments. Each speech bubble is one or two sentences. Each moment may use at most two compact board sections with at most four short lines each and one optional deterministic demonstration. Choose sentence_breakdown for phrase-to-meaning pieces, omitted_meaning for an understood blank, literal_to_natural for a meaning transformation, tone_scale for direct-to-soft comparisons, mini_dialogue for a short contextual exchange, or none when prose is clearer. Demonstration items use label for the visible source/speaker/scale point and detail for its meaning or line; result is the takeaway. Return three useful follow-up prompts for the complete lesson." }] },
+                { "role": "system", "content": [{ "type": "input_text", "text": "You are Nono, an accurate language tutor and chalkboard director. Teach the source utterance in the requested explanation language at the learner's level. The selected line may intentionally lack a translation; translate it when useful. Use nearby dialogue for cultural and pragmatic meaning. Preserve source quotations exactly. Mark ambiguity instead of inventing certainty. Accuracy comes first; use at most one light cute, playful, slightly bratty aside. Return one focused teaching moment when enough, or two to three ordered moments only for genuinely distinct concepts. Every moment must fit on one non-scrolling board. A demonstration allows at most one section with three short lines; without a demonstration, use at most two sections with three short lines each. Use at most four demo items. Choose sentence_breakdown for phrase pieces, omitted_meaning for an understood blank, literal_to_natural for a meaning transformation, tone_scale for direct-to-soft comparisons, mini_dialogue for context, or none. Direct the approved chalk presentation: white for neutral context; baby_blue for source forms and grammar; yellow for meanings and takeaways; pink for omission, contrast, correction, exception, or uncertainty. You may deviate only when it makes the lesson clearer. Use box or bracket as structural cues. Use strike only for definitely incorrect or unnatural language, always in pink, never for ambiguity. Each moment must contain at least one tailCue and at most one point plus one underline. Attach cues only to the exact phrase or item Nono should indicate. Prefer point for the active concept and underline for a memorable takeaway. Do not output coordinates, selectors, CSS, SVG, bone names, durations, or animation code. sourceFocus controls the already-displayed selected utterance. A tail-drawn underline remains after the gesture. Return three useful follow-up prompts for the complete lesson." }] },
                 { "role": "user", "content": [{ "type": "input_text", "text": serde_json::to_string(lesson_context).unwrap_or_default() }] }
             ],
             "text": { "format": {
@@ -279,6 +304,7 @@ impl OpenAiClient {
                 "schema": {
                     "type": "object",
                     "properties": {
+                        "schemaVersion": { "type": "integer", "enum": [2] },
                         "selectedSegmentId": { "type": "string" },
                         "moments": {
                             "type": "array",
@@ -287,16 +313,25 @@ impl OpenAiClient {
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "title": { "type": "string" },
-                                    "speechBubble": { "type": "string" },
+                                    "title": { "type": "string", "maxLength": 48 },
+                                    "speechBubble": { "type": "string", "maxLength": 180 },
+                                    "sourceFocus": {
+                                        "type": "object",
+                                        "properties": {
+                                            "color": { "type": "string", "enum": ["white", "baby_blue", "yellow", "pink"] },
+                                            "tailCue": { "type": "string", "enum": ["none", "point", "underline"] }
+                                        },
+                                        "required": ["color", "tailCue"],
+                                        "additionalProperties": false
+                                    },
                                     "boardSections": {
                                         "type": "array",
                                         "maxItems": 2,
                                         "items": {
                                             "type": "object",
                                             "properties": {
-                                                "heading": { "type": "string" },
-                                                "lines": { "type": "array", "minItems": 1, "maxItems": 4, "items": { "type": "string" } }
+                                                "heading": { "type": "string", "maxLength": 28 },
+                                                "lines": { "type": "array", "minItems": 1, "maxItems": 3, "items": chalk_phrase_schema.clone() }
                                             },
                                             "required": ["heading", "lines"],
                                             "additionalProperties": false
@@ -306,35 +341,26 @@ impl OpenAiClient {
                                         "type": "object",
                                         "properties": {
                                             "kind": { "type": "string", "enum": ["none", "sentence_breakdown", "omitted_meaning", "literal_to_natural", "tone_scale", "mini_dialogue"] },
-                                            "caption": { "type": ["string", "null"] },
+                                            "caption": { "type": ["string", "null"], "maxLength": 90 },
                                             "items": {
                                                 "type": "array",
-                                                "maxItems": 5,
-                                                "items": {
-                                                    "type": "object",
-                                                    "properties": {
-                                                        "label": { "type": "string" },
-                                                        "detail": { "type": "string" },
-                                                        "accent": { "type": "string", "enum": ["source", "meaning", "missing", "tone"] }
-                                                    },
-                                                    "required": ["label", "detail", "accent"],
-                                                    "additionalProperties": false
-                                                }
+                                                "maxItems": 4,
+                                                "items": demo_item_schema
                                             },
-                                            "result": { "type": ["string", "null"] }
+                                            "result": { "anyOf": [chalk_phrase_schema.clone(), { "type": "null" }] }
                                         },
                                         "required": ["kind", "caption", "items", "result"],
                                         "additionalProperties": false
                                     },
-                                    "ambiguityNote": { "type": ["string", "null"] }
+                                    "ambiguityNote": { "anyOf": [chalk_phrase_schema, { "type": "null" }] }
                                 },
-                                "required": ["title", "speechBubble", "boardSections", "demonstration", "ambiguityNote"],
+                                "required": ["title", "speechBubble", "sourceFocus", "boardSections", "demonstration", "ambiguityNote"],
                                 "additionalProperties": false
                             }
                         },
                         "suggestedFollowUps": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "string" } }
                     },
-                    "required": ["selectedSegmentId", "moments", "suggestedFollowUps"],
+                    "required": ["schemaVersion", "selectedSegmentId", "moments", "suggestedFollowUps"],
                     "additionalProperties": false
                 }
             } }
@@ -400,25 +426,56 @@ fn malformed_transcription_stream(detail: &str) -> ApiError {
 }
 
 fn validate_lesson_card(card: LessonCard) -> Result<LessonCard, ApiError> {
-    let invalid = card.selected_segment_id.trim().is_empty()
+    let too_long = |value: &str, limit: usize| value.chars().count() > limit;
+    let invalid = card.schema_version != 2
+        || card.selected_segment_id.trim().is_empty()
         || card.moments.is_empty()
         || card.moments.len() > 3
         || card.moments.iter().any(|moment| {
+            let (point_count, underline_count) = cue_counts(moment);
             moment.title.trim().is_empty()
+                || too_long(&moment.title, 48)
                 || moment.speech_bubble.trim().is_empty()
+                || too_long(&moment.speech_bubble, 180)
+                || point_count + underline_count == 0
+                || point_count > 1
+                || underline_count > 1
                 || moment.board_sections.len() > 2
                 || moment.board_sections.iter().any(|section| {
                     section.heading.trim().is_empty()
+                        || too_long(&section.heading, 28)
                         || section.lines.is_empty()
-                        || section.lines.len() > 4
-                        || section.lines.iter().any(|line| line.trim().is_empty())
+                        || section.lines.len() > 3
+                        || section.lines.iter().any(|line| invalid_phrase(line, 72))
                 })
-                || moment.demonstration.items.len() > 5
+                || moment.demonstration.items.len() > 4
                 || moment
                     .demonstration
                     .items
                     .iter()
-                    .any(|item| item.label.trim().is_empty() || item.detail.trim().is_empty())
+                    .any(|item| {
+                        item.label.trim().is_empty()
+                            || too_long(&item.label, 30)
+                            || item.detail.trim().is_empty()
+                            || too_long(&item.detail, 80)
+                            || invalid_mark(item.color, item.mark)
+                    })
+                || moment
+                    .demonstration
+                    .caption
+                    .as_deref()
+                    .is_some_and(|caption| too_long(caption, 90))
+                || moment
+                    .demonstration
+                    .result
+                    .as_ref()
+                    .is_some_and(|result| invalid_phrase(result, 90))
+                || moment
+                    .ambiguity_note
+                    .as_ref()
+                    .is_some_and(|note| {
+                        invalid_phrase(note, 140) || matches!(note.mark, ChalkMark::Strike)
+                    })
                 || (matches!(
                     moment.demonstration.kind,
                     crate::contracts::BoardDemoKind::None
@@ -427,7 +484,8 @@ fn validate_lesson_card(card: LessonCard) -> Result<LessonCard, ApiError> {
                 || (!matches!(
                     moment.demonstration.kind,
                     crate::contracts::BoardDemoKind::None
-                ) && moment.demonstration.items.is_empty())
+                ) && (moment.demonstration.items.is_empty()
+                    || moment.board_sections.len() > 1))
         })
         || card.suggested_follow_ups.len() != 3
         || card
@@ -443,6 +501,47 @@ fn validate_lesson_card(card: LessonCard) -> Result<LessonCard, ApiError> {
     } else {
         Ok(card)
     }
+}
+
+fn invalid_phrase(phrase: &ChalkPhrase, length_limit: usize) -> bool {
+    phrase.text.trim().is_empty()
+        || phrase.text.chars().count() > length_limit
+        || invalid_mark(phrase.color, phrase.mark)
+}
+
+fn invalid_mark(color: ChalkColor, mark: ChalkMark) -> bool {
+    matches!(mark, ChalkMark::Strike) && !matches!(color, ChalkColor::Pink)
+}
+
+fn cue_counts(moment: &TeachingMoment) -> (usize, usize) {
+    let mut cues = vec![moment.source_focus.tail_cue];
+    cues.extend(
+        moment
+            .board_sections
+            .iter()
+            .flat_map(|section| section.lines.iter().map(|line| line.tail_cue)),
+    );
+    cues.extend(
+        moment
+            .demonstration
+            .items
+            .iter()
+            .map(|item| item.tail_cue),
+    );
+    if let Some(result) = &moment.demonstration.result {
+        cues.push(result.tail_cue);
+    }
+    if let Some(note) = &moment.ambiguity_note {
+        cues.push(note.tail_cue);
+    }
+    (
+        cues.iter()
+            .filter(|cue| matches!(cue, TailCue::Point))
+            .count(),
+        cues.iter()
+            .filter(|cue| matches!(cue, TailCue::Underline))
+            .count(),
+    )
 }
 
 pub fn parse_diarized_sse_event(event: &str) -> Result<Option<DiarizedSegment>, ApiError> {
@@ -590,8 +689,17 @@ fn network_error(error: reqwest::Error) -> ApiError {
 mod tests {
     use super::*;
     use crate::contracts::{
-        BoardDemo, BoardDemoAccent, BoardDemoItem, BoardDemoKind, BoardSection, TeachingMoment,
+        BoardDemo, BoardDemoItem, BoardDemoKind, BoardSection, ChalkPhrase, SourceFocus,
     };
+
+    fn phrase(text: &str, color: ChalkColor, mark: ChalkMark, tail_cue: TailCue) -> ChalkPhrase {
+        ChalkPhrase {
+            text: text.into(),
+            color,
+            mark,
+            tail_cue,
+        }
+    }
 
     #[test]
     fn parses_finalized_diarized_segment_event() {
@@ -694,9 +802,18 @@ mod tests {
         let moment = TeachingMoment {
             title: "The missing ending".into(),
             speech_bubble: "The listener fills in the refusal.".into(),
+            source_focus: SourceFocus {
+                color: ChalkColor::White,
+                tail_cue: TailCue::None,
+            },
             board_sections: vec![BoardSection {
                 heading: "Spoken".into(),
-                lines: vec!["今日はちょっと……".into()],
+                lines: vec![phrase(
+                    "今日はちょっと……",
+                    ChalkColor::BabyBlue,
+                    ChalkMark::None,
+                    TailCue::Point,
+                )],
             }],
             demonstration: BoardDemo {
                 kind: BoardDemoKind::OmittedMeaning,
@@ -704,13 +821,21 @@ mod tests {
                 items: vec![BoardDemoItem {
                     label: "[行けない]".into(),
                     detail: "[I cannot go]".into(),
-                    accent: BoardDemoAccent::Missing,
+                    color: ChalkColor::Pink,
+                    mark: ChalkMark::Bracket,
+                    tail_cue: TailCue::None,
                 }],
-                result: Some("Today does not work for me.".into()),
+                result: Some(phrase(
+                    "Today does not work for me.",
+                    ChalkColor::Yellow,
+                    ChalkMark::None,
+                    TailCue::Underline,
+                )),
             },
             ambiguity_note: None,
         };
         let card = LessonCard {
+            schema_version: 2,
             selected_segment_id: "seg-4".into(),
             moments: vec![moment.clone(), moment],
             suggested_follow_ups: vec!["One?".into(), "Two?".into(), "Three?".into()],
@@ -721,13 +846,24 @@ mod tests {
     #[test]
     fn rejects_an_empty_or_overloaded_lesson_moment() {
         let card = LessonCard {
+            schema_version: 2,
             selected_segment_id: "seg-4".into(),
             moments: vec![TeachingMoment {
                 title: "Too much".into(),
                 speech_bubble: "This board is overloaded.".into(),
+                source_focus: SourceFocus {
+                    color: ChalkColor::White,
+                    tail_cue: TailCue::Point,
+                },
                 board_sections: vec![BoardSection {
                     heading: "Crowded".into(),
-                    lines: vec!["1".into(), "2".into(), "3".into(), "4".into(), "5".into()],
+                    lines: vec![
+                        phrase("1", ChalkColor::White, ChalkMark::None, TailCue::None),
+                        phrase("2", ChalkColor::White, ChalkMark::None, TailCue::None),
+                        phrase("3", ChalkColor::White, ChalkMark::None, TailCue::None),
+                        phrase("4", ChalkColor::White, ChalkMark::None, TailCue::None),
+                        phrase("5", ChalkColor::White, ChalkMark::None, TailCue::None),
+                    ],
                 }],
                 demonstration: BoardDemo {
                     kind: BoardDemoKind::None,
@@ -737,6 +873,51 @@ mod tests {
                 },
                 ambiguity_note: None,
             }],
+            suggested_follow_ups: vec!["One?".into(), "Two?".into(), "Three?".into()],
+        };
+        assert!(validate_lesson_card(card).is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_tail_cues_and_non_pink_strikes() {
+        let card = LessonCard {
+            schema_version: 2,
+            selected_segment_id: "seg-4".into(),
+            moments: vec![TeachingMoment {
+                title: "Bad score".into(),
+                speech_bubble: "This presentation score is invalid.".into(),
+                source_focus: SourceFocus {
+                    color: ChalkColor::White,
+                    tail_cue: TailCue::Point,
+                },
+                board_sections: vec![BoardSection {
+                    heading: "Correction".into(),
+                    lines: vec![phrase(
+                        "Not this",
+                        ChalkColor::Yellow,
+                        ChalkMark::Strike,
+                        TailCue::Point,
+                    )],
+                }],
+                demonstration: BoardDemo {
+                    kind: BoardDemoKind::None,
+                    caption: None,
+                    items: Vec::new(),
+                    result: None,
+                },
+                ambiguity_note: None,
+            }],
+            suggested_follow_ups: vec!["One?".into(), "Two?".into(), "Three?".into()],
+        };
+        assert!(validate_lesson_card(card).is_err());
+    }
+
+    #[test]
+    fn rejects_obsolete_lesson_schema_versions() {
+        let card = LessonCard {
+            schema_version: 1,
+            selected_segment_id: "seg-4".into(),
+            moments: Vec::new(),
             suggested_follow_ups: vec!["One?".into(), "Two?".into(), "Three?".into()],
         };
         assert!(validate_lesson_card(card).is_err());

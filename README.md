@@ -14,8 +14,9 @@ The repository currently contains:
 - local MP4/MOV playback through Tauri's range-capable scoped asset protocol;
 - generalized source, subtitle, and explanation languages with an in-memory canonical session shared across every window;
 - synchronized bilingual or fast original-only overlays, transcript history, click-to-pause/resume ownership, speaker rename/color, persistent placement, live Settings previews, and six focused subtitle presets: Clean, Classic Outline, Yellow Drop, Arcade, Momento Cutout, and Cyberia;
-- Beginner, Intermediate, and Advanced progressive chalkboard lessons with one-to-three focused teaching moments, deterministic diagrams, and scroll-preserving follow-up history;
-- a Three.js Nono presentation with a complete text fallback;
+- Beginner, Intermediate, and Advanced progressive chalkboard lessons with one-to-three focused teaching moments, GPT-selected chalk colors/marks, deterministic diagrams, and scroll-preserving follow-up history;
+- a full-stage Three.js Nono presentation with bounded twin-tail point/underline cues, reduced-motion support, and a complete chalk-only fallback;
+- a production character pipeline with a single canonical armature, export-only body masking, four-influence weight cleanup, restrained procedural hair follow-through, 130%-bounded tail reach, portable materials, a native `NonoToon` shader, and a development-only partial NonToon comparison;
 - OS credential-vault storage for the OpenAI key, a non-sensitive local configured marker, and live model-access validation;
 - pure-Rust MP4/MOV AAC decoding, mono 16 kHz WAV conversion, silence-aware chunking, and temporary-file cleanup;
 - streamed diarized transcription parsing, contextual Structured Output translation, target-only retranslation, coverage events, cancellation, and retry-once behavior;
@@ -143,6 +144,47 @@ pnpm build
 ```
 
 Tests cover the TypeScript reducer, active/overlap selection, coverage hysteresis, Rust resampling/WAV output, silence-aware boundaries, global timestamps, overlap merging, streamed event parsing, contracts, and output extraction. Paid live acceptance tests are intentionally separate.
+
+Before replacing Nono's GLB, run the dedicated asset gate:
+
+```bash
+pnpm audit:nono-rig
+```
+
+It requires one canonical skin, normalized four-influence weights, skinned `Nono_Tails`, both supported 12-bone chains, the five procedural hair roots, required material roles and hair UVs, no source-only objects, the 120,000-triangle/60-draw/15 MB budgets, and named `Idle`, `Think`, and `Present` clips that do not key procedural tails, hair, or skirt bones.
+
+The production Blender source is prepared outside the public repository so Nico-owned construction assets remain private. The repeatable pipeline is:
+
+```bash
+/Applications/Blender.app/Contents/MacOS/Blender \
+  -b /path/to/NonoSubProductionSource.blend \
+  --python-exit-code 1 \
+  --python scripts/prepare_nono_production.py -- \
+  --output /path/to/NonoSubProduction.blend \
+  --candidate-glb /path/to/NonoSubProductionCandidate.glb
+
+node scripts/audit_nono_glb.mjs \
+  /path/to/NonoSubProductionCandidate.glb \
+  --allow-missing-animations
+```
+
+The current interim candidate passes at 95,728 triangles, 54 draws, 54 skinned meshes, and 8.0 MB. It deliberately remains outside `static/assets/Nono.glb` until Nico supplies the three final suit-captured actions. Final export is then:
+
+```bash
+/Applications/Blender.app/Contents/MacOS/Blender \
+  -b /path/to/NonoSubProduction.blend \
+  --python-exit-code 1 \
+  --python scripts/export_nono_final.py -- \
+  --output /path/to/Nono.glb
+
+node scripts/audit_nono_glb.mjs /path/to/Nono.glb
+```
+
+For local visual comparison only, copy the candidate to the ignored `static/assets/NonoCandidate.glb`, open the lesson fixture with `nonoAsset=candidate`, and choose `nonoShader=toon`, `nontoon`, or `portable`. Production builds ignore both query controls and always use the release Nono asset with `NonoToon`.
+
+The currently shipped placeholder GLB intentionally fails this strict audit because its old export lost skin attributes and does not contain the authored clips; lessons retain the complete chalk emphasis fallback until the audited final asset replaces it.
+
+The exact suit-capture rules, forbidden procedural bones, pose checks, and final command are in [Nono animation handoff](docs/NONO_ANIMATION_HANDOFF.md).
 
 ## Model usage
 

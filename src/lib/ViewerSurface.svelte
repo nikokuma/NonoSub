@@ -24,6 +24,8 @@
   let catchingUp = $state(false);
   let controlsVisible = $state(true);
   let dragging = $state(false);
+  let dragCandidate: { pointerId: number; startX: number; startY: number; target: HTMLElement } | null = null;
+  let suppressSelection = false;
   let hideTimer: ReturnType<typeof setTimeout> | undefined;
   let wasPlayingBeforeLesson = false;
   let manualSubtitleOffsetMs = $state(0);
@@ -143,6 +145,10 @@
   }
 
   async function selectLine(segment: SubtitleSegment) {
+    if (suppressSelection) {
+      suppressSelection = false;
+      return;
+    }
     if (isTauri()) await invoke("select_lesson_segment", { segmentId: segment.id });
   }
 
@@ -154,13 +160,22 @@
 
   function beginDrag(event: PointerEvent) {
     if (!stage) return;
-    dragging = true;
-    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
-    moveDrag(event);
+    dragCandidate = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      target: event.currentTarget as HTMLElement,
+    };
   }
 
   function moveDrag(event: PointerEvent) {
-    if (!dragging || !stage) return;
+    if (!stage || !dragCandidate || dragCandidate.pointerId !== event.pointerId) return;
+    if (!dragging) {
+      const distance = Math.hypot(event.clientX - dragCandidate.startX, event.clientY - dragCandidate.startY);
+      if (distance < 6) return;
+      dragging = true;
+      dragCandidate.target.setPointerCapture(event.pointerId);
+    }
     const bounds = stage.getBoundingClientRect();
     preferences.style.position = {
       x: Math.min(.94, Math.max(.06, (event.clientX - bounds.left) / bounds.width)),
@@ -169,8 +184,11 @@
   }
 
   function finishDrag() {
-    if (!dragging) return;
+    const wasDragging = dragging;
     dragging = false;
+    dragCandidate = null;
+    if (!wasDragging) return;
+    suppressSelection = true;
     void savePreferences(preferences);
   }
 </script>

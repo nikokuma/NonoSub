@@ -12,12 +12,14 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "check:rust": "cargo test --manifest-path src-tauri/Cargo.toml && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
+    "audit:nono-rig": "node scripts/audit_nono_glb.mjs",
     "verify": "pnpm check && pnpm test && pnpm build && pnpm check:rust",
     "tauri": "tauri"
   },
   "dependencies": {
     "@fontsource/dotgothic16": "^5.2.8",
     "@fontsource/jetbrains-mono": "^5.2.8",
+    "@fontsource/klee-one": "^5.2.8",
     "@fontsource/share-tech-mono": "^5.2.7",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.7.1",

@@ -430,7 +430,7 @@ async fn request_lesson(
         .languages
         .clone();
     let cache_key = format!(
-        "{}::{learner_level:?}::{}",
+        "lesson-v2::{}::{learner_level:?}::{}",
         selected.id,
         question.trim().to_ascii_lowercase()
     );
@@ -883,8 +883,8 @@ fn show_surface(app: &tauri::AppHandle, surface: &str) -> Result<(), String> {
             .always_on_top(true)
             .resizable(true),
         "lesson" => builder
-            .inner_size(780.0, 620.0)
-            .min_inner_size(620.0, 480.0)
+            .inner_size(1040.0, 720.0)
+            .min_inner_size(900.0, 640.0)
             .decorations(false)
             .always_on_top(true)
             .resizable(true),
@@ -894,7 +894,9 @@ fn show_surface(app: &tauri::AppHandle, surface: &str) -> Result<(), String> {
             .resizable(true),
         _ => return Err("Unknown NonoSub surface.".into()),
     };
-    builder.build().map_err(|error| error.to_string())?;
+    let window = builder.build().map_err(|error| error.to_string())?;
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())?;
     update_activation_policy(app);
     Ok(())
 }
