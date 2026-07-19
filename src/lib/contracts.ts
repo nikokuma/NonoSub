@@ -178,12 +178,19 @@ export interface RecoverableError {
   segmentId?: string;
 }
 
+export interface RetranslatedSegment {
+  segmentId: string;
+  translationText: string;
+  ambiguityNote?: string;
+}
+
 export type SessionEvent =
   | { type: "session_reset"; mode: SessionMode; languages: LanguageSettings; processingMode: CaptionProcessingMode }
   | { type: "phase_changed"; phase: SessionPhase }
   | { type: "caption_upserted"; segment: SubtitleSegment }
   | { type: "transcript_finalized"; segment: SubtitleSegment }
   | { type: "translation_finalized"; segmentId: string; translationText: string; ambiguityNote?: string }
+  | { type: "file_retranslation_applied"; languages: LanguageSettings; translations: RetranslatedSegment[] }
   | { type: "speaker_discovered"; speaker: SpeakerProfile }
   | { type: "coverage_changed"; readyThroughMs: number }
   | { type: "live_sync_changed"; sync: LiveSyncState }

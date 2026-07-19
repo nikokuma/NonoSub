@@ -35,6 +35,24 @@ export function reduceSession(state: SessionState, event: SessionEvent): Session
           ? { ...segment, translationText: event.translationText, ambiguityNote: event.ambiguityNote, translationStatus: "complete" }
           : segment),
       };
+    case "file_retranslation_applied": {
+      const replacements = new Map(event.translations.map((translation) => [translation.segmentId, translation]));
+      return {
+        ...state,
+        languages: event.languages,
+        segments: state.segments.map((segment) => {
+          const replacement = replacements.get(segment.id);
+          return replacement
+            ? {
+                ...segment,
+                translationText: replacement.translationText,
+                ambiguityNote: replacement.ambiguityNote,
+                translationStatus: "complete" as const,
+              }
+            : segment;
+        }),
+      };
+    }
     case "coverage_changed":
       return { ...state, readyThroughMs: event.readyThroughMs };
     case "live_sync_changed":

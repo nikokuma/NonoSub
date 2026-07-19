@@ -180,3 +180,12 @@
 - Separated pending from failed translation state. Pending is now the only status that blocks coverage; failed lines advance with their original timestamps, display source text in every display mode and preset, and remain clickable for Nono lessons.
 - Added an explicit per-line Retry translation action in Settings & Transcript. It captures the active session generation, reuses up to 80 preceding lines without retranscription, and safely restores source fallback if the retry fails again.
 - Full verification passes with zero Svelte errors or warnings, 80 frontend tests, a successful production build, 73 Rust tests, and warning-free clippy.
+
+## July 19 — Atomic file retranslation
+
+- Replaced incremental target-language batch mutation with one canonical `file_retranslation_applied` event. The current target and every current translation remain visible until the complete replacement set is ready.
+- Added a separate monotonic retranslation request generation with permanent supersession cancellation, duplicate-request suppression, and failed-request suppression so ordinary style saves cannot restart paid work.
+- Bound every request to the current file session ID and run generation, wait for a stable completed transcript, and revalidate the exact source revision immediately before commit.
+- Collect every exact Structured Output batch outside canonical state. One terminal failure rejects the entire target switch, retains the previous subtitles, and emits one recoverable explanation.
+- Starting, replacing, stopping, or cancelling a file/live session now cancels staged retranslation independently of the session pipeline.
+- Full verification passes with zero Svelte errors or warnings, 81 frontend tests, a successful production build, 85 Rust tests, and warning-free clippy.

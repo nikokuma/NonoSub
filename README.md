@@ -19,7 +19,7 @@ The repository currently contains:
 - a production character pipeline with a single canonical armature, export-only body masking, four-influence weight cleanup, restrained procedural hair follow-through, 130%-bounded tail reach, portable materials, a native `NonoToon` shader, and a development-only partial NonToon comparison;
 - OS credential-vault storage for the OpenAI key, a non-sensitive local configured marker, and live model-access validation;
 - pure-Rust MP4/MOV AAC decoding, mono 16 kHz WAV conversion, silence-aware chunking, and temporary-file cleanup;
-- streamed diarized transcription parsing, contextual Structured Output translation, target-only retranslation, coverage events, cancellation, and retry-once behavior;
+- streamed diarized transcription parsing, contextual Structured Output translation, atomic generation-scoped target-only retranslation, coverage events, cancellation, and retry-once behavior;
 - macOS 14 ScreenCaptureKit system-audio capture, 48→24 kHz PCM16 conversion, realtime translation or low-latency transcription-only sessions, one automatic reconnect, and graceful drain/close;
 - readable timed splitting for paragraph-sized transcription turns, before contextual translation;
 - original Japanese indirect-refusal and English reverse-direction fixtures plus fixture/unit tests that make no paid API calls.

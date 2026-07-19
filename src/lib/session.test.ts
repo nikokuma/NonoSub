@@ -72,6 +72,35 @@ describe("session contract", () => {
     expect(next.selectedSegmentId).toBe("stable-boundary-id");
   });
 
+  it("applies a complete file target-language replacement in one reducer step", () => {
+    const before = {
+      ...EMPTY_SESSION,
+      mode: "file" as const,
+      languages: { source: "ja", target: "en", explanation: "en" },
+      segments: FIXTURE_SEGMENTS.slice(0, 2).map((segment, index) => ({
+        ...segment,
+        translationText: `old-${index}`,
+        translationStatus: "complete" as const,
+      })),
+    };
+
+    const after = reduceSession(before, {
+      type: "file_retranslation_applied",
+      languages: { source: "ja", target: "es", explanation: "es" },
+      translations: before.segments.map((segment, index) => ({
+        segmentId: segment.id,
+        translationText: `nuevo-${index}`,
+        ambiguityNote: index === 0 ? "context-dependent" : undefined,
+      })),
+    });
+
+    expect(after.languages.target).toBe("es");
+    expect(after.segments.map((segment) => segment.translationText)).toEqual(["nuevo-0", "nuevo-1"]);
+    expect(after.segments[0].ambiguityNote).toBe("context-dependent");
+    expect(after.segments.map((segment) => segment.sourceText)).toEqual(before.segments.map((segment) => segment.sourceText));
+    expect(before.segments.map((segment) => segment.translationText)).toEqual(["old-0", "old-1"]);
+  });
+
   it("shows only the current live caption while preserving finalized history", () => {
     const finalized = { ...FIXTURE_SEGMENTS[0], id: "live-1", origin: "live" as const };
     const provisional = { ...FIXTURE_SEGMENTS[1], id: "live-2", origin: "live" as const, isProvisional: true };

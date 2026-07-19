@@ -124,6 +124,14 @@ pub struct RecoverableError {
     pub segment_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RetranslatedSegment {
+    pub segment_id: String,
+    pub translation_text: String,
+    pub ambiguity_note: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -149,6 +157,10 @@ pub enum SessionEvent {
         segment_id: String,
         translation_text: String,
         ambiguity_note: Option<String>,
+    },
+    FileRetranslationApplied {
+        languages: LanguageSettings,
+        translations: Vec<RetranslatedSegment>,
     },
     SpeakerDiscovered {
         speaker: SpeakerProfile,

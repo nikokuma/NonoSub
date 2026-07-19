@@ -30,7 +30,7 @@ The tray calls Rust directly. Closing a window hides it; quitting is explicit. m
 7. One clean 2–10 second first-chunk reference per speaker becomes an internal WAV data URL, up to four speakers. UI names remain separate from stable internal IDs. Build Week speaker discovery is then frozen; later unmatched trailing fragments inherit the adjacent known voice rather than creating a false identity.
 8. Pending lines are translated in batches of at most six. `gpt-5.6-sol` receives the language pair, speaker context, and up to 80 preceding lines with low reasoning, `store:false`, and a strict schema constrained to the exact requested IDs and batch length. NonoSub additionally rejects missing, duplicate, unknown, blank, incomplete, and refused output before applying any result. Retryable failures receive one retry; other terminal batch failures become clickable source-only lines so coverage and later batches continue, with an explicit one-line retry in Settings & Transcript.
 9. Playback starts at 15 seconds of translated coverage, pauses below two seconds of lead, and resumes at eight seconds.
-10. Changing the file target reuses source segments and retranslates them without redecoding or retranscribing.
+10. Changing the file target reuses the finalized source transcript without redecoding or retranscribing. A separate monotonically increasing request generation stages every validated translation batch off-state; the old target remains visible until one exact, current-session `file_retranslation_applied` event atomically replaces every line. Failure, cancellation, a newer target request, or a changed source revision leaves the prior subtitles untouched.
 
 ## Live Captions flow
 

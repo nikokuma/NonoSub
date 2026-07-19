@@ -11,8 +11,9 @@ mod pipeline;
 
 use contracts::{
     CaptionProcessingMode, LanguageSettings, LearnerLevel, LessonCard, LiveSyncMode, LiveSyncState,
-    PreparedMediaInfo, RecoverableError, SegmentStatus, SequencedSessionEvent, SessionEvent,
-    SessionMode, SessionSnapshot, SpeakerProfile, SubtitleSegment, TutorMessage,
+    PreparedMediaInfo, RecoverableError, RetranslatedSegment, SegmentStatus,
+    SequencedSessionEvent, SessionEvent, SessionMode, SessionSnapshot, SpeakerProfile,
+    SubtitleSegment, TutorMessage,
 };
 use serde::Serialize;
 use std::{
@@ -40,6 +41,7 @@ struct AppState {
     playback_directory: Mutex<Option<tempfile::TempDir>>,
     prepared_session: Mutex<Option<PreparedSession>>,
     runs: RunCoordinator,
+    retranslations: RetranslationCoordinator,
     canonical: Mutex<SessionSnapshot>,
     lesson_cache: Mutex<HashMap<String, LessonCard>>,
     launcher_mode: Mutex<String>,
@@ -60,6 +62,7 @@ impl Default for AppState {
             playback_directory: Mutex::new(None),
             prepared_session: Mutex::new(None),
             runs: RunCoordinator::default(),
+            retranslations: RetranslationCoordinator::default(),
             canonical: Mutex::new(SessionSnapshot::default()),
             lesson_cache: Mutex::new(HashMap::new()),
             launcher_mode: Mutex::new("file".into()),
@@ -146,6 +149,115 @@ impl RunCoordinator {
         Ok(())
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetranslationStatus {
+    Running,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+struct RetranslationLease {
+    session_generation: u64,
+    request_generation: u64,
+    languages: LanguageSettings,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl RetranslationLease {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ActiveRetranslation {
+    lease: RetranslationLease,
+    status: RetranslationStatus,
+}
+
+#[derive(Debug, Default)]
+struct RetranslationCoordinator {
+    counter: AtomicU64,
+    active: Mutex<Option<ActiveRetranslation>>,
+}
+
+impl RetranslationCoordinator {
+    fn begin(
+        &self,
+        session_generation: u64,
+        languages: LanguageSettings,
+    ) -> Result<Option<RetranslationLease>, openai::ApiError> {
+        let mut active = self
+            .active
+            .lock()
+            .map_err(|_| service_error("Retranslation generation state is unavailable."))?;
+        if active.as_ref().is_some_and(|request| {
+            request.lease.session_generation == session_generation
+                && request.lease.languages == languages
+                && !request.lease.is_cancelled()
+        }) {
+            return Ok(None);
+        }
+        if let Some(previous) = active.take() {
+            previous.lease.cancelled.store(true, Ordering::Relaxed);
+        }
+        let lease = RetranslationLease {
+            session_generation,
+            request_generation: self.counter.fetch_add(1, Ordering::Relaxed) + 1,
+            languages,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        };
+        *active = Some(ActiveRetranslation {
+            lease: lease.clone(),
+            status: RetranslationStatus::Running,
+        });
+        Ok(Some(lease))
+    }
+
+    fn ensure_current(&self, lease: &RetranslationLease) -> Result<(), openai::ApiError> {
+        let active = self
+            .active
+            .lock()
+            .map_err(|_| service_error("Retranslation generation state is unavailable."))?;
+        if lease.is_cancelled()
+            || active.as_ref().is_none_or(|request| {
+                request.status != RetranslationStatus::Running
+                    || request.lease.session_generation != lease.session_generation
+                    || request.lease.request_generation != lease.request_generation
+            })
+        {
+            return Err(cancelled_error());
+        }
+        Ok(())
+    }
+
+    fn cancel(&self) -> Result<(), openai::ApiError> {
+        let mut active = self
+            .active
+            .lock()
+            .map_err(|_| service_error("Retranslation generation state is unavailable."))?;
+        if let Some(request) = active.take() {
+            request.lease.cancelled.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileSourceRevision {
+    segment_id: String,
+    start_ms: u64,
+    end_ms: u64,
+    source_text: String,
+    speaker_id: Option<String>,
+}
+
+type ScopedRetranslationEnvelope<'a> = (
+    MutexGuard<'a, Option<RunLease>>,
+    MutexGuard<'a, Option<ActiveRetranslation>>,
+    SequencedSessionEvent,
+);
 
 #[derive(Debug, Serialize)]
 struct ApiKeyStatus {
@@ -333,6 +445,10 @@ async fn prepare_media(
         return Err("NonoSub currently supports MP4 and MOV video files.".into());
     }
 
+    state
+        .retranslations
+        .cancel()
+        .map_err(|error| error.message)?;
     let run = state.runs.replace().map_err(|error| error.message)?;
     #[cfg(target_os = "macos")]
     live::stop(&state.live);
@@ -840,25 +956,303 @@ fn close_lesson_surface(app: tauri::AppHandle, state: State<'_, AppState>) -> Re
     Ok(())
 }
 
+fn file_source_revision(segments: &[SubtitleSegment]) -> Vec<FileSourceRevision> {
+    segments
+        .iter()
+        .map(|segment| FileSourceRevision {
+            segment_id: segment.id.clone(),
+            start_ms: segment.start_ms,
+            end_ms: segment.end_ms,
+            source_text: segment.source_text.clone(),
+            speaker_id: segment.speaker_id.clone(),
+        })
+        .collect()
+}
+
+fn begin_file_retranslation(
+    state: &AppState,
+    session_generation: u64,
+    languages: LanguageSettings,
+) -> Result<Option<RetranslationLease>, openai::ApiError> {
+    let run_guard = state
+        .runs
+        .active
+        .lock()
+        .map_err(|_| service_error("Session generation state is unavailable."))?;
+    if run_guard.as_ref().is_none_or(|run| {
+        run.generation != session_generation || run.is_cancelled()
+    }) {
+        return Err(cancelled_error());
+    }
+    state
+        .retranslations
+        .begin(session_generation, languages)
+}
+
+async fn completed_file_snapshot(
+    app: &tauri::AppHandle,
+    lease: &RetranslationLease,
+) -> Result<SessionSnapshot, openai::ApiError> {
+    loop {
+        let state = app.state::<AppState>();
+        state.runs.lease(lease.session_generation)?;
+        state.retranslations.ensure_current(lease)?;
+        let snapshot = state
+            .canonical
+            .lock()
+            .map_err(|_| service_error("Session state is unavailable."))?
+            .clone();
+        if snapshot.session_id != format!("session-{}", lease.session_generation) {
+            return Err(cancelled_error());
+        }
+        if let Some(message) = snapshot.fatal_error.as_ref() {
+            return Err(service_error(&format!(
+                "The file session could not finish before retranslation: {message}"
+            )));
+        }
+        if snapshot.phase == "complete" {
+            if snapshot.mode != Some(SessionMode::File)
+                || snapshot.processing_mode != CaptionProcessingMode::Translated
+            {
+                return Err(cancelled_error());
+            }
+            return Ok(snapshot);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+async fn run_file_retranslation(
+    app: tauri::AppHandle,
+    client: openai::OpenAiClient,
+    lease: RetranslationLease,
+) -> Result<(), openai::ApiError> {
+    let snapshot = completed_file_snapshot(&app, &lease).await?;
+    let source_revision = file_source_revision(&snapshot.segments);
+    let inputs = snapshot
+        .segments
+        .iter()
+        .map(|segment| openai::TranslationInput {
+            segment_id: segment.id.clone(),
+            speaker: segment
+                .speaker_id
+                .as_ref()
+                .and_then(|id| snapshot.speakers.get(id))
+                .map(|speaker| speaker.display_name.clone())
+                .unwrap_or_else(|| "Speaker".into()),
+            source_text: segment.source_text.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut replacements = Vec::with_capacity(inputs.len());
+    for (batch_index, batch) in inputs.chunks(6).enumerate() {
+        app.state::<AppState>()
+            .retranslations
+            .ensure_current(&lease)?;
+        app.state::<AppState>()
+            .runs
+            .lease(lease.session_generation)?;
+        let start = batch_index * 6;
+        let preceding_start = start.saturating_sub(80);
+        let outputs = pipeline::translate_batch_with_retry(
+            &client,
+            &inputs[preceding_start..start],
+            batch,
+            &lease.languages,
+        )
+        .await?;
+        app.state::<AppState>()
+            .retranslations
+            .ensure_current(&lease)?;
+        replacements.extend(outputs.into_iter().map(|output| RetranslatedSegment {
+            segment_id: output.segment_id,
+            translation_text: output.translation,
+            ambiguity_note: output.ambiguity_note,
+        }));
+    }
+    record_file_retranslation_success(&app, &lease, &source_revision, replacements)
+}
+
+fn scoped_file_retranslation_success<'a>(
+    state: &'a AppState,
+    lease: &RetranslationLease,
+    source_revision: &[FileSourceRevision],
+    translations: Vec<RetranslatedSegment>,
+) -> Result<ScopedRetranslationEnvelope<'a>, openai::ApiError> {
+    let run_guard = state
+        .runs
+        .active
+        .lock()
+        .map_err(|_| service_error("Session generation state is unavailable."))?;
+    if run_guard.as_ref().is_none_or(|run| {
+        run.generation != lease.session_generation || run.is_cancelled()
+    }) {
+        return Err(cancelled_error());
+    }
+    let mut request_guard = state
+        .retranslations
+        .active
+        .lock()
+        .map_err(|_| service_error("Retranslation generation state is unavailable."))?;
+    if lease.is_cancelled()
+        || request_guard.as_ref().is_none_or(|request| {
+            request.status != RetranslationStatus::Running
+                || request.lease.session_generation != lease.session_generation
+                || request.lease.request_generation != lease.request_generation
+        })
+    {
+        return Err(cancelled_error());
+    }
+    let mut snapshot = state
+        .canonical
+        .lock()
+        .map_err(|_| service_error("Session state is unavailable."))?;
+    if snapshot.session_id != format!("session-{}", lease.session_generation)
+        || snapshot.mode != Some(SessionMode::File)
+        || snapshot.processing_mode != CaptionProcessingMode::Translated
+        || snapshot.phase != "complete"
+        || file_source_revision(&snapshot.segments) != source_revision
+    {
+        return Err(service_error(
+            "The file transcript changed before retranslation could be applied.",
+        ));
+    }
+    let mut replacement_ids = HashMap::new();
+    for translation in &translations {
+        if translation.translation_text.trim().is_empty()
+            || replacement_ids
+                .insert(translation.segment_id.as_str(), ())
+                .is_some()
+        {
+            return Err(service_error(
+                "The replacement translation set was incomplete or invalid.",
+            ));
+        }
+    }
+    if translations.len() != snapshot.segments.len()
+        || snapshot
+            .segments
+            .iter()
+            .any(|segment| !replacement_ids.contains_key(segment.id.as_str()))
+    {
+        return Err(service_error(
+            "The replacement translation set did not match the current transcript.",
+        ));
+    }
+    let event = SessionEvent::FileRetranslationApplied {
+        languages: lease.languages.clone(),
+        translations,
+    };
+    snapshot.sequence += 1;
+    apply_event(&mut snapshot, &event);
+    let envelope = SequencedSessionEvent {
+        session_id: snapshot.session_id.clone(),
+        sequence: snapshot.sequence,
+        event,
+    };
+    *request_guard = None;
+    drop(snapshot);
+    Ok((run_guard, request_guard, envelope))
+}
+
+fn record_file_retranslation_success(
+    app: &tauri::AppHandle,
+    lease: &RetranslationLease,
+    source_revision: &[FileSourceRevision],
+    translations: Vec<RetranslatedSegment>,
+) -> Result<(), openai::ApiError> {
+    let (_run_guard, _request_guard, envelope) = scoped_file_retranslation_success(
+        app.state::<AppState>().inner(),
+        lease,
+        source_revision,
+        translations,
+    )?;
+    app.emit("session-event", envelope)
+        .map_err(|error| service_error(&format!("Could not update subtitle windows: {error}")))
+}
+
+fn scoped_file_retranslation_failure<'a>(
+    state: &'a AppState,
+    lease: &RetranslationLease,
+    message: String,
+) -> Result<ScopedRetranslationEnvelope<'a>, openai::ApiError> {
+    let run_guard = state
+        .runs
+        .active
+        .lock()
+        .map_err(|_| service_error("Session generation state is unavailable."))?;
+    if run_guard.as_ref().is_none_or(|run| {
+        run.generation != lease.session_generation || run.is_cancelled()
+    }) {
+        return Err(cancelled_error());
+    }
+    let mut request_guard = state
+        .retranslations
+        .active
+        .lock()
+        .map_err(|_| service_error("Retranslation generation state is unavailable."))?;
+    let request = request_guard.as_mut().ok_or_else(cancelled_error)?;
+    if lease.is_cancelled()
+        || request.status != RetranslationStatus::Running
+        || request.lease.session_generation != lease.session_generation
+        || request.lease.request_generation != lease.request_generation
+    {
+        return Err(cancelled_error());
+    }
+    request.status = RetranslationStatus::Failed;
+    let event = SessionEvent::RecoverableError {
+        error: RecoverableError {
+            code: "retranslation_failed".into(),
+            message: format!(
+                "Could not switch subtitle languages. The previous subtitles remain available. {message}"
+            ),
+            segment_id: None,
+        },
+    };
+    let mut snapshot = state
+        .canonical
+        .lock()
+        .map_err(|_| service_error("Session state is unavailable."))?;
+    snapshot.sequence += 1;
+    apply_event(&mut snapshot, &event);
+    let envelope = SequencedSessionEvent {
+        session_id: snapshot.session_id.clone(),
+        sequence: snapshot.sequence,
+        event,
+    };
+    drop(snapshot);
+    Ok((run_guard, request_guard, envelope))
+}
+
+fn record_file_retranslation_failure(
+    app: &tauri::AppHandle,
+    lease: &RetranslationLease,
+    message: String,
+) -> Result<(), openai::ApiError> {
+    let (_run_guard, _request_guard, envelope) = scoped_file_retranslation_failure(
+        app.state::<AppState>().inner(),
+        lease,
+        message,
+    )?;
+    app.emit("session-event", envelope)
+        .map_err(|error| service_error(&format!("Could not update subtitle windows: {error}")))
+}
+
 #[tauri::command]
 fn update_languages(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     languages: LanguageSettings,
 ) -> Result<(), String> {
-    let (previous, mode, processing_mode, segments, speakers) = {
-        let mut snapshot = state
+    let (session_id, previous, mode, processing_mode) = {
+        let snapshot = state
             .canonical
             .lock()
             .map_err(|_| "Session state is unavailable.")?;
-        let previous = snapshot.languages.clone();
-        snapshot.languages = languages.clone();
         (
-            previous,
+            snapshot.session_id.clone(),
+            snapshot.languages.clone(),
             snapshot.mode.clone(),
             snapshot.processing_mode.clone(),
-            snapshot.segments.clone(),
-            snapshot.speakers.clone(),
         )
     };
     let generation = state
@@ -869,111 +1263,54 @@ fn update_languages(
         .as_ref()
         .filter(|run| !run.is_cancelled())
         .map(|run| run.generation);
-    if let Some(generation) = generation.filter(|_| {
-        processing_mode == CaptionProcessingMode::Translated
-        && mode == Some(SessionMode::File)
-        && previous.target != languages.target
-        && !segments.is_empty()
+    if let Some(generation) = generation.filter(|generation| {
+            processing_mode == CaptionProcessingMode::Translated
+            && mode == Some(SessionMode::File)
+            && previous.target != languages.target
+            && session_id == format!("session-{generation}")
     }) {
-        let key = api_key().map_err(|error| error.message)?;
-        tauri::async_runtime::spawn(async move {
-            let _ = record_event_for_generation(
-                &app,
-                generation,
-                SessionEvent::PhaseChanged {
-                    phase: "translating".into(),
-                },
-            );
-            let client = match openai::OpenAiClient::new(key) {
-                Ok(client) => client,
-                Err(error) => {
-                    let _ = record_event_for_generation(
-                        &app,
-                        generation,
-                        SessionEvent::RecoverableError {
-                            error: RecoverableError {
-                                code: "retranslation_setup".into(),
-                                message: error.message,
-                                segment_id: None,
-                            },
-                        },
-                    );
-                    return;
+        {
+            let mut snapshot = state
+                .canonical
+                .lock()
+                .map_err(|_| "Session state is unavailable.")?;
+            snapshot.languages.source = languages.source.clone();
+            snapshot.languages.explanation = languages.explanation.clone();
+        }
+        if let Some(lease) = begin_file_retranslation(state.inner(), generation, languages)
+            .map_err(|error| error.message)?
+        {
+            tauri::async_runtime::spawn(async move {
+                let result = async {
+                    let key = api_key()?;
+                    let client = openai::OpenAiClient::new(key)?;
+                    run_file_retranslation(app.clone(), client, lease.clone()).await
                 }
-            };
-            let inputs: Vec<openai::TranslationInput> = segments
-                .iter()
-                .map(|segment| openai::TranslationInput {
-                    segment_id: segment.id.clone(),
-                    speaker: segment
-                        .speaker_id
-                        .as_ref()
-                        .and_then(|id| speakers.get(id))
-                        .map(|speaker| speaker.display_name.clone())
-                        .unwrap_or_else(|| "Speaker".into()),
-                    source_text: segment.source_text.clone(),
-                })
-                .collect();
-            for (batch_index, batch) in inputs.chunks(6).enumerate() {
-                let start = batch_index * 6;
-                let preceding_start = start.saturating_sub(80);
-                let preceding = &inputs[preceding_start..start];
-                let first = client.translate(preceding, batch, &languages).await;
-                let outputs = match first {
-                    Err(error) if error.retryable => {
-                        client.translate(preceding, batch, &languages).await
-                    }
-                    result => result,
-                };
-                match outputs {
-                    Ok(outputs) => {
-                        for output in outputs {
-                            let _ = record_event_for_generation(
-                                &app,
-                                generation,
-                                SessionEvent::TranslationFinalized {
-                                    segment_id: output.segment_id,
-                                    translation_text: output.translation,
-                                    ambiguity_note: output.ambiguity_note,
-                                },
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        let _ = record_event_for_generation(
+                .await;
+                if let Err(error) = result {
+                    if error.kind != openai::ApiErrorKind::Cancelled {
+                        let _ = record_file_retranslation_failure(
                             &app,
-                            generation,
-                            SessionEvent::RecoverableError {
-                                error: RecoverableError {
-                                    code: "retranslation_failed".into(),
-                                    message: error.message,
-                                    segment_id: batch
-                                        .first()
-                                        .map(|segment| segment.segment_id.clone()),
-                                },
-                            },
+                            &lease,
+                            error.message,
                         );
                     }
                 }
-            }
-            let ready_through_ms = segments.last().map_or(0, |segment| segment.end_ms);
-            let _ = record_event_for_generation(
-                &app,
-                generation,
-                SessionEvent::CoverageChanged { ready_through_ms },
-            );
-            let _ = record_event_for_generation(
-                &app,
-                generation,
-                SessionEvent::PhaseChanged {
-                    phase: "ready".into(),
-                },
-            );
-        });
+            });
+        }
     } else if processing_mode == CaptionProcessingMode::Translated
         && mode == Some(SessionMode::Live)
         && previous.target != languages.target
     {
+        state
+            .retranslations
+            .cancel()
+            .map_err(|error| error.message)?;
+        state
+            .canonical
+            .lock()
+            .map_err(|_| "Session state is unavailable.")?
+            .languages = languages;
         #[cfg(target_os = "macos")]
         live::stop(&state.live);
         let _ = record_event(
@@ -987,6 +1324,16 @@ fn update_languages(
                 },
             },
         );
+    } else {
+        state
+            .retranslations
+            .cancel()
+            .map_err(|error| error.message)?;
+        state
+            .canonical
+            .lock()
+            .map_err(|_| "Session state is unavailable.")?
+            .languages = languages;
     }
     Ok(())
 }
@@ -1030,6 +1377,10 @@ fn hide_surface(app: tauri::AppHandle, surface: String) -> Result<(), String> {
 
 #[tauri::command]
 fn cancel_session(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .retranslations
+        .cancel()
+        .map_err(|error| error.message)?;
     state.runs.cancel().map_err(|error| error.message)?;
     #[cfg(target_os = "macos")]
     live::stop(&state.live);
@@ -1070,6 +1421,7 @@ async fn start_live_capture(
     sync_mode: LiveSyncMode,
     processing_mode: CaptionProcessingMode,
 ) -> Result<(), openai::ApiError> {
+    state.retranslations.cancel()?;
     let run = state.runs.replace()?;
     begin_session_for_generation(
         &app,
@@ -1125,6 +1477,10 @@ async fn start_live_capture(
 
 #[tauri::command]
 fn stop_live_capture(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .retranslations
+        .cancel()
+        .map_err(|error| error.message)?;
     state.runs.cancel().map_err(|error| error.message)?;
     #[cfg(target_os = "macos")]
     live::stop(&state.live);
@@ -1288,6 +1644,23 @@ fn apply_event(snapshot: &mut SessionSnapshot, event: &SessionEvent) {
                 segment.translation_text = Some(translation_text.clone());
                 segment.ambiguity_note = ambiguity_note.clone();
                 segment.translation_status = contracts::SegmentStatus::Complete;
+            }
+        }
+        SessionEvent::FileRetranslationApplied {
+            languages,
+            translations,
+        } => {
+            let replacements = translations
+                .iter()
+                .map(|translation| (translation.segment_id.as_str(), translation))
+                .collect::<HashMap<_, _>>();
+            snapshot.languages = languages.clone();
+            for segment in &mut snapshot.segments {
+                if let Some(replacement) = replacements.get(segment.id.as_str()) {
+                    segment.translation_text = Some(replacement.translation_text.clone());
+                    segment.ambiguity_note = replacement.ambiguity_note.clone();
+                    segment.translation_status = contracts::SegmentStatus::Complete;
+                }
             }
         }
         SessionEvent::SpeakerDiscovered { speaker } => {
@@ -1640,6 +2013,7 @@ fn dispatch_action(app: &tauri::AppHandle, id: &str) {
                 .lock()
                 .ok()
                 .and_then(|snapshot| snapshot.mode.clone());
+            let _ = state.retranslations.cancel();
             let _ = state.runs.cancel();
             #[cfg(target_os = "macos")]
             live::stop(&state.live);
@@ -1852,6 +2226,44 @@ mod tests {
     use super::*;
     use contracts::{SegmentStatus, SessionMode};
 
+    fn file_segment(id: &str, source: &str, translation: &str, start_ms: u64) -> SubtitleSegment {
+        SubtitleSegment {
+            id: id.into(),
+            origin: SessionMode::File,
+            start_ms,
+            end_ms: start_ms + 1_000,
+            source_text: source.into(),
+            translation_text: Some(translation.into()),
+            ambiguity_note: None,
+            speaker_id: Some("speaker-1".into()),
+            is_provisional: false,
+            transcription_status: SegmentStatus::Complete,
+            translation_status: SegmentStatus::Complete,
+        }
+    }
+
+    fn completed_file_state() -> AppState {
+        let state = AppState::default();
+        let run = state.runs.replace().unwrap();
+        *state.canonical.lock().unwrap() = SessionSnapshot {
+            session_id: format!("session-{}", run.generation),
+            mode: Some(SessionMode::File),
+            processing_mode: CaptionProcessingMode::Translated,
+            languages: LanguageSettings {
+                source: "ja".into(),
+                target: "en".into(),
+                explanation: "en".into(),
+            },
+            phase: "complete".into(),
+            segments: vec![
+                file_segment("segment-1", "何ですか？", "What is it?", 0),
+                file_segment("segment-2", "今日はちょっと", "Today is a little…", 1_000),
+            ],
+            ..SessionSnapshot::default()
+        };
+        state
+    }
+
     #[test]
     fn canonical_contract_serializes_with_webview_field_names() {
         let segment = SubtitleSegment {
@@ -1936,6 +2348,220 @@ mod tests {
         assert!(first.is_cancelled());
         assert!(second.is_cancelled());
         assert!(runs.lease(second.generation).is_err());
+    }
+
+    #[test]
+    fn retranslation_requests_suppress_duplicates_and_permanently_cancel_superseded_work() {
+        let coordinator = RetranslationCoordinator::default();
+        let spanish = LanguageSettings {
+            source: "ja".into(),
+            target: "es".into(),
+            explanation: "es".into(),
+        };
+        let first = coordinator.begin(7, spanish.clone()).unwrap().unwrap();
+        assert!(coordinator.begin(7, spanish.clone()).unwrap().is_none());
+        coordinator.active.lock().unwrap().as_mut().unwrap().status =
+            RetranslationStatus::Failed;
+        assert!(coordinator.begin(7, spanish).unwrap().is_none());
+
+        let french = LanguageSettings {
+            source: "ja".into(),
+            target: "fr".into(),
+            explanation: "fr".into(),
+        };
+        let second = coordinator.begin(7, french).unwrap().unwrap();
+        assert!(first.is_cancelled());
+        assert!(!second.is_cancelled());
+        assert!(coordinator.ensure_current(&first).is_err());
+        assert!(coordinator.ensure_current(&second).is_ok());
+    }
+
+    #[test]
+    fn complete_file_retranslation_changes_every_line_and_language_atomically() {
+        let state = completed_file_state();
+        let run_generation = state.runs.active.lock().unwrap().as_ref().unwrap().generation;
+        let requested = LanguageSettings {
+            source: "ja".into(),
+            target: "es".into(),
+            explanation: "es".into(),
+        };
+        let lease = state
+            .retranslations
+            .begin(run_generation, requested.clone())
+            .unwrap()
+            .unwrap();
+        let revision = file_source_revision(&state.canonical.lock().unwrap().segments);
+        let replacements = vec![
+            RetranslatedSegment {
+                segment_id: "segment-1".into(),
+                translation_text: "¿Qué es?".into(),
+                ambiguity_note: None,
+            },
+            RetranslatedSegment {
+                segment_id: "segment-2".into(),
+                translation_text: "Hoy me viene un poco mal…".into(),
+                ambiguity_note: Some("Indirect refusal".into()),
+            },
+        ];
+
+        let (run_guard, request_guard, envelope) = scoped_file_retranslation_success(
+            &state,
+            &lease,
+            &revision,
+            replacements,
+        )
+        .unwrap();
+        assert!(matches!(
+            envelope.event,
+            SessionEvent::FileRetranslationApplied { .. }
+        ));
+        drop(request_guard);
+        drop(run_guard);
+        let snapshot = state.canonical.lock().unwrap();
+        assert_eq!(snapshot.languages, requested);
+        assert_eq!(
+            snapshot
+                .segments
+                .iter()
+                .map(|segment| segment.translation_text.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["¿Qué es?", "Hoy me viene un poco mal…"]
+        );
+        assert_eq!(snapshot.sequence, 1);
+        assert!(state.retranslations.active.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn stale_retranslation_generation_cannot_change_the_visible_target() {
+        let state = completed_file_state();
+        let generation = state.runs.active.lock().unwrap().as_ref().unwrap().generation;
+        let first = state
+            .retranslations
+            .begin(
+                generation,
+                LanguageSettings {
+                    source: "ja".into(),
+                    target: "es".into(),
+                    explanation: "es".into(),
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let revision = file_source_revision(&state.canonical.lock().unwrap().segments);
+        let _second = state
+            .retranslations
+            .begin(
+                generation,
+                LanguageSettings {
+                    source: "ja".into(),
+                    target: "fr".into(),
+                    explanation: "fr".into(),
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let before = state.canonical.lock().unwrap().clone();
+
+        let error = scoped_file_retranslation_success(
+            &state,
+            &first,
+            &revision,
+            vec![
+                RetranslatedSegment {
+                    segment_id: "segment-1".into(),
+                    translation_text: "stale one".into(),
+                    ambiguity_note: None,
+                },
+                RetranslatedSegment {
+                    segment_id: "segment-2".into(),
+                    translation_text: "stale two".into(),
+                    ambiguity_note: None,
+                },
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, openai::ApiErrorKind::Cancelled);
+        let after = state.canonical.lock().unwrap();
+        assert_eq!(after.sequence, before.sequence);
+        assert_eq!(after.languages, before.languages);
+        assert_eq!(after.segments, before.segments);
+    }
+
+    #[test]
+    fn incomplete_atomic_replacement_is_rejected_without_partial_mutation() {
+        let state = completed_file_state();
+        let generation = state.runs.active.lock().unwrap().as_ref().unwrap().generation;
+        let lease = state
+            .retranslations
+            .begin(
+                generation,
+                LanguageSettings {
+                    source: "ja".into(),
+                    target: "es".into(),
+                    explanation: "es".into(),
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let revision = file_source_revision(&state.canonical.lock().unwrap().segments);
+        let before = state.canonical.lock().unwrap().clone();
+
+        let error = scoped_file_retranslation_success(
+            &state,
+            &lease,
+            &revision,
+            vec![RetranslatedSegment {
+                segment_id: "segment-1".into(),
+                translation_text: "¿Qué es?".into(),
+                ambiguity_note: None,
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, openai::ApiErrorKind::Service);
+        let after = state.canonical.lock().unwrap();
+        assert_eq!(after.sequence, before.sequence);
+        assert_eq!(after.languages, before.languages);
+        assert_eq!(after.segments, before.segments);
+    }
+
+    #[test]
+    fn failed_retranslation_preserves_the_previous_language_and_complete_subtitles() {
+        let state = completed_file_state();
+        let generation = state.runs.active.lock().unwrap().as_ref().unwrap().generation;
+        let requested = LanguageSettings {
+            source: "ja".into(),
+            target: "es".into(),
+            explanation: "es".into(),
+        };
+        let lease = state
+            .retranslations
+            .begin(generation, requested.clone())
+            .unwrap()
+            .unwrap();
+        let before = state.canonical.lock().unwrap().clone();
+
+        let (run_guard, request_guard, envelope) = scoped_file_retranslation_failure(
+            &state,
+            &lease,
+            "network unavailable".into(),
+        )
+        .unwrap();
+        assert!(matches!(
+            envelope.event,
+            SessionEvent::RecoverableError { .. }
+        ));
+        drop(request_guard);
+        drop(run_guard);
+        let after = state.canonical.lock().unwrap();
+        assert_eq!(after.languages, before.languages);
+        assert_eq!(after.segments, before.segments);
+        assert_eq!(after.errors.len(), before.errors.len() + 1);
+        drop(after);
+        assert!(state
+            .retranslations
+            .begin(generation, requested)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
