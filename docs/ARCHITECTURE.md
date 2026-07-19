@@ -53,11 +53,13 @@ Realtime translation currently auto-detects its source language because the dedi
 
 ## Structured lessons
 
-Clicking any finalized line selects the source utterance, opens the lesson surface, and pauses file playback through a cross-window event. Closing the lesson resumes only when the viewer had been playing. Live capture never pauses.
+Opening Ask Nono on a finalized line creates a monotonic Rust selection ID containing the canonical session ID and exact source revision. The lesson surface renders that pinned subtitle rather than following mutable global selection state. Rust resolves nearby dialogue, speakers, and languages from canonical state when the question is submitted, then validates the selection again after GPT returns. A replacement session, another selection, or a revised source line prevents the late answer from entering the cache or board. File and external-media pause ownership are handled separately from lesson identity.
 
 `gpt-5.6-sol` returns a strict `LessonCard` deck with one to three ordered teaching moments. Nono presents exactly one moment at a time; each has a short speech bubble, at most two compact text sections, an optional ambiguity note, and one bounded demonstration chosen from sentence breakdown, omitted meaning, literal-to-natural, tone scale, mini dialogue, or none. GPT supplies semantic labels and teaching content, while Svelte owns every coordinate, style, arrow, animation, Next/Skip control, and progress marker.
 
-Follow-up questions begin the API request while the current board erases, then hold a thinking state until the complete validated deck is ready and animate the next moment into place. Invalid output is retried once and never partially rendered; a failed request restores the previous board. Decks are cached in memory by segment, learner level, and question. Follow-ups include the selected source, nearby dialogue, up to 80 preceding lines, available following context, and the local lesson thread.
+Follow-up questions begin the API request while the current board erases, then hold a thinking state until the complete validated deck is ready and animate the next moment into place. Invalid output—including a card naming another segment—is retried once and never partially rendered; a failed follow-up restores the previous board. Exact in-memory cache identity includes schema, session, source revision, learner level, languages, canonical context, speakers, capitalization-preserving question, and local thread. Hidden frontend threads use session plus source revision, so reused IDs and revised lines cannot inherit another lesson.
+
+The compact composer is positioned temporarily near the clicked subtitle. Its programmatic movement is never persisted. When the complete board appears it restores the normalized full-board position for that monitor, and only manual movement of the visible lesson board updates that preference.
 
 ## Cleanup and failure isolation
 

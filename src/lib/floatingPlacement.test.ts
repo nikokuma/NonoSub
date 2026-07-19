@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fitLogicalWindowSize, normalizeLessonPlacement, resolveLessonPosition, type MonitorGeometry } from "./floatingPlacement";
+import { fitLogicalWindowSize, normalizeLessonPlacement, resolveLessonPosition, shouldPersistLessonPlacement, type MonitorGeometry } from "./floatingPlacement";
 
 const monitor: MonitorGeometry = { key: "main", x: 100, y: 50, width: 1600, height: 900 };
 
@@ -22,5 +22,11 @@ describe("floating lesson placement", () => {
   it("keeps composer and lesson dimensions in logical points on Retina displays", () => {
     expect(fitLogicalWindowSize({ width: 720, height: 210 }, { width: 3024, height: 1964 }, 2)).toEqual({ width: 720, height: 210 });
     expect(fitLogicalWindowSize({ width: 980, height: 620 }, { width: 1600, height: 900 }, 2)).toEqual({ width: 720, height: 405 });
+  });
+
+  it("persists only manual movement of the full lesson board", () => {
+    expect(shouldPersistLessonPlacement("compose", 0, 1_000)).toBe(false);
+    expect(shouldPersistLessonPlacement("lesson", 1_200, 1_000)).toBe(false);
+    expect(shouldPersistLessonPlacement("lesson", 900, 1_000)).toBe(true);
   });
 });

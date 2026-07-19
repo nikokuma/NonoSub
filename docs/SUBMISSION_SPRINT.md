@@ -507,7 +507,7 @@ For every creation deliverable:
 
 ## Audit repair checkpoints
 
-Status: **R8 COMPLETE — convergent multi-window session and preference state**
+Status: **R9 COMPLETE — pinned lesson identity, cache, and placement**
 
 The July 18 independent review found release-blocking correctness and containment issues. Repairs are performed one at a time; each receives focused tests, the full verification suite, visible acceptance when applicable, and its own GitHub checkpoint before the next repair begins.
 
@@ -520,7 +520,7 @@ The July 18 independent review found release-blocking correctness and containmen
 - [x] R6 — Harden realtime configuration acknowledgement, timing, source hints, and reconnects. Focused plan: `docs/plans/REALTIME_SESSION_HARDENING.md`.
 - [x] R7 — Make file target-language retranslation atomic and generation-scoped. Focused plan: `docs/plans/ATOMIC_FILE_RETRANSLATION.md`.
 - [x] R8 — Repair multi-window snapshot ordering and preference patching. Focused plan: `docs/plans/MULTI_WINDOW_STATE_CONVERGENCE.md`.
-- [ ] R9 — Pin lesson identity and correct cache/placement behavior.
+- [x] R9 — Pin lesson identity and correct cache/placement behavior. Focused plan: `docs/plans/PINNED_LESSON_IDENTITY.md`.
 - [ ] R10 — Introduce explicit file and external-media playback ownership.
 - [ ] R11 — Bound long-session coordinator, event, error, and transcript-rendering costs.
 - [ ] R12 — Preserve file/live media timing across decode and send failures.
@@ -538,6 +538,8 @@ R0 verification: `pnpm verify` passed with zero Svelte errors or warnings, 69 fr
 R7 verification: `pnpm verify` passed with zero Svelte errors or warnings, 81 frontend tests, a successful production build, 85 Rust tests, and warning-free clippy.
 
 R8 verification: `pnpm verify` passed with zero Svelte errors or warnings, 89 frontend tests, a successful production build, 88 Rust tests, and warning-free clippy.
+
+R9 verification: `pnpm verify` passed with zero Svelte errors or warnings, 92 frontend tests, a successful production build, 92 Rust tests, and warning-free clippy.
 
 ## Checkpoints and decisions
 

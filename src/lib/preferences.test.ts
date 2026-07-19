@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_LANGUAGES, DEFAULT_STYLE, DEFAULT_SYNC, type SpeakerProfile } from "./contracts";
-import { FIXTURE_SEGMENTS } from "./fixtures";
-import { applyPreferenceAction, buildTutorContext, decodePreferenceEnvelope, effectiveStyle, mergePreferencePatch, parsePreferences, preferencePatchBetween, renameSpeaker, serializePreferences } from "./preferences";
+import { applyPreferenceAction, decodePreferenceEnvelope, effectiveStyle, mergePreferencePatch, parsePreferences, preferencePatchBetween, renameSpeaker, serializePreferences } from "./preferences";
 
 describe("local preferences and tutor context", () => {
   it("round-trips styles and clamps persisted overlay position", () => {
@@ -104,11 +103,6 @@ describe("local preferences and tutor context", () => {
     const speakers: Record<string, SpeakerProfile> = { a: { id: "a", displayName: "Speaker 1", color: "#fff" } };
     expect(renameSpeaker(speakers, "a", "  Haru ").a.displayName).toBe("Haru");
     expect(renameSpeaker(speakers, "missing", "Haru")).toBe(speakers);
-  });
-
-  it("includes selected, preceding, and available following dialogue", () => {
-    const context = buildTutorContext(FIXTURE_SEGMENTS, "seg-4", 2, 1);
-    expect(context.map((segment) => segment.id)).toEqual(["seg-2", "seg-3", "seg-4", "seg-5"]);
   });
 
   it("migrates and clamps normalized lesson placement", () => {

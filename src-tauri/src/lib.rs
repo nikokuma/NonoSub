@@ -45,9 +45,8 @@ struct AppState {
     canonical: Mutex<SessionSnapshot>,
     preferences: Mutex<Option<CanonicalPreferences>>,
     lesson_cache: Mutex<HashMap<String, LessonCard>>,
+    lesson_selection_sequence: AtomicU64,
     launcher_mode: Mutex<String>,
-    context_lesson_segment: Mutex<Option<String>>,
-    context_lesson_source: Mutex<Option<String>>,
     lesson_open_context: Mutex<Option<LessonOpenContext>>,
     subtitles_visible: AtomicBool,
     external_media_paused_for_lesson: AtomicBool,
@@ -67,9 +66,8 @@ impl Default for AppState {
             canonical: Mutex::new(SessionSnapshot::default()),
             preferences: Mutex::new(None),
             lesson_cache: Mutex::new(HashMap::new()),
+            lesson_selection_sequence: AtomicU64::new(0),
             launcher_mode: Mutex::new("file".into()),
-            context_lesson_segment: Mutex::new(None),
-            context_lesson_source: Mutex::new(None),
             lesson_open_context: Mutex::new(None),
             subtitles_visible: AtomicBool::new(true),
             external_media_paused_for_lesson: AtomicBool::new(false),
@@ -314,11 +312,22 @@ enum ExternalMediaControlResult {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LessonOpenContext {
+    selection_id: u64,
+    session_id: String,
     source_surface: String,
     segment_id: String,
+    selected_segment: SubtitleSegment,
     cursor_x: f64,
     cursor_y: f64,
     external_media_control: ExternalMediaControlResult,
+}
+
+struct LessonRequestMaterial {
+    open_context: LessonOpenContext,
+    languages: LanguageSettings,
+    selected: SubtitleSegment,
+    context: Vec<SubtitleSegment>,
+    speakers: Vec<SpeakerProfile>,
 }
 
 fn keyring_entry() -> Result<keyring::Entry, String> {
@@ -906,29 +915,151 @@ async fn retry_translation(
     }
 }
 
+fn same_lesson_source_revision(left: &SubtitleSegment, right: &SubtitleSegment) -> bool {
+    left.id == right.id
+        && left.origin == right.origin
+        && left.start_ms == right.start_ms
+        && left.end_ms == right.end_ms
+        && left.source_text == right.source_text
+        && left.speaker_id == right.speaker_id
+}
+
+fn canonical_lesson_context(
+    segments: &[SubtitleSegment],
+    selected_id: &str,
+    preceding_limit: usize,
+    following_limit: usize,
+) -> Vec<SubtitleSegment> {
+    let Some(selected_index) = segments
+        .iter()
+        .position(|segment| segment.id == selected_id)
+    else {
+        return Vec::new();
+    };
+    segments[selected_index.saturating_sub(preceding_limit)
+        ..usize::min(segments.len(), selected_index + following_limit + 1)]
+        .to_vec()
+}
+
+fn current_lesson_material(
+    state: &AppState,
+    selection_id: u64,
+) -> Result<LessonRequestMaterial, openai::ApiError> {
+    let open_context = state
+        .lesson_open_context
+        .lock()
+        .map_err(|_| service_error("Lesson state is unavailable."))?
+        .clone()
+        .filter(|context| context.selection_id == selection_id)
+        .ok_or_else(|| service_error("This Ask Nono selection is no longer open."))?;
+    let snapshot = state
+        .canonical
+        .lock()
+        .map_err(|_| service_error("Session state is unavailable."))?;
+    if snapshot.session_id != open_context.session_id
+        || snapshot.selected_segment_id.as_deref() != Some(open_context.segment_id.as_str())
+    {
+        return Err(service_error(
+            "This subtitle belongs to an older session. Open Ask Nono again.",
+        ));
+    }
+    let selected = snapshot
+        .segments
+        .iter()
+        .find(|segment| segment.id == open_context.segment_id && !segment.is_provisional)
+        .cloned()
+        .ok_or_else(|| service_error("The selected subtitle is no longer available."))?;
+    if !same_lesson_source_revision(&selected, &open_context.selected_segment) {
+        return Err(service_error(
+            "This subtitle was revised. Open Ask Nono again for the complete line.",
+        ));
+    }
+    let context = canonical_lesson_context(&snapshot.segments, &selected.id, 80, 5);
+    let mut speakers = snapshot.speakers.values().cloned().collect::<Vec<_>>();
+    speakers.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(LessonRequestMaterial {
+        open_context,
+        languages: snapshot.languages.clone(),
+        selected,
+        context,
+        speakers,
+    })
+}
+
+fn lesson_response_mismatch() -> openai::ApiError {
+    openai::ApiError {
+        kind: openai::ApiErrorKind::MalformedResponse,
+        message: "Nono's lesson referred to a different subtitle. Please retry.".into(),
+        retryable: true,
+    }
+}
+
+fn validate_lesson_response_selection(
+    card: LessonCard,
+    selected_id: &str,
+) -> Result<LessonCard, openai::ApiError> {
+    if card.selected_segment_id == selected_id {
+        Ok(card)
+    } else {
+        Err(lesson_response_mismatch())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lesson_cache_key(
+    open_context: &LessonOpenContext,
+    languages: &LanguageSettings,
+    selected: &SubtitleSegment,
+    context: &[SubtitleSegment],
+    speakers: &[SpeakerProfile],
+    question: &str,
+    thread: &[TutorMessage],
+    learner_level: LearnerLevel,
+) -> Result<String, openai::ApiError> {
+    serde_json::to_string(&serde_json::json!({
+        "cacheSchema": 3,
+        "sessionId": open_context.session_id,
+        "selectedSourceRevision": {
+            "id": selected.id,
+            "origin": selected.origin,
+            "startMs": selected.start_ms,
+            "endMs": selected.end_ms,
+            "sourceText": selected.source_text,
+            "speakerId": selected.speaker_id,
+        },
+        "learnerLevel": learner_level,
+        "languages": languages,
+        "nearbyDialogue": context,
+        "speakers": speakers,
+        "question": question,
+        "localQuestionThread": thread,
+    }))
+    .map_err(|_| service_error("Could not identify this lesson request."))
+}
+
 #[tauri::command]
 async fn request_lesson(
     state: State<'_, AppState>,
+    selection_id: u64,
     question: String,
-    selected: SubtitleSegment,
     learner_level: LearnerLevel,
-    context: Vec<SubtitleSegment>,
     thread: Vec<TutorMessage>,
 ) -> Result<LessonCard, openai::ApiError> {
     if question.trim().is_empty() {
         return Err(service_error("Ask Nono a question first."));
     }
-    let languages = state
-        .canonical
-        .lock()
-        .map_err(|_| service_error("Session state is unavailable."))?
-        .languages
-        .clone();
-    let cache_key = format!(
-        "lesson-v2::{}::{learner_level:?}::{}",
-        selected.id,
-        question.trim().to_ascii_lowercase()
-    );
+    let material = current_lesson_material(state.inner(), selection_id)?;
+    let normalized_question = question.trim();
+    let cache_key = lesson_cache_key(
+        &material.open_context,
+        &material.languages,
+        &material.selected,
+        &material.context,
+        &material.speakers,
+        normalized_question,
+        &thread,
+        learner_level,
+    )?;
     if let Some(card) = state
         .lesson_cache
         .lock()
@@ -936,22 +1067,34 @@ async fn request_lesson(
         .get(&cache_key)
         .cloned()
     {
-        return Ok(card);
+        return validate_lesson_response_selection(card, &material.selected.id);
     }
     let client = openai::OpenAiClient::new(api_key()?)?;
     let lesson_context = serde_json::json!({
         "learner_level": learner_level,
-        "languages": languages,
-        "selected_line": selected,
-        "nearby_dialogue": context,
+        "languages": material.languages,
+        "selected_line": material.selected,
+        "nearby_dialogue": material.context,
+        "speakers": material.speakers,
         "local_question_thread": thread,
-        "question": question,
+        "question": normalized_question,
     });
     let first = client.lesson(&lesson_context).await;
     let card = match first {
-        Err(error) if error.retryable => client.lesson(&lesson_context).await?,
-        result => result?,
+        Ok(card) => match validate_lesson_response_selection(card, &material.selected.id) {
+            Ok(card) => card,
+            Err(_) => {
+                let retry = client.lesson(&lesson_context).await?;
+                validate_lesson_response_selection(retry, &material.selected.id)?
+            }
+        },
+        Err(error) if error.retryable => {
+            let retry = client.lesson(&lesson_context).await?;
+            validate_lesson_response_selection(retry, &material.selected.id)?
+        }
+        Err(error) => return Err(error),
     };
+    current_lesson_material(state.inner(), selection_id)?;
     state
         .lesson_cache
         .lock()
@@ -981,25 +1124,14 @@ fn open_lesson_composer(
     if window.label() != expected_label {
         return Err("Lesson source window did not match the requested surface.".into());
     }
-    let finalized = state
-        .canonical
-        .lock()
-        .map_err(|_| "Session state is unavailable.".to_string())?
-        .segments
-        .iter()
-        .any(|segment| segment.id == segment_id && !segment.is_provisional);
-    if !finalized {
-        return Err("Wait for this subtitle to finish before asking Nono.".into());
-    }
-
-    record_event(
-        &app,
-        SessionEvent::LessonSelected {
-            segment_id: Some(segment_id.clone()),
-        },
-    )
-    .map_err(|error| error.message)?;
-
+    let (mut payload, envelope) = pin_lesson_open_context(
+        state.inner(),
+        segment_id,
+        source_surface.clone(),
+        cursor_x,
+        cursor_y,
+        ExternalMediaControlResult::NotRequested,
+    )?;
     let external_media_control = if source_surface == "overlay" && experimental_external_pause {
         if !cfg!(target_os = "macos") {
             ExternalMediaControlResult::Unsupported
@@ -1027,12 +1159,59 @@ fn open_lesson_composer(
     } else {
         ExternalMediaControlResult::NotRequested
     };
+    payload.external_media_control = external_media_control;
+    let mut pinned = state
+        .lesson_open_context
+        .lock()
+        .map_err(|_| "Lesson state is unavailable.".to_string())?;
+    let current = pinned
+        .as_mut()
+        .filter(|context| context.selection_id == payload.selection_id)
+        .ok_or_else(|| "This subtitle selection was replaced before Nono opened.".to_string())?;
+    current.external_media_control = external_media_control;
+    drop(pinned);
+    app.emit("session-event", envelope)
+        .map_err(|error| format!("Could not select this subtitle: {error}"))?;
 
     show_surface(&app, "lesson")?;
     place_composer_near_cursor(&app, &window, cursor_x, cursor_y);
+    app.emit("lesson-composer-opened", payload)
+        .map_err(|error| format!("Could not open Ask Nono: {error}"))
+}
+
+fn pin_lesson_open_context(
+    state: &AppState,
+    segment_id: String,
+    source_surface: String,
+    cursor_x: f64,
+    cursor_y: f64,
+    external_media_control: ExternalMediaControlResult,
+) -> Result<(LessonOpenContext, SequencedSessionEvent), String> {
+    let mut snapshot = state
+        .canonical
+        .lock()
+        .map_err(|_| "Session state is unavailable.".to_string())?;
+    let selected_segment = snapshot
+        .segments
+        .iter()
+        .find(|segment| segment.id == segment_id && !segment.is_provisional)
+        .cloned()
+        .ok_or_else(|| "Wait for this subtitle to finish before asking Nono.".to_string())?;
+    let selection_id = state
+        .lesson_selection_sequence
+        .fetch_add(1, Ordering::Relaxed)
+        .saturating_add(1);
+    let event = SessionEvent::LessonSelected {
+        segment_id: Some(segment_id.clone()),
+    };
+    snapshot.sequence += 1;
+    apply_event(&mut snapshot, &event);
     let payload = LessonOpenContext {
+        selection_id,
+        session_id: snapshot.session_id.clone(),
         source_surface,
         segment_id,
+        selected_segment,
         cursor_x,
         cursor_y,
         external_media_control,
@@ -1041,8 +1220,12 @@ fn open_lesson_composer(
         .lesson_open_context
         .lock()
         .map_err(|_| "Lesson state is unavailable.".to_string())? = Some(payload.clone());
-    app.emit("lesson-composer-opened", payload)
-        .map_err(|error| format!("Could not open Ask Nono: {error}"))
+    let envelope = SequencedSessionEvent {
+        session_id: snapshot.session_id.clone(),
+        sequence: snapshot.sequence,
+        event,
+    };
+    Ok((payload, envelope))
 }
 
 #[tauri::command]
@@ -1537,6 +1720,13 @@ fn cancel_session(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(
         .lock()
         .map_err(|_| "Lesson cache is unavailable.")?
         .clear();
+    if invalidate_lesson_context(&app, state.inner()) {
+        record_event(
+            &app,
+            SessionEvent::LessonSelected { segment_id: None },
+        )
+        .map_err(|error| error.message)?;
+    }
     record_event(&app, SessionEvent::Complete).map_err(|error| error.message)
 }
 
@@ -1612,6 +1802,13 @@ fn stop_live_capture(app: tauri::AppHandle, state: State<'_, AppState>) -> Resul
     state.runs.cancel().map_err(|error| error.message)?;
     #[cfg(target_os = "macos")]
     live::stop(&state.live);
+    if invalidate_lesson_context(&app, state.inner()) {
+        record_event(
+            &app,
+            SessionEvent::LessonSelected { segment_id: None },
+        )
+        .map_err(|error| error.message)?;
+    }
     record_event(&app, SessionEvent::Complete).map_err(|error| error.message)?;
     Ok(())
 }
@@ -1669,6 +1866,7 @@ fn begin_session_for_generation(
         event,
     };
     drop(snapshot);
+    invalidate_lesson_context(app, state.inner());
     app.emit("session-event", envelope)
         .map_err(|error| service_error(&format!("Could not update subtitle windows: {error}")))
 }
@@ -1709,10 +1907,21 @@ pub(crate) fn record_event_for_generation(
     generation: u64,
     event: SessionEvent,
 ) -> Result<(), openai::ApiError> {
-    let (_generation_guard, envelope) =
+    let (generation_guard, envelope) =
         scoped_event_envelope(app.state::<AppState>().inner(), generation, event)?;
+    let lesson_session_id = envelope.session_id.clone();
+    let lesson_event = envelope.event.clone();
     app.emit("session-event", envelope)
-        .map_err(|error| service_error(&format!("Could not update subtitle windows: {error}")))
+        .map_err(|error| service_error(&format!("Could not update subtitle windows: {error}")))?;
+    drop(generation_guard);
+    let state = app.state::<AppState>();
+    invalidate_lesson_for_source_revision(
+        app,
+        state.inner(),
+        &lesson_session_id,
+        &lesson_event,
+    );
+    Ok(())
 }
 
 pub(crate) fn record_event(
@@ -2006,6 +2215,66 @@ fn close_lesson(app: &tauri::AppHandle, state: &AppState) {
     update_activation_policy(app);
 }
 
+fn invalidate_lesson_context(app: &tauri::AppHandle, state: &AppState) -> bool {
+    let had_context = state
+        .lesson_open_context
+        .lock()
+        .map(|mut context| context.take().is_some())
+        .unwrap_or(false);
+    if !had_context {
+        return false;
+    }
+    finish_lesson_invalidation(app);
+    true
+}
+
+fn invalidate_lesson_for_source_revision(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    session_id: &str,
+    event: &SessionEvent,
+) -> bool {
+    let invalidated = state
+        .lesson_open_context
+        .lock()
+        .map(|mut context| {
+            let should_invalidate = context
+                .as_ref()
+                .is_some_and(|open| {
+                    open.session_id == session_id && lesson_event_revises_context(open, event)
+                });
+            if should_invalidate {
+                context.take();
+            }
+            should_invalidate
+        })
+        .unwrap_or(false);
+    if invalidated {
+        finish_lesson_invalidation(app);
+    }
+    invalidated
+}
+
+fn lesson_event_revises_context(open: &LessonOpenContext, event: &SessionEvent) -> bool {
+    match event {
+        SessionEvent::CaptionUpserted { segment }
+        | SessionEvent::TranscriptFinalized { segment } => {
+            open.segment_id == segment.id
+                && !same_lesson_source_revision(&open.selected_segment, segment)
+        }
+        _ => false,
+    }
+}
+
+fn finish_lesson_invalidation(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("lesson") {
+        let _ = window.hide();
+    }
+    let _ = app.emit("lesson-selection-invalidated", ());
+    let _ = app.emit("lesson-closed", ());
+    update_activation_policy(app);
+}
+
 fn update_activation_policy(app: &tauri::AppHandle) {
     #[cfg(target_os = "macos")]
     {
@@ -2185,51 +2454,51 @@ fn dispatch_action(app: &tauri::AppHandle, id: &str) {
         }
         "show_lesson" => {
             let state = app.state::<AppState>();
-            let context_segment = state
-                .context_lesson_segment
-                .lock()
-                .ok()
-                .and_then(|mut segment| segment.take());
-            if let Some(segment_id) = context_segment {
-                let _ = record_event(
-                    app,
-                    SessionEvent::LessonSelected {
-                        segment_id: Some(segment_id),
-                    },
-                );
-            }
-            let has_selection = state
-                .canonical
-                .lock()
-                .is_ok_and(|snapshot| snapshot.selected_segment_id.is_some());
-            if has_selection {
-                let _ = show_surface(app, "lesson");
-                let source_label = state
-                    .context_lesson_source
+            if let Some(source) = visible_lesson_source(app)
+                .or_else(|| app.get_webview_window("main"))
+            {
+                let source_surface = match source.label() {
+                    "viewer" => "viewer",
+                    "overlay" => "overlay",
+                    _ => "workbench",
+                };
+                let scale = source.scale_factor().unwrap_or(1.0);
+                let size = source
+                    .inner_size()
+                    .unwrap_or(tauri::PhysicalSize::new(720, 420));
+                let cursor_x = size.width as f64 / scale / 2.0;
+                let cursor_y = size.height as f64 / scale / 2.0;
+                let existing = state
+                    .lesson_open_context
                     .lock()
                     .ok()
-                    .and_then(|mut source| source.take());
-                let source = source_label
-                    .and_then(|label| app.get_webview_window(&label))
-                    .or_else(|| visible_lesson_source(app));
-                if let Some(source) = source {
-                    let source_surface = if source.label() == "viewer" { "viewer" } else if source.label() == "overlay" { "overlay" } else { "workbench" };
-                    let scale = source.scale_factor().unwrap_or(1.0);
-                    let size = source.inner_size().unwrap_or(tauri::PhysicalSize::new(720, 420));
-                    let cursor_x = size.width as f64 / scale / 2.0;
-                    let cursor_y = size.height as f64 / scale / 2.0;
-                    place_composer_near_cursor(app, &source, cursor_x, cursor_y);
-                    let segment_id = state.canonical.lock().ok().and_then(|snapshot| snapshot.selected_segment_id.clone()).unwrap_or_default();
-                    let payload = LessonOpenContext {
-                        source_surface: source_surface.into(),
+                    .and_then(|context| context.clone());
+                let existing = existing.filter(|context| {
+                    current_lesson_material(state.inner(), context.selection_id).is_ok()
+                });
+                let pinned = existing.map(|context| (context, None)).or_else(|| {
+                    let segment_id = state
+                        .canonical
+                        .lock()
+                        .ok()
+                        .and_then(|snapshot| snapshot.selected_segment_id.clone())?;
+                    pin_lesson_open_context(
+                        state.inner(),
                         segment_id,
+                        source_surface.into(),
                         cursor_x,
                         cursor_y,
-                        external_media_control: ExternalMediaControlResult::NotRequested,
-                    };
-                    if let Ok(mut context) = state.lesson_open_context.lock() {
-                        *context = Some(payload.clone());
+                        ExternalMediaControlResult::NotRequested,
+                    )
+                    .ok()
+                    .map(|(context, envelope)| (context, Some(envelope)))
+                });
+                if let Some((payload, envelope)) = pinned {
+                    if let Some(envelope) = envelope {
+                        let _ = app.emit("session-event", envelope);
                     }
+                    let _ = show_surface(app, "lesson");
+                    place_composer_near_cursor(app, &source, cursor_x, cursor_y);
                     let _ = app.emit("lesson-composer-opened", payload);
                 }
             }
@@ -2411,6 +2680,202 @@ mod tests {
         let value = serde_json::to_value(segment).expect("segment should serialize");
         assert_eq!(value["startMs"], 1200);
         assert_eq!(value["translationText"], "What is it?");
+    }
+
+    #[test]
+    fn lesson_selection_pins_session_and_source_revision() {
+        let state = completed_file_state();
+        let (open, envelope) = pin_lesson_open_context(
+            &state,
+            "segment-2".into(),
+            "viewer".into(),
+            320.0,
+            180.0,
+            ExternalMediaControlResult::NotRequested,
+        )
+        .unwrap();
+
+        assert_eq!(open.selection_id, 1);
+        assert_eq!(open.session_id, state.canonical.lock().unwrap().session_id);
+        assert_eq!(open.selected_segment.source_text, "今日はちょっと");
+        assert_eq!(envelope.sequence, 1);
+        assert_eq!(
+            state.canonical.lock().unwrap().selected_segment_id.as_deref(),
+            Some("segment-2")
+        );
+
+        let mut translated_revision = open.selected_segment.clone();
+        translated_revision.translation_text = Some("Today will not work.".into());
+        assert!(!lesson_event_revises_context(
+            &open,
+            &SessionEvent::TranscriptFinalized {
+                segment: translated_revision,
+            },
+        ));
+        let mut source_revision = open.selected_segment.clone();
+        source_revision.source_text = "今日はちょっと難しいです".into();
+        assert!(lesson_event_revises_context(
+            &open,
+            &SessionEvent::TranscriptFinalized {
+                segment: source_revision,
+            },
+        ));
+
+        state.canonical.lock().unwrap().segments[1].translation_text =
+            Some("Today will not work.".into());
+        assert!(current_lesson_material(&state, open.selection_id).is_ok());
+
+        state.canonical.lock().unwrap().segments[1].source_text =
+            "今日はちょっと難しいです".into();
+        assert!(current_lesson_material(&state, open.selection_id).is_err());
+
+        state.canonical.lock().unwrap().segments[1].source_text = "今日はちょっと".into();
+        state.canonical.lock().unwrap().session_id = "session-replacement".into();
+        assert!(current_lesson_material(&state, open.selection_id).is_err());
+    }
+
+    #[test]
+    fn canonical_lesson_context_is_bounded_around_the_selected_line() {
+        let segments = (0..10)
+            .map(|index| file_segment(&format!("segment-{index}"), "source", "target", index * 1_000))
+            .collect::<Vec<_>>();
+        let context = canonical_lesson_context(&segments, "segment-6", 3, 2);
+        assert_eq!(
+            context.iter().map(|segment| segment.id.as_str()).collect::<Vec<_>>(),
+            ["segment-3", "segment-4", "segment-5", "segment-6", "segment-7", "segment-8"]
+        );
+    }
+
+    #[test]
+    fn lesson_cache_identity_includes_session_context_languages_case_and_thread() {
+        let state = completed_file_state();
+        let (open, _) = pin_lesson_open_context(
+            &state,
+            "segment-1".into(),
+            "viewer".into(),
+            0.0,
+            0.0,
+            ExternalMediaControlResult::NotRequested,
+        )
+        .unwrap();
+        let material = current_lesson_material(&state, open.selection_id).unwrap();
+        let thread = vec![TutorMessage {
+            role: "user".into(),
+            text: "What does it imply?".into(),
+        }];
+        let key = lesson_cache_key(
+            &open,
+            &material.languages,
+            &material.selected,
+            &material.context,
+            &material.speakers,
+            "Polish this meaning",
+            &thread,
+            LearnerLevel::Beginner,
+        )
+        .unwrap();
+
+        let mut other_session = open.clone();
+        other_session.session_id = "session-replacement".into();
+        let session_key = lesson_cache_key(
+            &other_session,
+            &material.languages,
+            &material.selected,
+            &material.context,
+            &material.speakers,
+            "Polish this meaning",
+            &thread,
+            LearnerLevel::Beginner,
+        )
+        .unwrap();
+        let case_key = lesson_cache_key(
+            &open,
+            &material.languages,
+            &material.selected,
+            &material.context,
+            &material.speakers,
+            "polish this meaning",
+            &thread,
+            LearnerLevel::Beginner,
+        )
+        .unwrap();
+        let changed_thread = vec![TutorMessage {
+            role: "assistant".into(),
+            text: "Earlier context".into(),
+        }];
+        let thread_key = lesson_cache_key(
+            &open,
+            &material.languages,
+            &material.selected,
+            &material.context,
+            &material.speakers,
+            "Polish this meaning",
+            &changed_thread,
+            LearnerLevel::Beginner,
+        )
+        .unwrap();
+        let mut changed_languages = material.languages.clone();
+        changed_languages.explanation = "ja".into();
+        let language_key = lesson_cache_key(
+            &open,
+            &changed_languages,
+            &material.selected,
+            &material.context,
+            &material.speakers,
+            "Polish this meaning",
+            &thread,
+            LearnerLevel::Beginner,
+        )
+        .unwrap();
+        let mut changed_context = material.context.clone();
+        changed_context[1].source_text = "Revised nearby dialogue".into();
+        let context_key = lesson_cache_key(
+            &open,
+            &material.languages,
+            &material.selected,
+            &changed_context,
+            &material.speakers,
+            "Polish this meaning",
+            &thread,
+            LearnerLevel::Beginner,
+        )
+        .unwrap();
+        let changed_speakers = vec![SpeakerProfile {
+            id: "speaker-1".into(),
+            display_name: "Sato".into(),
+            color: "#ffffff".into(),
+        }];
+        let speaker_key = lesson_cache_key(
+            &open,
+            &material.languages,
+            &material.selected,
+            &material.context,
+            &changed_speakers,
+            "Polish this meaning",
+            &thread,
+            LearnerLevel::Beginner,
+        )
+        .unwrap();
+
+        assert_ne!(key, session_key);
+        assert_ne!(key, case_key);
+        assert_ne!(key, thread_key);
+        assert_ne!(key, language_key);
+        assert_ne!(key, context_key);
+        assert_ne!(key, speaker_key);
+    }
+
+    #[test]
+    fn mismatched_lesson_response_identity_is_rejected() {
+        let card = LessonCard {
+            schema_version: 2,
+            selected_segment_id: "another-segment".into(),
+            moments: Vec::new(),
+            suggested_follow_ups: Vec::new(),
+        };
+        let error = validate_lesson_response_selection(card, "segment-1").unwrap_err();
+        assert_eq!(error.kind, openai::ApiErrorKind::MalformedResponse);
+        assert!(error.retryable);
     }
 
     #[test]

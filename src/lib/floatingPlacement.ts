@@ -58,6 +58,14 @@ export function resolveLessonPosition(
   };
 }
 
+export function shouldPersistLessonPlacement(
+  mode: "compose" | "thinking" | "lesson" | "error",
+  suppressedUntil: number,
+  now: number,
+): boolean {
+  return mode === "lesson" && now >= suppressedUntil;
+}
+
 function clamp(value: number, minimum: number, maximum: number): number {
   if (maximum < minimum) return minimum;
   return Math.min(maximum, Math.max(minimum, value));

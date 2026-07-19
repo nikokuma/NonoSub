@@ -198,3 +198,13 @@
 - Ordered target-language session changes inside the same broker operation. Style, position, lesson placement, onboarding, and other preference saves cannot cancel or restart file retranslation.
 - Bumped local preference storage to v5 while retaining v4, v3, v2, and legacy fallback reads. Revisions remain memory-only and no transcript, lesson, media, secret, or account data is persisted.
 - Added adversarial coverage for startup races, gap recovery, replacement sessions, concurrent callbacks, stale patches, monitor placement merges, and native menu leaf diffs. Full verification passes with zero Svelte errors or warnings, 89 frontend tests, a successful production build, 88 Rust tests, and warning-free clippy.
+
+## July 19 — Pinned lesson identity and placement
+
+- Replaced webview-supplied lesson subtitles and dialogue with a monotonic Rust selection that pins the canonical session and exact finalized source revision.
+- Revalidated selections after GPT‑5.6 returns, discarded late results after replacement or revision, and dismissed an already-visible lesson if a later file boundary revises its source line.
+- Expanded lesson cache identity to the exact session, source revision, learner level, languages, canonical nearby dialogue, sorted speaker map, capitalization-preserving question, and hidden local thread. Cards naming another segment retry once and never render.
+- Keyed hidden follow-up threads by session and source revision instead of segment ID, while preserving the thread when the same unchanged line is reopened.
+- Separated ephemeral cursor-relative composer placement from persistent per-monitor board placement. The complete chalkboard now restores its saved position; only manual movement in lesson mode writes it.
+- A failed follow-up restores the existing full board and surfaces the error in Nono's bubble instead of shrinking into the composer.
+- Full verification passes with zero Svelte errors or warnings, 92 frontend tests, a successful production build, 92 Rust tests, and warning-free clippy.

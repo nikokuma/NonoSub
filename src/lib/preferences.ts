@@ -166,17 +166,6 @@ export function renameSpeaker(
   return { ...speakers, [id]: { ...speaker, displayName: normalized } };
 }
 
-export function buildTutorContext(
-  segments: SubtitleSegment[],
-  selectedId: string,
-  precedingLimit = 80,
-  followingLimit = 5,
-): SubtitleSegment[] {
-  const selectedIndex = segments.findIndex((segment) => segment.id === selectedId);
-  if (selectedIndex < 0) return [];
-  return segments.slice(Math.max(0, selectedIndex - precedingLimit), selectedIndex + followingLimit + 1);
-}
-
 export function effectiveStyle(style: StyleSettings, processingMode: CaptionProcessingMode): StyleSettings {
   return processingMode === "original_only" ? { ...style, displayMode: "source" } : style;
 }

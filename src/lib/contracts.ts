@@ -36,8 +36,11 @@ export interface LessonPlacement {
 export type LessonSurfaceMode = "compose" | "thinking" | "lesson" | "error";
 
 export interface LessonOpenContext {
+  selectionId: number;
+  sessionId: string;
   sourceSurface: "viewer" | "overlay" | "workbench";
   segmentId: string;
+  selectedSegment: SubtitleSegment;
   cursorX: number;
   cursorY: number;
   externalMediaControl: ExternalMediaControlResult;

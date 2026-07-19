@@ -3,14 +3,14 @@
   import { invoke, isTauri } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { LogicalSize, PhysicalPosition, currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
-  import type { LessonCard, LessonMessage, LessonOpenContext, LessonSurfaceMode, SessionState } from "./contracts";
+  import type { LessonCard, LessonMessage, LessonOpenContext, LessonSurfaceMode } from "./contracts";
   import { EMPTY_SESSION } from "./contracts";
   import { FIXTURE_EVENTS, FIXTURE_LESSON } from "./fixtures";
   import { dominantChalkColor, isLessonSkipped, lessonStepOrder } from "./lesson";
-  import { fitLogicalWindowSize, makeMonitorKey, normalizeLessonPlacement, resolveLessonPosition, type MonitorGeometry } from "./floatingPlacement";
-  import { buildTutorContext } from "./preferences";
+  import { lessonThreadKey } from "./lessonIdentity";
+  import { fitLogicalWindowSize, makeMonitorKey, normalizeLessonPlacement, resolveLessonPosition, shouldPersistLessonPlacement, type MonitorGeometry } from "./floatingPlacement";
   import { reduceSession } from "./session";
-  import { loadPreferences, savePreferencePatch, subscribePreferences, subscribeSession } from "./runtime";
+  import { loadPreferences, savePreferencePatch, subscribePreferences } from "./runtime";
   import ChalkDemo from "./ChalkDemo.svelte";
   import ChalkPhrase from "./ChalkPhrase.svelte";
   import ChalkStepNumber from "./ChalkStepNumber.svelte";
@@ -20,13 +20,24 @@
 
   type BoardPhase = "idle" | "erasing" | "thinking" | "writing";
 
-  let session = $state<SessionState>(FIXTURE_EVENTS.reduce(reduceSession, structuredClone(EMPTY_SESSION)));
+  const fixtureSession = FIXTURE_EVENTS.reduce(reduceSession, structuredClone(EMPTY_SESSION));
+  const emptyOpenContext: LessonOpenContext = {
+    selectionId: 0,
+    sessionId: "",
+    sourceSurface: "workbench",
+    segmentId: "",
+    selectedSegment: fixtureSession.segments[3],
+    cursorX: 0,
+    cursorY: 0,
+    externalMediaControl: "not_requested",
+  };
   let preferences = $state(loadPreferences());
   let messages = $state<LessonMessage[]>([]);
   let threads = $state<Record<string, LessonMessage[]>>({});
   let loading = $state(false);
   let error = $state("");
-  let activeSegmentId: string | undefined;
+  let activeSelectionId = 0;
+  let activeThreadKey: string | undefined;
   let requestGeneration = 0;
   let boardPhase = $state<BoardPhase>("idle");
   let activeMomentIndex = $state(0);
@@ -40,10 +51,11 @@
   let underlineProgress = $state<Record<string, number>>({});
   let mode = $state<LessonSurfaceMode>("compose");
   let followupOpen = $state(false);
-  let openContext = $state<LessonOpenContext>({ sourceSurface: "workbench", segmentId: "", cursorX: 0, cursorY: 0, externalMediaControl: "not_requested" });
+  let openContext = $state<LessonOpenContext>(emptyOpenContext);
   let placementTimer: ReturnType<typeof setTimeout> | undefined;
+  let placementSuppressedUntil = 0;
 
-  const selected = $derived(session.segments.find((segment) => segment.id === session.selectedSegmentId) ?? (isTauri() ? undefined : session.segments[3]));
+  const selected = $derived(openContext.selectionId > 0 ? openContext.selectedSegment : (isTauri() ? undefined : fixtureSession.segments[3]));
   const latestAssistant = $derived(messages.findLast((message) => message.card?.selectedSegmentId === selected?.id));
   const latestCard = $derived(latestAssistant?.card ?? (isTauri() ? undefined : FIXTURE_LESSON));
   const latestCardKey = $derived(latestAssistant?.id ?? (isTauri() ? undefined : "fixture"));
@@ -52,7 +64,9 @@
   const stepOrder = $derived(lessonStepOrder(currentMoment, Boolean(selected)));
   const hasMoreMoments = $derived(Boolean(latestCard && activeMomentIndex < latestCard.moments.length - 1));
   const bubbleText = $derived(
-    boardPhase === "erasing"
+    error && mode === "lesson"
+      ? error
+      : boardPhase === "erasing"
       ? "New question, new board. Mind the chalk dust!"
       : boardPhase === "thinking"
         ? "Hm… I’m choosing the useful part, not every fact in the textbook."
@@ -66,7 +80,6 @@
   onMount(() => {
     document.documentElement.dataset.surface = "lesson";
     const cleanup: Array<() => void> = [];
-    void subscribeSession((value) => session = value).then((unlisten) => cleanup.push(unlisten));
     void subscribePreferences((value) => preferences = value).then((unlisten) => cleanup.push(unlisten));
     void tick().then(() => playCueSequence());
     if (isTauri()) {
@@ -75,6 +88,9 @@
       });
       void listen<LessonOpenContext>("lesson-composer-opened", ({ payload }) => {
         applyOpenContext(payload);
+      }).then((unlisten) => cleanup.push(unlisten));
+      void listen("lesson-selection-invalidated", () => {
+        openContext = emptyOpenContext;
       }).then((unlisten) => cleanup.push(unlisten));
       void getCurrentWindow().onMoved(() => {
         if (placementTimer) clearTimeout(placementTimer);
@@ -95,6 +111,7 @@
   });
 
   function applyOpenContext(context: LessonOpenContext) {
+    suppressPlacementEvents();
     openContext = context;
     mode = "compose";
     followupOpen = false;
@@ -103,11 +120,12 @@
   }
 
   $effect(() => {
-    const nextSegmentId = selected?.id;
-    if (nextSegmentId === activeSegmentId) return;
-    if (activeSegmentId) threads[activeSegmentId] = messages;
-    activeSegmentId = nextSegmentId;
-    messages = nextSegmentId ? [...(threads[nextSegmentId] ?? [])] : [];
+    const nextSelectionId = openContext.selectionId;
+    if (nextSelectionId === activeSelectionId) return;
+    if (activeThreadKey) threads[activeThreadKey] = messages;
+    activeSelectionId = nextSelectionId;
+    activeThreadKey = nextSelectionId > 0 ? lessonThreadKey(openContext) : undefined;
+    messages = activeThreadKey ? [...(threads[activeThreadKey] ?? [])] : [];
     error = "";
     loading = false;
     boardPhase = "idle";
@@ -131,7 +149,7 @@
   async function ask(question: string) {
     if (!selected || !question.trim() || loading) return;
     cancelCueSequence();
-    const requestSegment = selected;
+    const requestSelectionId = openContext.selectionId;
     const requestId = ++requestGeneration;
     const eraseExistingBoard = Boolean(currentMoment);
     const userMessage: LessonMessage = { id: crypto.randomUUID(), role: "user", text: question.trim() };
@@ -144,10 +162,9 @@
     try {
       const request: Promise<LessonCard> = isTauri()
         ? invoke<LessonCard>("request_lesson", {
+            selectionId: requestSelectionId,
             question: question.trim(),
-            selected: requestSegment,
             learnerLevel: preferences.level,
-            context: buildTutorContext(session.segments, requestSegment.id),
             thread: messages.slice(-12).map(({ role, text }) => ({ role, text })),
           })
         : Promise.resolve(FIXTURE_LESSON);
@@ -157,7 +174,7 @@
           })
         : Promise.resolve();
       const [card] = await Promise.all([request, eraseTransition]);
-      if (requestId !== requestGeneration || selected?.id !== requestSegment.id) return;
+      if (requestId !== requestGeneration || openContext.selectionId !== requestSelectionId) return;
       messages = [...messages, { id: crypto.randomUUID(), role: "assistant", text: card.moments[0].speechBubble, card }];
       mode = "lesson";
       await resizeLessonWindow("lesson");
@@ -171,8 +188,8 @@
       if (requestId !== requestGeneration) return;
       error = errorMessage(requestError);
       boardPhase = "idle";
-      mode = "error";
-      await resizeLessonWindow("compose");
+      mode = eraseExistingBoard ? "lesson" : "error";
+      await resizeLessonWindow(eraseExistingBoard ? "lesson" : "compose");
     } finally {
       if (requestId === requestGeneration) loading = false;
     }
@@ -227,6 +244,7 @@
     if (!monitor) return;
     const geometry = monitorGeometry(monitor);
     const lessonWindow = getCurrentWindow();
+    suppressPlacementEvents();
     const scale = monitor.scaleFactor || 1;
     const { width, height } = fitLogicalWindowSize({ width: 980, height: 620 }, geometry, scale);
     await lessonWindow.setSize(new LogicalSize(width, height));
@@ -239,10 +257,15 @@
 
   async function resizeLessonWindow(targetMode: "compose" | "lesson") {
     if (!isTauri()) return;
+    if (targetMode === "lesson") {
+      await restoreLessonPlacement();
+      return;
+    }
     const monitor = await currentMonitor();
     if (!monitor) return;
     const geometry = monitorGeometry(monitor);
     const lessonWindow = getCurrentWindow();
+    suppressPlacementEvents();
     const current = await lessonWindow.outerPosition();
     const scale = monitor.scaleFactor || 1;
     const desired = targetMode === "compose" ? { width: 720, height: 210 } : { width: 980, height: 620 };
@@ -256,7 +279,7 @@
   }
 
   async function rememberLessonPlacement() {
-    if (!isTauri()) return;
+    if (!isTauri() || !shouldPersistLessonPlacement(mode, placementSuppressedUntil, performance.now())) return;
     const monitor = await currentMonitor();
     if (!monitor) return;
     const geometry = monitorGeometry(monitor);
@@ -274,6 +297,14 @@
     preferences = await savePreferencePatch({
       lessonPlacements: { [geometry.key]: preferences.lessonPlacements[geometry.key] },
     });
+  }
+
+  function suppressPlacementEvents(durationMs = 550) {
+    placementSuppressedUntil = performance.now() + durationMs;
+    if (placementTimer) {
+      clearTimeout(placementTimer);
+      placementTimer = undefined;
+    }
   }
 
   function errorMessage(value: unknown): string {
