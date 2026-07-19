@@ -15,6 +15,13 @@ export const TAIL_TUNING = {
   stretchMax: 1.3,
   stretchStartSegment: 3,
   followThrough: 0.02,
+  anticipation: {
+    window: 0.3,
+    magnitude: 0.06,
+  },
+  droop: {
+    magnitude: 0.08,
+  },
   wave: {
     frequency: 0.45,
     waveNumber: 0.55,
@@ -135,6 +142,22 @@ export function curvePointByArc(curve: CableCurve, s: number, out = new THREE.Ve
 
 export function curveLength(curve: CableCurve): number {
   return curve.totalLength;
+}
+
+export function presentationTargetOffset(
+  phase: "idle" | "point" | "hold" | "underline" | "retract",
+  progress: number,
+  isPointTail: boolean,
+  out: { pullback: number; droop: number } = { pullback: 0, droop: 0 },
+): { pullback: number; droop: number } {
+  const clampedProgress = THREE.MathUtils.clamp(progress, 0, 1);
+  out.pullback = phase === "point" && isPointTail && clampedProgress < TAIL_TUNING.anticipation.window
+    ? Math.sin(Math.PI * clampedProgress / TAIL_TUNING.anticipation.window) * TAIL_TUNING.anticipation.magnitude
+    : 0;
+  out.droop = phase === "retract" && clampedProgress > 0 && clampedProgress < 1
+    ? Math.sin(Math.PI * clampedProgress) * TAIL_TUNING.droop.magnitude
+    : 0;
+  return out;
 }
 
 export function distributeStretch(restLengths: readonly number[], stretch: number, out?: number[]): number[] {

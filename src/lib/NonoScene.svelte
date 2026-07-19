@@ -12,6 +12,7 @@
     curvePointByArc,
     distributeStretch,
     fitChainToPolyline,
+    presentationTargetOffset,
     TAIL_TUNING,
     type CableCurve,
     type CableCurveInput,
@@ -400,7 +401,25 @@
         }
       }
       if (state.hasRawTarget) {
-        stepVec3Spring(state.target, state.lastRawTarget, delta, targetSpring.frequency, targetSpring.damping);
+        _modifiedTailTarget.copy(state.lastRawTarget);
+        if (pointEngaged || underlineEngaged) {
+          const offsets = presentationTargetOffset(
+            presentation.phase,
+            presentation.progress,
+            isPointTail,
+            _presentationTargetOffsets,
+          );
+          // Cable measurements refresh later this frame; the prior frame's root and length are sufficient for these small offsets.
+          const buffers = cableBuffers[side];
+          const chainRestLength = sumLengths(buffers.restWorldSegmentLengths);
+          _targetPullbackDirection.subVectors(buffers.restWorldJoints[0], state.lastRawTarget);
+          if (_targetPullbackDirection.lengthSq() > 1e-10) _targetPullbackDirection.normalize();
+          else _targetPullbackDirection.set(0, 0, 0);
+          _modifiedTailTarget
+            .addScaledVector(_targetPullbackDirection, offsets.pullback * chainRestLength)
+            .addScaledVector(WORLD_DOWN, offsets.droop * chainRestLength);
+        }
+        stepVec3Spring(state.target, _modifiedTailTarget, delta, targetSpring.frequency, targetSpring.damping);
       }
 
       const solved = applyCableTail(
@@ -739,6 +758,9 @@
   const _screenPlaneNormal = new THREE.Vector3();
   const _screenPlane = new THREE.Plane();
   const _screenWorldTarget = new THREE.Vector3();
+  const _modifiedTailTarget = new THREE.Vector3();
+  const _targetPullbackDirection = new THREE.Vector3();
+  const _presentationTargetOffsets = { pullback: 0, droop: 0 };
 </script>
 
 <div class="nono-scene" bind:this={container} aria-label="Nono 3D guide">

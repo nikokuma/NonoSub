@@ -7,6 +7,7 @@ import {
   curvePointByArc,
   distributeStretch,
   fitChainToPolyline,
+  presentationTargetOffset,
   TAIL_TUNING,
 } from "./tailCable";
 import { captureTailRestPose, restoreTailRestPose } from "./tailPresentation";
@@ -15,6 +16,41 @@ const ROOT = new THREE.Vector3();
 const RIGHT = new THREE.Vector3(1, 0, 0);
 const DOWN = new THREE.Vector3(0, -1, 0);
 const FORWARD = new THREE.Vector3(0, 0, 1);
+
+describe("tail presentation target offsets", () => {
+  it("pulls back only the point tail during the anticipation window", () => {
+    const window = TAIL_TUNING.anticipation.window;
+    expect(presentationTargetOffset("point", 0, true).pullback).toBe(0);
+    expect(presentationTargetOffset("point", window * 0.25, true).pullback).toBeGreaterThan(0);
+    expect(presentationTargetOffset("point", window * 0.5, true).pullback).toBeCloseTo(TAIL_TUNING.anticipation.magnitude);
+    expect(presentationTargetOffset("point", window * 0.75, true).pullback).toBeGreaterThan(0);
+    expect(presentationTargetOffset("point", window, true).pullback).toBe(0);
+    expect(presentationTargetOffset("point", window + 0.1, true).pullback).toBe(0);
+    expect(presentationTargetOffset("point", window * 0.5, false).pullback).toBe(0);
+  });
+
+  it("droops only through the middle of retract", () => {
+    expect(presentationTargetOffset("retract", 0, true).droop).toBe(0);
+    expect(presentationTargetOffset("retract", 0.5, true).droop).toBeCloseTo(TAIL_TUNING.droop.magnitude);
+    expect(presentationTargetOffset("retract", 1, true).droop).toBe(0);
+    expect(presentationTargetOffset("point", 0.5, true).droop).toBe(0);
+  });
+
+  it("returns no offsets for inactive phases and stays within tuning magnitudes", () => {
+    for (const phase of ["idle", "hold", "underline"] as const) {
+      expect(presentationTargetOffset(phase, 0.5, true)).toEqual({ pullback: 0, droop: 0 });
+    }
+    for (let index = -10; index <= 110; index += 1) {
+      const progress = index / 100;
+      const point = presentationTargetOffset("point", progress, true);
+      const retract = presentationTargetOffset("retract", progress, true);
+      expect(point.pullback).toBeGreaterThanOrEqual(0);
+      expect(point.pullback).toBeLessThanOrEqual(TAIL_TUNING.anticipation.magnitude);
+      expect(retract.droop).toBeGreaterThanOrEqual(0);
+      expect(retract.droop).toBeLessThanOrEqual(TAIL_TUNING.droop.magnitude);
+    }
+  });
+});
 
 describe("tail cable curve", () => {
   it("maps straight-line arc distance linearly and builds an accurate curved LUT", () => {
