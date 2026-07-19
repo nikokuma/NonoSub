@@ -1,15 +1,12 @@
 import { describe, expect, it } from "vitest";
 import * as THREE from "three";
 import {
-  applyTailExtension,
   captureTailRestPose,
   chooseNearestTail,
   cueScreenPoint,
   presentationStrength,
   requiredTailStretch,
   restoreTailRestPose,
-  solveCcdChain,
-  tailChainReach,
   tipUnderlineProgress,
   type TailPresentation,
 } from "./tailPresentation";
@@ -28,42 +25,8 @@ describe("tail presentation geometry", () => {
     expect(chooseNearestTail({ x: 10, y: 20 }, { x: 90, y: 20 }, { x: 25, y: 30 })).toBe("left");
     const presentation: TailPresentation = { sequenceId: 1, phase: "retract", progress: 0.5 };
     expect(presentationStrength(presentation)).toBeCloseTo(0.5);
-  });
-
-  it("moves a synthetic bone chain closer to a reachable target", () => {
-    const chain = Array.from({ length: 6 }, () => new THREE.Bone());
-    for (let index = 1; index < chain.length; index += 1) {
-      chain[index].position.set(1, 0, 0);
-      chain[index - 1].add(chain[index]);
-    }
-    chain[0].updateWorldMatrix(true, true);
-    const target = new THREE.Vector3(3.5, 2.5, 0);
-    const before = new THREE.Vector3();
-    chain.at(-1)!.getWorldPosition(before);
-    const beforeDistance = before.distanceTo(target);
-    const afterDistance = solveCcdChain(chain, target, 0.85, 4);
-    expect(Number.isFinite(afterDistance)).toBe(true);
-    expect(afterDistance).toBeLessThan(beforeDistance);
-    expect(chain[0].quaternion.equals(new THREE.Quaternion())).toBe(true);
-    expect(chain[1].quaternion.equals(new THREE.Quaternion())).toBe(true);
-    expect(chain[2].quaternion.equals(new THREE.Quaternion())).toBe(false);
-  });
-
-  it("extends only distal tail segments and caps total reach at 130%", () => {
-    const chain = Array.from({ length: 12 }, () => new THREE.Bone());
-    for (let index = 1; index < chain.length; index += 1) {
-      chain[index].position.set(1, 0, 0);
-      chain[index - 1].add(chain[index]);
-    }
-    const pose = captureTailRestPose(chain);
-    const authoredReach = tailChainReach(pose.positions);
-    expect(requiredTailStretch(authoredReach * 2, authoredReach)).toBe(1.3);
-    const extendedReach = applyTailExtension(chain, pose.positions, 1.3);
-    expect(extendedReach).toBeCloseTo(authoredReach * 1.3, 5);
-    expect(chain[1].position.equals(pose.positions[1])).toBe(true);
-    expect(chain[2].position.equals(pose.positions[2])).toBe(true);
-    expect(chain[3].position.length()).toBeGreaterThan(pose.positions[3].length());
-    expect(chain.at(-1)!.position.length()).toBeGreaterThan(1);
+    expect(requiredTailStretch(20, 10)).toBe(1.3);
+    expect(requiredTailStretch(5, 10)).toBe(1);
   });
 
   it("derives monotonic underline progress from the projected tip", () => {
@@ -83,7 +46,7 @@ describe("tail presentation geometry", () => {
       chain[index - 1].add(chain[index]);
     }
     const pose = captureTailRestPose(chain);
-    applyTailExtension(chain, pose.positions, 1.3);
+    chain[5].position.multiplyScalar(1.3);
     chain[5].rotateZ(0.4);
     restoreTailRestPose(chain, pose);
     chain.forEach((bone, index) => {
