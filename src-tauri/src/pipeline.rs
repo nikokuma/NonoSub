@@ -40,15 +40,19 @@ pub async fn run(
         &events,
     )
     .await;
-    if let Err(error) = &result {
-        let _ = send(
-            &events,
-            SessionEvent::FatalError {
-                message: error.message.clone(),
-            },
-        );
+    match result {
+        Err(error) if error.kind == ApiErrorKind::Cancelled => Ok(()),
+        Err(error) => {
+            let _ = send(
+                &events,
+                SessionEvent::FatalError {
+                    message: error.message.clone(),
+                },
+            );
+            Err(error)
+        }
+        Ok(()) => Ok(()),
     }
-    result
 }
 
 async fn run_inner(
@@ -551,7 +555,7 @@ fn send(events: &EventSink, event: SessionEvent) -> Result<(), ApiError> {
 fn check_cancelled(cancelled: &AtomicBool) -> Result<(), ApiError> {
     if cancelled.load(Ordering::Relaxed) {
         Err(ApiError {
-            kind: ApiErrorKind::Service,
+            kind: ApiErrorKind::Cancelled,
             message: "Analysis was cancelled.".into(),
             retryable: false,
         })
@@ -676,5 +680,46 @@ mod tests {
             stable_speaker_id(&mut speakers, "C", true, Some("speaker-1")),
             Some("speaker-3".into())
         );
+    }
+
+    #[tokio::test]
+    async fn cancellation_finishes_without_emitting_a_fatal_error() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::<SessionEvent>::new()));
+        let sink_events = Arc::clone(&captured);
+        let sink: EventSink = Arc::new(move |event| {
+            sink_events.lock().unwrap().push(event);
+            Ok(())
+        });
+        let result = run(
+            OpenAiClient::new("sk-test-generation-isolation".into()).unwrap(),
+            Arc::new(DecodedAudio {
+                samples: vec![0; 16_000],
+                sample_rate: 16_000,
+            }),
+            vec![AudioChunk {
+                index: 0,
+                start_sample: 0,
+                end_sample: 16_000,
+                timeline_start_ms: 0,
+                overlapped: false,
+                path: std::path::PathBuf::from("never-read-after-cancel.wav"),
+            }],
+            LanguageSettings {
+                source: "ja".into(),
+                target: "en".into(),
+                explanation: "en".into(),
+            },
+            CaptionProcessingMode::Translated,
+            Arc::new(AtomicBool::new(true)),
+            sink,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert!(!captured
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, SessionEvent::FatalError { .. })));
     }
 }

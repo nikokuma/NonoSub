@@ -507,14 +507,14 @@ For every creation deliverable:
 
 ## Audit repair checkpoints
 
-Status: **R2 IMPLEMENTED — native acceptance and checkpoint pending**
+Status: **R3 VERIFIED — session generation isolation**
 
 The July 18 independent review found release-blocking correctness and containment issues. Repairs are performed one at a time; each receives focused tests, the full verification suite, visible acceptance when applicable, and its own GitHub checkpoint before the next repair begins.
 
 - [x] R0 — Preserve and push the current invisible-shell baseline.
 - [x] R1 — Rebuild live source/translation clause lifecycle so finalized captions cannot reopen. Accepted and checkpointed in `dc37d09`.
-- [ ] R2 — Bound every live subtitle style independently of backend text size. Automated and six-preset fixture verification complete; native sustained-live acceptance and checkpoint pending.
-- [ ] R3 — Add session generations, per-run cancellation, and stale-event rejection.
+- [x] R2 — Bound every live subtitle style independently of backend text size. Accepted and checkpointed in `7e18141`.
+- [x] R3 — Add session generations, per-run cancellation, and stale-event rejection. Focused plan: `docs/plans/SESSION_GENERATION_ISOLATION.md`.
 - [ ] R4 — Preserve stable IDs during file chunk-boundary reconciliation.
 - [ ] R5 — Validate exact structured translation output and continue source-only after terminal failure.
 - [ ] R6 — Harden realtime configuration acknowledgement, timing, source hints, and reconnects.

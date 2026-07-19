@@ -20,6 +20,7 @@ pub enum ApiErrorKind {
     RateLimited,
     Network,
     MalformedResponse,
+    Cancelled,
     Service,
 }
 

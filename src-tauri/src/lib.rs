@@ -20,7 +20,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
     },
 };
 use tauri::{
@@ -35,12 +35,11 @@ const API_KEY_MARKER: &str = "api-key-configured";
 
 #[derive(Debug)]
 struct AppState {
-    selected_media: Mutex<Option<PathBuf>>,
+    selected_media: Mutex<Option<SelectedMedia>>,
     playback_media: Mutex<Option<PathBuf>>,
     playback_directory: Mutex<Option<tempfile::TempDir>>,
     prepared_session: Mutex<Option<PreparedSession>>,
-    cancelled: Arc<AtomicBool>,
-    session_counter: AtomicU64,
+    runs: RunCoordinator,
     canonical: Mutex<SessionSnapshot>,
     lesson_cache: Mutex<HashMap<String, LessonCard>>,
     launcher_mode: Mutex<String>,
@@ -60,8 +59,7 @@ impl Default for AppState {
             playback_media: Mutex::new(None),
             playback_directory: Mutex::new(None),
             prepared_session: Mutex::new(None),
-            cancelled: Arc::new(AtomicBool::new(false)),
-            session_counter: AtomicU64::new(0),
+            runs: RunCoordinator::default(),
             canonical: Mutex::new(SessionSnapshot::default()),
             lesson_cache: Mutex::new(HashMap::new()),
             launcher_mode: Mutex::new("file".into()),
@@ -76,11 +74,77 @@ impl Default for AppState {
     }
 }
 
+#[derive(Debug, Clone)]
+struct SelectedMedia {
+    generation: u64,
+    path: PathBuf,
+}
+
 #[derive(Debug)]
 struct PreparedSession {
+    generation: u64,
     _directory: tempfile::TempDir,
     audio: Arc<media::DecodedAudio>,
     chunks: Vec<chunking::AudioChunk>,
+}
+
+#[derive(Debug, Clone)]
+struct RunLease {
+    generation: u64,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl RunLease {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+}
+
+#[derive(Debug, Default)]
+struct RunCoordinator {
+    counter: AtomicU64,
+    active: Mutex<Option<RunLease>>,
+}
+
+impl RunCoordinator {
+    fn replace(&self) -> Result<RunLease, openai::ApiError> {
+        let mut active = self
+            .active
+            .lock()
+            .map_err(|_| service_error("Session generation state is unavailable."))?;
+        if let Some(previous) = active.take() {
+            previous.cancelled.store(true, Ordering::Relaxed);
+        }
+        let run = RunLease {
+            generation: self.counter.fetch_add(1, Ordering::Relaxed) + 1,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        };
+        *active = Some(run.clone());
+        Ok(run)
+    }
+
+    fn lease(&self, generation: u64) -> Result<RunLease, openai::ApiError> {
+        let active = self
+            .active
+            .lock()
+            .map_err(|_| service_error("Session generation state is unavailable."))?;
+        active
+            .as_ref()
+            .filter(|run| run.generation == generation && !run.is_cancelled())
+            .cloned()
+            .ok_or_else(cancelled_error)
+    }
+
+    fn cancel(&self) -> Result<(), openai::ApiError> {
+        let mut active = self
+            .active
+            .lock()
+            .map_err(|_| service_error("Session generation state is unavailable."))?;
+        if let Some(run) = active.take() {
+            run.cancelled.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -98,6 +162,7 @@ struct ModelReadiness {
 struct PreparedMedia {
     path: String,
     file_name: String,
+    generation: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -268,6 +333,10 @@ async fn prepare_media(
         return Err("NonoSub currently supports MP4 and MOV video files.".into());
     }
 
+    let run = state.runs.replace().map_err(|error| error.message)?;
+    #[cfg(target_os = "macos")]
+    live::stop(&state.live);
+
     #[cfg(target_os = "macos")]
     let (playback_path, playback_directory) = if media::needs_macos_playback_proxy(&canonical)? {
         let source = canonical.clone();
@@ -284,6 +353,17 @@ async fn prepare_media(
     #[cfg(not(target_os = "macos"))]
     let (playback_path, playback_directory) = (canonical.clone(), None);
 
+    let active_run = state
+        .runs
+        .active
+        .lock()
+        .map_err(|_| "Session generation state is unavailable.".to_string())?;
+    if active_run
+        .as_ref()
+        .is_none_or(|active| active.generation != run.generation || active.is_cancelled())
+    {
+        return Err(cancelled_error().message);
+    }
     let scope = app.asset_protocol_scope();
     scope
         .allow_file(&playback_path)
@@ -301,7 +381,10 @@ async fn prepare_media(
     *state
         .selected_media
         .lock()
-        .map_err(|_| "Media state is unavailable.")? = Some(canonical.clone());
+        .map_err(|_| "Media state is unavailable.")? = Some(SelectedMedia {
+            generation: run.generation,
+            path: canonical.clone(),
+        });
     *state
         .playback_media
         .lock()
@@ -331,6 +414,7 @@ async fn prepare_media(
     Ok(PreparedMedia {
         path: playback_path.to_string_lossy().into_owned(),
         file_name,
+        generation: run.generation,
     })
 }
 
@@ -368,13 +452,21 @@ fn create_macos_playback_proxy(
 }
 
 #[tauri::command]
-async fn prepare_audio(state: State<'_, AppState>) -> Result<PreparedAudio, String> {
-    state.cancelled.store(false, Ordering::Relaxed);
+async fn prepare_audio(
+    state: State<'_, AppState>,
+    generation: u64,
+) -> Result<PreparedAudio, String> {
+    let run = state
+        .runs
+        .lease(generation)
+        .map_err(|error| error.message)?;
     let path = state
         .selected_media
         .lock()
         .map_err(|_| "Media state is unavailable.")?
-        .clone()
+        .as_ref()
+        .filter(|media| media.generation == generation)
+        .map(|media| media.path.clone())
         .ok_or_else(|| "Choose a video before starting analysis.".to_string())?;
     let (directory, audio, chunks) = tauri::async_runtime::spawn_blocking(move || {
         let directory = tempfile::Builder::new()
@@ -390,10 +482,22 @@ async fn prepare_audio(state: State<'_, AppState>) -> Result<PreparedAudio, Stri
     let duration_ms = (audio.samples.len() as u64 * 1_000) / audio.sample_rate as u64;
     let sample_rate = audio.sample_rate;
     let chunk_count = chunks.len();
+    let active_run = state
+        .runs
+        .active
+        .lock()
+        .map_err(|_| "Session generation state is unavailable.".to_string())?;
+    if active_run
+        .as_ref()
+        .is_none_or(|active| active.generation != run.generation || active.is_cancelled())
+    {
+        return Err(cancelled_error().message);
+    }
     *state
         .prepared_session
         .lock()
         .map_err(|_| "Audio state is unavailable.")? = Some(PreparedSession {
+        generation,
         _directory: directory,
         audio: Arc::new(audio),
         chunks,
@@ -409,10 +513,11 @@ async fn prepare_audio(state: State<'_, AppState>) -> Result<PreparedAudio, Stri
 async fn start_analysis(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    generation: u64,
     languages: LanguageSettings,
     processing_mode: CaptionProcessingMode,
 ) -> Result<(), openai::ApiError> {
-    state.cancelled.store(false, Ordering::Relaxed);
+    let run = state.runs.lease(generation)?;
     let (audio, chunks) = {
         let guard = state
             .prepared_session
@@ -420,25 +525,28 @@ async fn start_analysis(
             .map_err(|_| service_error("Prepared audio state is unavailable."))?;
         let session = guard
             .as_ref()
+            .filter(|session| session.generation == generation)
             .ok_or_else(|| service_error("Prepare audio before starting analysis."))?;
         (Arc::clone(&session.audio), session.chunks.clone())
     };
-    begin_session(
+    begin_session_for_generation(
         &app,
+        generation,
         SessionMode::File,
         languages.clone(),
         processing_mode.clone(),
     )?;
     let client = openai::OpenAiClient::new(api_key()?)?;
     let sink_app = app.clone();
-    let sink: pipeline::EventSink = Arc::new(move |event| record_event(&sink_app, event));
+    let sink: pipeline::EventSink =
+        Arc::new(move |event| record_event_for_generation(&sink_app, generation, event));
     pipeline::run(
         client,
         audio,
         chunks,
         languages,
         processing_mode,
-        Arc::clone(&state.cancelled),
+        Arc::clone(&run.cancelled),
         sink,
     )
     .await
@@ -643,15 +751,25 @@ fn update_languages(
             snapshot.speakers.clone(),
         )
     };
-    if processing_mode == CaptionProcessingMode::Translated
+    let generation = state
+        .runs
+        .active
+        .lock()
+        .map_err(|_| "Session generation state is unavailable.")?
+        .as_ref()
+        .filter(|run| !run.is_cancelled())
+        .map(|run| run.generation);
+    if let Some(generation) = generation.filter(|_| {
+        processing_mode == CaptionProcessingMode::Translated
         && mode == Some(SessionMode::File)
         && previous.target != languages.target
         && !segments.is_empty()
-    {
+    }) {
         let key = api_key().map_err(|error| error.message)?;
         tauri::async_runtime::spawn(async move {
-            let _ = record_event(
+            let _ = record_event_for_generation(
                 &app,
+                generation,
                 SessionEvent::PhaseChanged {
                     phase: "translating".into(),
                 },
@@ -659,8 +777,9 @@ fn update_languages(
             let client = match openai::OpenAiClient::new(key) {
                 Ok(client) => client,
                 Err(error) => {
-                    let _ = record_event(
+                    let _ = record_event_for_generation(
                         &app,
+                        generation,
                         SessionEvent::RecoverableError {
                             error: RecoverableError {
                                 code: "retranslation_setup".into(),
@@ -699,8 +818,9 @@ fn update_languages(
                 match outputs {
                     Ok(outputs) => {
                         for output in outputs {
-                            let _ = record_event(
+                            let _ = record_event_for_generation(
                                 &app,
+                                generation,
                                 SessionEvent::TranslationFinalized {
                                     segment_id: output.segment_id,
                                     translation_text: output.translation,
@@ -710,8 +830,9 @@ fn update_languages(
                         }
                     }
                     Err(error) => {
-                        let _ = record_event(
+                        let _ = record_event_for_generation(
                             &app,
+                            generation,
                             SessionEvent::RecoverableError {
                                 error: RecoverableError {
                                     code: "retranslation_failed".into(),
@@ -726,9 +847,14 @@ fn update_languages(
                 }
             }
             let ready_through_ms = segments.last().map_or(0, |segment| segment.end_ms);
-            let _ = record_event(&app, SessionEvent::CoverageChanged { ready_through_ms });
-            let _ = record_event(
+            let _ = record_event_for_generation(
                 &app,
+                generation,
+                SessionEvent::CoverageChanged { ready_through_ms },
+            );
+            let _ = record_event_for_generation(
+                &app,
+                generation,
                 SessionEvent::PhaseChanged {
                     phase: "ready".into(),
                 },
@@ -794,7 +920,7 @@ fn hide_surface(app: tauri::AppHandle, surface: String) -> Result<(), String> {
 
 #[tauri::command]
 fn cancel_session(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    state.cancelled.store(true, Ordering::Relaxed);
+    state.runs.cancel().map_err(|error| error.message)?;
     #[cfg(target_os = "macos")]
     live::stop(&state.live);
     *state
@@ -834,8 +960,10 @@ async fn start_live_capture(
     sync_mode: LiveSyncMode,
     processing_mode: CaptionProcessingMode,
 ) -> Result<(), openai::ApiError> {
-    begin_session(
+    let run = state.runs.replace()?;
+    begin_session_for_generation(
         &app,
+        run.generation,
         SessionMode::Live,
         languages.clone(),
         processing_mode.clone(),
@@ -848,13 +976,15 @@ async fn start_live_capture(
         languages,
         sync_mode,
         processing_mode,
+        run.generation,
     )
     .await
     {
         Ok(()) => Ok(()),
         Err(error) => {
-            let _ = record_event(
+            let _ = record_event_for_generation(
                 &app,
+                run.generation,
                 SessionEvent::RecoverableError {
                     error: RecoverableError {
                         code: "live_start_failed".into(),
@@ -885,40 +1015,49 @@ async fn start_live_capture(
 
 #[tauri::command]
 fn stop_live_capture(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    state.runs.cancel().map_err(|error| error.message)?;
     #[cfg(target_os = "macos")]
     live::stop(&state.live);
     record_event(&app, SessionEvent::Complete).map_err(|error| error.message)?;
     Ok(())
 }
 
-fn begin_session(
+fn begin_session_for_generation(
     app: &tauri::AppHandle,
+    generation: u64,
     mode: SessionMode,
     languages: LanguageSettings,
     processing_mode: CaptionProcessingMode,
 ) -> Result<(), openai::ApiError> {
     let state = app.state::<AppState>();
-    state.cancelled.store(true, Ordering::Relaxed);
-    #[cfg(target_os = "macos")]
-    live::stop(&state.live);
-    state.cancelled.store(false, Ordering::Relaxed);
+    let event = SessionEvent::SessionReset {
+        mode: mode.clone(),
+        languages: languages.clone(),
+        processing_mode: processing_mode.clone(),
+    };
+    let active = state
+        .runs
+        .active
+        .lock()
+        .map_err(|_| service_error("Session generation state is unavailable."))?;
+    if active
+        .as_ref()
+        .is_none_or(|run| run.generation != generation || run.is_cancelled())
+    {
+        return Err(cancelled_error());
+    }
     state
         .lesson_cache
         .lock()
         .map_err(|_| service_error("Lesson cache is unavailable."))?
         .clear();
-    let id = state.session_counter.fetch_add(1, Ordering::Relaxed) + 1;
-    let media = state
+    let mut snapshot = state
         .canonical
         .lock()
-        .map_err(|_| service_error("Session state is unavailable."))?
-        .media
-        .clone();
-    *state
-        .canonical
-        .lock()
-        .map_err(|_| service_error("Session state is unavailable."))? = SessionSnapshot {
-        session_id: format!("session-{id}"),
+        .map_err(|_| service_error("Session state is unavailable."))?;
+    let media = snapshot.media.clone();
+    *snapshot = SessionSnapshot {
+        session_id: format!("session-{generation}"),
         mode: Some(mode.clone()),
         languages: languages.clone(),
         media: if mode == SessionMode::File {
@@ -928,14 +1067,58 @@ fn begin_session(
         },
         ..SessionSnapshot::default()
     };
-    record_event(
-        app,
-        SessionEvent::SessionReset {
-            mode,
-            languages,
-            processing_mode,
-        },
-    )
+    snapshot.sequence += 1;
+    apply_event(&mut snapshot, &event);
+    let envelope = SequencedSessionEvent {
+        session_id: snapshot.session_id.clone(),
+        sequence: snapshot.sequence,
+        event,
+    };
+    drop(snapshot);
+    app.emit("session-event", envelope)
+        .map_err(|error| service_error(&format!("Could not update subtitle windows: {error}")))
+}
+
+fn scoped_event_envelope<'a>(
+    state: &'a AppState,
+    generation: u64,
+    event: SessionEvent,
+) -> Result<(MutexGuard<'a, Option<RunLease>>, SequencedSessionEvent), openai::ApiError> {
+    let active = state
+        .runs
+        .active
+        .lock()
+        .map_err(|_| service_error("Session generation state is unavailable."))?;
+    if active
+        .as_ref()
+        .is_none_or(|run| run.generation != generation || run.is_cancelled())
+    {
+        return Err(cancelled_error());
+    }
+    let mut snapshot = state
+        .canonical
+        .lock()
+        .map_err(|_| service_error("Session state is unavailable."))?;
+    snapshot.sequence += 1;
+    apply_event(&mut snapshot, &event);
+    let envelope = SequencedSessionEvent {
+        session_id: snapshot.session_id.clone(),
+        sequence: snapshot.sequence,
+        event,
+    };
+    drop(snapshot);
+    Ok((active, envelope))
+}
+
+pub(crate) fn record_event_for_generation(
+    app: &tauri::AppHandle,
+    generation: u64,
+    event: SessionEvent,
+) -> Result<(), openai::ApiError> {
+    let (_generation_guard, envelope) =
+        scoped_event_envelope(app.state::<AppState>().inner(), generation, event)?;
+    app.emit("session-event", envelope)
+        .map_err(|error| service_error(&format!("Could not update subtitle windows: {error}")))
 }
 
 pub(crate) fn record_event(
@@ -1347,7 +1530,7 @@ fn dispatch_action(app: &tauri::AppHandle, id: &str) {
                 .lock()
                 .ok()
                 .and_then(|snapshot| snapshot.mode.clone());
-            state.cancelled.store(true, Ordering::Relaxed);
+            let _ = state.runs.cancel();
             #[cfg(target_os = "macos")]
             live::stop(&state.live);
             let _ = record_event(app, SessionEvent::Complete);
@@ -1484,6 +1667,14 @@ fn service_error(message: &str) -> openai::ApiError {
     }
 }
 
+fn cancelled_error() -> openai::ApiError {
+    openai::ApiError {
+        kind: openai::ApiErrorKind::Cancelled,
+        message: "This session run was replaced or cancelled.".into(),
+        retryable: false,
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1616,5 +1807,76 @@ mod tests {
             serde_json::to_string(&LearnerLevel::Advanced).unwrap(),
             "\"advanced\""
         );
+    }
+
+    #[test]
+    fn replacing_a_run_permanently_cancels_only_the_previous_token() {
+        let runs = RunCoordinator::default();
+        let first = runs.replace().unwrap();
+        assert!(!first.is_cancelled());
+
+        let second = runs.replace().unwrap();
+        assert!(first.is_cancelled());
+        assert!(!second.is_cancelled());
+        assert!(runs.lease(first.generation).is_err());
+        assert_eq!(runs.lease(second.generation).unwrap().generation, second.generation);
+
+        runs.cancel().unwrap();
+        assert!(first.is_cancelled());
+        assert!(second.is_cancelled());
+        assert!(runs.lease(second.generation).is_err());
+    }
+
+    #[test]
+    fn stale_generation_events_cannot_mutate_or_advance_the_current_snapshot() {
+        let state = AppState::default();
+        let first = state.runs.replace().unwrap();
+        state.canonical.lock().unwrap().session_id = format!("session-{}", first.generation);
+        let (first_guard, _) = scoped_event_envelope(
+            &state,
+            first.generation,
+            SessionEvent::PhaseChanged {
+                phase: "transcribing".into(),
+            },
+        )
+        .unwrap();
+        drop(first_guard);
+
+        let second = state.runs.replace().unwrap();
+        *state.canonical.lock().unwrap() = SessionSnapshot {
+            session_id: format!("session-{}", second.generation),
+            phase: "preparing".into(),
+            ..SessionSnapshot::default()
+        };
+        let before = state.canonical.lock().unwrap().clone();
+
+        let stale = scoped_event_envelope(
+            &state,
+            first.generation,
+            SessionEvent::FatalError {
+                message: "late failure from the old run".into(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(stale.kind, openai::ApiErrorKind::Cancelled);
+        let after_stale = state.canonical.lock().unwrap().clone();
+        assert_eq!(after_stale.session_id, before.session_id);
+        assert_eq!(after_stale.sequence, before.sequence);
+        assert_eq!(after_stale.phase, before.phase);
+        assert_eq!(after_stale.fatal_error, before.fatal_error);
+
+        let (generation_guard, accepted) = scoped_event_envelope(
+            &state,
+            second.generation,
+            SessionEvent::PhaseChanged {
+                phase: "transcribing".into(),
+            },
+        )
+        .unwrap();
+        assert!(state.runs.active.try_lock().is_err());
+        drop(generation_guard);
+        assert_eq!(accepted.session_id, format!("session-{}", second.generation));
+        assert_eq!(accepted.sequence, 1);
+        assert_eq!(state.canonical.lock().unwrap().phase, "transcribing");
     }
 }

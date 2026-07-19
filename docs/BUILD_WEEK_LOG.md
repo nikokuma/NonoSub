@@ -146,3 +146,12 @@
 - Capped visible caption content at 180 logical points and the transparent native overlay at 240 logical points, including 30-point top/bottom bleed for preset borders and shadows.
 - Added deterministic light/dark, display-mode, long-caption, waiting-state, and pathological browser fixtures. All six presets stay contained at 900×240 and the 520×240 minimum width with no renderer warnings.
 - Full verification passes with zero Svelte warnings, 74 frontend tests, a successful production build, 57 Rust tests, and warning-free clippy. Native sustained-live acceptance remains before the R2 checkpoint.
+
+## July 19 — Session generation isolation
+
+- Replaced the resettable process-wide cancellation flag with monotonically increasing file/live run generations and a private cancellation token for each run. Starting or cancelling a session permanently invalidates the prior token.
+- Tagged selected media and prepared audio with their originating generation. The frontend carries the opaque generation from media preparation through audio preparation and file analysis, preventing mismatched artifacts from being analyzed.
+- Added one generation gate shared by file pipeline, live capture, reconnect, error, completion, and old-session retranslation events. Validation and canonical-state mutation occur under the same ordering guard, so replacement cannot interleave between them.
+- Classified ordinary replacement/cancellation separately from service failure. Cancelled pipelines finish silently instead of emitting a fatal error or reopening recovery UI.
+- Added adversarial tests for permanent old-token cancellation, stale fatal-event rejection without sequence mutation, cancellation without fatal output, and exact frontend generation handoff.
+- Full verification passes with zero Svelte warnings, 75 frontend tests, a successful production build, 60 Rust tests, and warning-free clippy.

@@ -4,7 +4,7 @@ use crate::{
         RecoverableError, SegmentStatus, SessionEvent, SessionMode, SubtitleSegment,
     },
     openai::{ApiError, ApiErrorKind},
-    record_event,
+    record_event_for_generation,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use futures_util::{
@@ -1189,9 +1189,9 @@ fn grapheme_boundary(grapheme: &str) -> bool {
     })
 }
 
-fn emit_events(app: &tauri::AppHandle, events: Vec<SessionEvent>) {
+fn emit_events(app: &tauri::AppHandle, generation: u64, events: Vec<SessionEvent>) {
     for event in events {
-        let _ = record_event(app, event);
+        let _ = record_event_for_generation(app, generation, event);
     }
 }
 
@@ -1202,6 +1202,7 @@ pub async fn start(
     languages: LanguageSettings,
     sync_mode: LiveSyncMode,
     processing_mode: CaptionProcessingMode,
+    generation: u64,
 ) -> Result<(), ApiError> {
     abort_previous(state);
     state.cancelled.store(false, Ordering::Relaxed);
@@ -1242,8 +1243,9 @@ pub async fn start(
     stream.start_capture().await.map_err(|error| {
         capture_error(&format!("System audio capture could not start: {error}"))
     })?;
-    let _ = record_event(
+    let _ = record_event_for_generation(
         &app,
+        generation,
         SessionEvent::PhaseChanged {
             phase: "buffering".into(),
         },
@@ -1294,7 +1296,7 @@ pub async fn start(
                             if let Some(list) = sample.audio_buffer_list() {
                                 for buffer in list.iter() { append_f32_48k_as_pcm16_24k(buffer.data(), &mut pcm); }
                             } else {
-                                emit_recoverable(&app, "capture_buffer", "A system-audio buffer could not be read.");
+                                emit_recoverable(&app, generation, "capture_buffer", "A system-audio buffer could not be read.");
                             }
                             // The CoreMedia buffer is dropped before the socket await; it is not Send.
                             drop(sample);
@@ -1322,21 +1324,21 @@ pub async fn start(
                                         if writer.send(Message::Text(event.to_string().into())).await.is_err() {
                                             if !reconnect_used {
                                                 reconnect_used = true;
-                                                let _ = record_event(&app, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
+                                                let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
                                                 if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &processing_mode).await {
                                                     writer = next_writer;
                                                     reader = next_reader;
                                                     if original_only {
-                                                        emit_events(&app, transcription.finish(capture_clock_ms(sent_samples)));
+                                                        emit_events(&app, generation, transcription.finish(capture_clock_ms(sent_samples)));
                                                         speech_committer = SpeechCommitter::default();
                                                     } else {
-                                                        emit_events(&app, coordinator.begin_epoch(capture_clock_ms(sent_samples)));
+                                                        emit_events(&app, generation, coordinator.begin_epoch(capture_clock_ms(sent_samples)));
                                                     }
-                                                    let _ = record_event(&app, SessionEvent::PhaseChanged { phase: "ready".into() });
+                                                    let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "ready".into() });
                                                     continue 'capture;
                                                 }
                                             }
-                                            emit_recoverable(&app, "live_disconnected", "Live captions disconnected and the automatic reconnect did not succeed.");
+                                            emit_recoverable(&app, generation, "live_disconnected", "Live captions disconnected and the automatic reconnect did not succeed.");
                                             closing = true;
                                             break;
                                         }
@@ -1354,21 +1356,21 @@ pub async fn start(
                     let Some(message) = message else {
                         if !reconnect_used {
                             reconnect_used = true;
-                            let _ = record_event(&app, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
+                            let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
                             if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &processing_mode).await {
                                 writer = next_writer;
                                 reader = next_reader;
                                 if original_only {
-                                    emit_events(&app, transcription.finish(capture_clock_ms(sent_samples)));
+                                    emit_events(&app, generation, transcription.finish(capture_clock_ms(sent_samples)));
                                     speech_committer = SpeechCommitter::default();
                                 } else {
-                                    emit_events(&app, coordinator.begin_epoch(capture_clock_ms(sent_samples)));
+                                    emit_events(&app, generation, coordinator.begin_epoch(capture_clock_ms(sent_samples)));
                                 }
-                                let _ = record_event(&app, SessionEvent::PhaseChanged { phase: "ready".into() });
+                                let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "ready".into() });
                                 continue 'capture;
                             }
                         }
-                        emit_recoverable(&app, "live_disconnected", "Live captions disconnected and the automatic reconnect did not succeed.");
+                        emit_recoverable(&app, generation, "live_disconnected", "Live captions disconnected and the automatic reconnect did not succeed.");
                         break;
                     };
                     match message {
@@ -1376,29 +1378,29 @@ pub async fn start(
                             RealtimeEvent::SourceDelta(delta) => {
                                 if !ready {
                                     ready = true;
-                                    let _ = record_event(&app, SessionEvent::PhaseChanged { phase: "ready".into() });
+                                    let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "ready".into() });
                                 }
-                                emit_events(&app, coordinator.on_source(delta, capture_clock_ms(sent_samples)));
+                                emit_events(&app, generation, coordinator.on_source(delta, capture_clock_ms(sent_samples)));
                             }
                             RealtimeEvent::TranslationDelta(delta) => {
                                 if !ready {
                                     ready = true;
-                                    let _ = record_event(&app, SessionEvent::PhaseChanged { phase: "ready".into() });
+                                    let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "ready".into() });
                                 }
-                                emit_events(&app, coordinator.on_translation(delta, capture_clock_ms(sent_samples)));
+                                emit_events(&app, generation, coordinator.on_translation(delta, capture_clock_ms(sent_samples)));
                             }
                             RealtimeEvent::TranscriptionDelta { item_id, event_id, text } => {
                                 if !ready {
                                     ready = true;
-                                    let _ = record_event(&app, SessionEvent::PhaseChanged { phase: "ready".into() });
+                                    let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "ready".into() });
                                 }
-                                emit_events(&app, transcription.on_delta(item_id, event_id, text, capture_clock_ms(sent_samples)));
+                                emit_events(&app, generation, transcription.on_delta(item_id, event_id, text, capture_clock_ms(sent_samples)));
                             }
                             RealtimeEvent::TranscriptionDone { item_id, event_id, text } => {
-                                emit_events(&app, transcription.on_done(item_id, event_id, text, capture_clock_ms(sent_samples)));
+                                emit_events(&app, generation, transcription.on_done(item_id, event_id, text, capture_clock_ms(sent_samples)));
                             }
                             RealtimeEvent::Closed => closed = true,
-                            RealtimeEvent::Error(message) => emit_recoverable(&app, "realtime_error", &message),
+                            RealtimeEvent::Error(message) => emit_recoverable(&app, generation, "realtime_error", &message),
                             RealtimeEvent::Ignored => {}
                         },
                         Ok(Message::Close(_)) => break,
@@ -1406,40 +1408,48 @@ pub async fn start(
                         Err(error) => {
                             if !reconnect_used {
                                 reconnect_used = true;
-                                let _ = record_event(&app, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
+                                let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
                                 if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &processing_mode).await {
                                     writer = next_writer;
                                     reader = next_reader;
                                     if original_only {
-                                        emit_events(&app, transcription.finish(capture_clock_ms(sent_samples)));
+                                        emit_events(&app, generation, transcription.finish(capture_clock_ms(sent_samples)));
                                         speech_committer = SpeechCommitter::default();
                                     } else {
-                                        emit_events(&app, coordinator.begin_epoch(capture_clock_ms(sent_samples)));
+                                        emit_events(&app, generation, coordinator.begin_epoch(capture_clock_ms(sent_samples)));
                                     }
-                                    let _ = record_event(&app, SessionEvent::PhaseChanged { phase: "ready".into() });
+                                    let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "ready".into() });
                                     continue 'capture;
                                 }
                             }
-                            emit_recoverable(&app, "live_disconnected", &format!("Live caption connection ended: {error}"));
+                            emit_recoverable(&app, generation, "live_disconnected", &format!("Live caption connection ended: {error}"));
                             break;
                         }
                     }
                 }
                 _ = tick.tick() => {
                     if !original_only {
-                        emit_events(&app, coordinator.tick(capture_clock_ms(sent_samples)));
+                        emit_events(&app, generation, coordinator.tick(capture_clock_ms(sent_samples)));
                     }
                 }
             }
         }
 
         if original_only {
-            emit_events(&app, transcription.finish(capture_clock_ms(sent_samples)));
+            emit_events(
+                &app,
+                generation,
+                transcription.finish(capture_clock_ms(sent_samples)),
+            );
         } else {
-            emit_events(&app, coordinator.finish(capture_clock_ms(sent_samples)));
+            emit_events(
+                &app,
+                generation,
+                coordinator.finish(capture_clock_ms(sent_samples)),
+            );
         }
         let _ = stream.stop_capture().await;
-        let _ = record_event(&app, SessionEvent::Complete);
+        let _ = record_event_for_generation(&app, generation, SessionEvent::Complete);
     });
     *state
         .task
@@ -1622,9 +1632,10 @@ fn parse_realtime_event(text: &str) -> RealtimeEvent {
     }
 }
 
-fn emit_recoverable(app: &tauri::AppHandle, code: &str, message: &str) {
-    let _ = record_event(
+fn emit_recoverable(app: &tauri::AppHandle, generation: u64, code: &str, message: &str) {
+    let _ = record_event_for_generation(
         app,
+        generation,
         SessionEvent::RecoverableError {
             error: RecoverableError {
                 code: code.into(),

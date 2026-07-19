@@ -46,13 +46,16 @@ export async function startFileSession(
 
   await cancelAndReplaceSession();
   hooks.status?.("Opening video and preparing compatible playback…");
-  const prepared = await invoke<{ path: string; file_name: string }>("prepare_media", { path });
+  const prepared = await invoke<{ path: string; file_name: string; generation: number }>("prepare_media", { path });
   hooks.status?.(`Decoding ${prepared.file_name} locally…`);
-  const audio = await invoke<{ durationMs: number; chunkCount: number }>("prepare_audio");
+  const audio = await invoke<{ durationMs: number; chunkCount: number }>("prepare_audio", {
+    generation: prepared.generation,
+  });
   hooks.status?.(`${audio.chunkCount} audio chunk${audio.chunkCount === 1 ? "" : "s"} ready · analyzing`);
   await savePreferences(preferences);
   await invoke("open_surface", { surface: "viewer" });
   void invoke("start_analysis", {
+    generation: prepared.generation,
     languages: preferences.languages,
     processingMode: preferences.processingMode,
   }).catch((error) => hooks.analysisError?.(errorMessage(error)));
