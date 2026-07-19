@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_LANGUAGES, DEFAULT_STYLE, DEFAULT_SYNC, type SpeakerProfile } from "./contracts";
 import { FIXTURE_SEGMENTS } from "./fixtures";
-import { applyPreferenceAction, buildTutorContext, effectiveStyle, parsePreferences, renameSpeaker, serializePreferences } from "./preferences";
+import { applyPreferenceAction, buildTutorContext, decodePreferenceEnvelope, effectiveStyle, mergePreferencePatch, parsePreferences, preferencePatchBetween, renameSpeaker, serializePreferences } from "./preferences";
 
 describe("local preferences and tutor context", () => {
   it("round-trips styles and clamps persisted overlay position", () => {
@@ -134,5 +134,37 @@ describe("local preferences and tutor context", () => {
   it("defaults experimental external pause off for v3 preferences", () => {
     const parsed = parsePreferences(JSON.stringify({ level: "beginner", style: DEFAULT_STYLE, languages: DEFAULT_LANGUAGES }));
     expect(parsed?.experimentalExternalPause).toBe(false);
+  });
+
+  it("accepts only newer valid canonical preference envelopes", () => {
+    const preferences = {
+      level: "beginner" as const,
+      style: DEFAULT_STYLE,
+      languages: DEFAULT_LANGUAGES,
+      sync: DEFAULT_SYNC,
+      processingMode: "translated" as const,
+      onboardingComplete: true,
+      lessonPlacements: {},
+      experimentalExternalPause: false,
+    };
+    expect(decodePreferenceEnvelope({ revision: 4, preferences, rebased: false }, 3)?.revision).toBe(4);
+    expect(decodePreferenceEnvelope({ revision: 3, preferences, rebased: false }, 3)).toBeUndefined();
+    expect(decodePreferenceEnvelope({ revision: 5, preferences: { broken: true }, rebased: false }, 4)).toBeUndefined();
+  });
+
+  it("merges narrow preference patches without overwriting unrelated settings", () => {
+    const base = parsePreferences(JSON.stringify({ level: "beginner", style: DEFAULT_STYLE, languages: DEFAULT_LANGUAGES }))!;
+    const moved = mergePreferencePatch(base, { style: { position: { x: 0.2, y: 0.3 } } });
+    const translated = mergePreferencePatch(moved, { languages: { target: "ja", explanation: "ja" } });
+
+    expect(translated.style.position).toEqual({ x: 0.2, y: 0.3 });
+    expect(translated.languages).toEqual({ source: "auto", target: "ja", explanation: "ja" });
+    expect(base.style.position).toEqual(DEFAULT_STYLE.position);
+  });
+
+  it("derives leaf-only patches for native menu actions", () => {
+    const base = parsePreferences(JSON.stringify({ level: "beginner", style: DEFAULT_STYLE, languages: DEFAULT_LANGUAGES }))!;
+    const updated = applyPreferenceAction(base, "display_source")!;
+    expect(preferencePatchBetween(base, updated)).toEqual({ style: { displayMode: "source" } });
   });
 });

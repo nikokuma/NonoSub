@@ -13,9 +13,12 @@ One Svelte build routes by query string:
 - `?surface=workbench`: setup, language routing, progress, transcript, speakers, and styling;
 - `?surface=viewer`: borderless internal video with hidden-on-idle controls;
 - `?surface=overlay`: compact transparent live-caption window;
-- `?surface=lesson`: always-on-top Nono chalkboard.
+- `?surface=lesson`: always-on-top Nono chalkboard;
+- `?surface=launcher`: temporary file-drop and live-start surface.
 
-Rust's `SessionSnapshot` is authoritative. Each window requests a snapshot, then applies sequenced `SessionEvent` envelopes. A session-ID change or event gap forces a fresh snapshot. Starting a file or live session cancels the previous mode. Preferences are local, non-sensitive, and broadcast to every open surface.
+Rust's `SessionSnapshot` is authoritative. Each window installs its `SessionEvent` listener before requesting a snapshot, queues events during that request, then drains only contiguous envelopes. Duplicate events are ignored; a session-ID change or sequence gap triggers one serialized snapshot refresh so a delayed request cannot overwrite newer state. Starting a file or live session cancels the previous mode.
+
+Preferences are non-sensitive and persisted locally, but Rust orders the running app's canonical value. Windows submit deep leaf patches with their last observed revision. Rust rebases stale patches under one lock, applies language-session side effects in that same order, increments the revision, and broadcasts a validated full preference envelope. This preserves unrelated changes from simultaneous surfaces without allowing style or placement saves to restart translation.
 
 The tray calls Rust directly. Closing a window hides it; quitting is explicit. macOS activation policy is `Accessory` for overlay-only operation and `Regular` while the workbench or viewer is visible.
 

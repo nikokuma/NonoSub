@@ -7,8 +7,9 @@
   import { EMPTY_SESSION } from "./contracts";
   import { FIXTURE_EVENTS } from "./fixtures";
   import { formatTime, reduceSession } from "./session";
-  import { applyPreferenceAction } from "./preferences";
-  import { initialSession, loadPreferences, savePreferences, subscribePreferences, subscribeSession } from "./runtime";
+  import { applyPreferenceAction, preferencePatchBetween } from "./preferences";
+  import { loadPreferences, savePreferencePatch, subscribePreferences, subscribeSession } from "./runtime";
+  import type { PreferencePatch } from "./preferences";
   import { errorMessage, startFileSession, startLiveSession } from "./sessionLaunch";
   import SubtitleStylePreview from "./SubtitleStylePreview.svelte";
 
@@ -57,8 +58,7 @@
       document.fonts.load('400 18px "Share Tech Mono"', "FALLOUT SUBTITLE PREVIEW"),
     ]);
     const cleanup: Array<() => void> = [];
-    void initialSession().then((value) => session = value);
-    void subscribeSession(() => session, (value) => session = value).then((unlisten) => cleanup.push(unlisten));
+    void subscribeSession((value) => session = value).then((unlisten) => cleanup.push(unlisten));
     void subscribePreferences((value) => preferences = value).then((unlisten) => cleanup.push(unlisten));
     if (isTauri()) {
       void invoke<{ present: boolean }>("api_key_status").then((status) => {
@@ -70,24 +70,25 @@
         if (payload === "languages") document.querySelector<HTMLElement>("#languages")?.focus();
         const updated = applyPreferenceAction(preferences, payload);
         if (updated) {
+          const patch = preferencePatchBetween(preferences, updated);
           preferences = updated;
           if (payload === "external_pause_on") void invoke("request_media_key_permission").catch(() => false);
-          void persist();
+          void persist(patch);
         }
       }).then((unlisten) => cleanup.push(unlisten));
     }
     return () => cleanup.forEach((stop) => stop());
   });
 
-  async function persist() {
-    await savePreferences(preferences);
+  async function persist(patch: PreferencePatch) {
+    preferences = await savePreferencePatch(patch);
   }
 
   async function updateExternalPause() {
     if (preferences.experimentalExternalPause && isTauri()) {
       await invoke("request_media_key_permission").catch(() => false);
     }
-    await persist();
+    await persist({ experimentalExternalPause: preferences.experimentalExternalPause });
   }
 
   async function chooseMedia() {
@@ -154,7 +155,7 @@
       liveReady = readiness.live;
       apiKey = "";
       preferences.onboardingComplete = true;
-      await persist();
+      await persist({ onboardingComplete: true });
       onboarding = false;
       apiMessage = readiness.live ? "All models are ready." : "File mode is ready. Live translation is unavailable for this project.";
       if (isTauri()) window.setTimeout(() => void invoke("hide_surface", { surface: "workbench" }), 700);
@@ -209,12 +210,12 @@
 
       <section class="language-panel" id="languages" tabindex="-1">
         <div><span class="eyebrow">LANGUAGE ROUTING</span><h2>Any language → any language</h2></div>
-        <label>Source<select bind:value={preferences.languages.source} onchange={persist}>{#each LANGUAGE_OPTIONS as language}<option value={language[0]}>{language[1]}</option>{/each}</select></label>
+        <label>Source<select bind:value={preferences.languages.source} onchange={() => void persist({ languages: { source: preferences.languages.source } })}>{#each LANGUAGE_OPTIONS as language}<option value={language[0]}>{language[1]}</option>{/each}</select></label>
         <span class="arrow">→</span>
-        <label>Subtitles<select bind:value={preferences.languages.target} disabled={preferences.processingMode === "original_only"} onchange={() => { preferences.languages.explanation = preferences.languages.target; void persist(); }}>{#each LANGUAGE_OPTIONS.filter(([code]) => code !== "auto") as language}<option value={language[0]}>{language[1]}</option>{/each}</select></label>
-        <label class="processing">Caption processing<select bind:value={preferences.processingMode} onchange={persist}><option value="translated">Translated</option><option value="original_only">Original only (fast)</option></select></label>
-        <label class="explanation">Nono explains in<select bind:value={preferences.languages.explanation} onchange={persist}>{#each LANGUAGE_OPTIONS.filter(([code]) => code !== "auto") as language}<option value={language[0]}>{language[1]}</option>{/each}</select></label>
-        <label class="live-timing">Live timing<select bind:value={preferences.sync.liveMode} disabled={preferences.processingMode === "original_only"} onchange={persist}><option value="coordinated">Coordinated bilingual</option><option value="fast_source">Fast source</option></select></label>
+        <label>Subtitles<select bind:value={preferences.languages.target} disabled={preferences.processingMode === "original_only"} onchange={() => { preferences.languages.explanation = preferences.languages.target; void persist({ languages: { target: preferences.languages.target, explanation: preferences.languages.explanation } }); }}>{#each LANGUAGE_OPTIONS.filter(([code]) => code !== "auto") as language}<option value={language[0]}>{language[1]}</option>{/each}</select></label>
+        <label class="processing">Caption processing<select bind:value={preferences.processingMode} onchange={() => void persist({ processingMode: preferences.processingMode })}><option value="translated">Translated</option><option value="original_only">Original only (fast)</option></select></label>
+        <label class="explanation">Nono explains in<select bind:value={preferences.languages.explanation} onchange={() => void persist({ languages: { explanation: preferences.languages.explanation } })}>{#each LANGUAGE_OPTIONS.filter(([code]) => code !== "auto") as language}<option value={language[0]}>{language[1]}</option>{/each}</select></label>
+        <label class="live-timing">Live timing<select bind:value={preferences.sync.liveMode} disabled={preferences.processingMode === "original_only"} onchange={() => void persist({ sync: { liveMode: preferences.sync.liveMode } })}><option value="coordinated">Coordinated bilingual</option><option value="fast_source">Fast source</option></select></label>
         <p class="language-note">Display changes what you see. Caption processing controls whether NonoSub requests a translation. Original-only subtitles remain clickable for translation, language, and culture questions.</p>
         <label class="external-pause"><input type="checkbox" bind:checked={preferences.experimentalExternalPause} onchange={updateExternalPause} /> Experimental: pause external media when Ask Nono opens</label>
         <p class="external-note">Best effort. macOS may require Accessibility permission and does not guarantee which media app receives the play/pause key.</p>
@@ -222,30 +223,30 @@
       </section>
 
       <section class="styles">
-        <div class="section-head"><div><span class="eyebrow">SUBTITLE SIGNAL</span><h2>Make every line land.</h2></div><label>Size <input type="range" min="18" max="44" bind:value={preferences.style.fontSize} onchange={persist} /></label></div>
-        <div class="preset-row">{#each PRESETS as preset}<button class:chosen={preferences.style.preset === preset} onclick={() => { preferences.style.preset = preset; void persist(); }}>{presetLabel(preset)}</button>{/each}</div>
+        <div class="section-head"><div><span class="eyebrow">SUBTITLE SIGNAL</span><h2>Make every line land.</h2></div><label>Size <input type="range" min="18" max="44" bind:value={preferences.style.fontSize} onchange={() => void persist({ style: { fontSize: preferences.style.fontSize } })} /></label></div>
+        <div class="preset-row">{#each PRESETS as preset}<button class:chosen={preferences.style.preset === preset} onclick={() => { preferences.style.preset = preset; void persist({ style: { preset } }); }}>{presetLabel(preset)}</button>{/each}</div>
         <SubtitleStylePreview style={preferences.style} processingMode={preferences.processingMode} />
         <div class="fine-controls">
-          <label>Background <input type="range" min="0" max="0.9" step="0.05" bind:value={preferences.style.backgroundOpacity} onchange={persist} /></label>
-          <label>Display {#if preferences.processingMode === "original_only"}<select disabled><option>Source only</option></select>{:else}<select bind:value={preferences.style.displayMode} onchange={persist}><option value="both">Source + translation</option><option value="source">Source only</option><option value="translation">Translation only</option></select>{/if}</label>
-          <label>Effect <select bind:value={preferences.style.effect} onchange={persist}><option value="outline">Outline</option><option value="shadow">Shadow</option><option value="none">None</option></select></label>
-          <label class="check"><input type="checkbox" bind:checked={preferences.style.showSpeakerNames} onchange={persist} /> Speaker names</label>
+          <label>Background <input type="range" min="0" max="0.9" step="0.05" bind:value={preferences.style.backgroundOpacity} onchange={() => void persist({ style: { backgroundOpacity: preferences.style.backgroundOpacity } })} /></label>
+          <label>Display {#if preferences.processingMode === "original_only"}<select disabled><option>Source only</option></select>{:else}<select bind:value={preferences.style.displayMode} onchange={() => void persist({ style: { displayMode: preferences.style.displayMode } })}><option value="both">Source + translation</option><option value="source">Source only</option><option value="translation">Translation only</option></select>{/if}</label>
+          <label>Effect <select bind:value={preferences.style.effect} onchange={() => void persist({ style: { effect: preferences.style.effect } })}><option value="outline">Outline</option><option value="shadow">Shadow</option><option value="none">None</option></select></label>
+          <label class="check"><input type="checkbox" bind:checked={preferences.style.showSpeakerNames} onchange={() => void persist({ style: { showSpeakerNames: preferences.style.showSpeakerNames } })} /> Speaker names</label>
         </div>
         {#if preferences.style.preset === "wired"}
           <div class="cyberia-colors" aria-label="Wired colors">
             <span>WIRED COLORS</span>
-            <label>Panel <input type="color" bind:value={preferences.style.wiredColors.panel} onchange={persist} /></label>
-            <label>Selected wash <input type="color" bind:value={preferences.style.wiredColors.wash} onchange={persist} /></label>
-            <label>Source text <input type="color" bind:value={preferences.style.wiredColors.sourceText} onchange={persist} /></label>
-            <label>Translation <input type="color" bind:value={preferences.style.wiredColors.translationText} onchange={persist} /></label>
-            <label>Metadata <input type="color" bind:value={preferences.style.wiredColors.metadata} onchange={persist} /></label>
-            <label>Fallback speaker <input type="color" bind:value={preferences.style.wiredColors.fallbackAccent} onchange={persist} /></label>
+            <label>Panel <input type="color" bind:value={preferences.style.wiredColors.panel} onchange={() => void persist({ style: { wiredColors: { panel: preferences.style.wiredColors.panel } } })} /></label>
+            <label>Selected wash <input type="color" bind:value={preferences.style.wiredColors.wash} onchange={() => void persist({ style: { wiredColors: { wash: preferences.style.wiredColors.wash } } })} /></label>
+            <label>Source text <input type="color" bind:value={preferences.style.wiredColors.sourceText} onchange={() => void persist({ style: { wiredColors: { sourceText: preferences.style.wiredColors.sourceText } } })} /></label>
+            <label>Translation <input type="color" bind:value={preferences.style.wiredColors.translationText} onchange={() => void persist({ style: { wiredColors: { translationText: preferences.style.wiredColors.translationText } } })} /></label>
+            <label>Metadata <input type="color" bind:value={preferences.style.wiredColors.metadata} onchange={() => void persist({ style: { wiredColors: { metadata: preferences.style.wiredColors.metadata } } })} /></label>
+            <label>Fallback speaker <input type="color" bind:value={preferences.style.wiredColors.fallbackAccent} onchange={() => void persist({ style: { wiredColors: { fallbackAccent: preferences.style.wiredColors.fallbackAccent } } })} /></label>
           </div>
         {:else if preferences.style.preset === "fallout"}
           <div class="cyberia-colors arcade-colors" aria-label="Fallout colors">
             <span>FALLOUT COLORS</span>
-            <label>Terminal text <input type="color" bind:value={preferences.style.falloutColors.text} onchange={persist} /></label>
-            <label>Dialogue strip <input type="color" bind:value={preferences.style.falloutColors.panel} onchange={persist} /></label>
+            <label>Terminal text <input type="color" bind:value={preferences.style.falloutColors.text} onchange={() => void persist({ style: { falloutColors: { text: preferences.style.falloutColors.text } } })} /></label>
+            <label>Dialogue strip <input type="color" bind:value={preferences.style.falloutColors.panel} onchange={() => void persist({ style: { falloutColors: { panel: preferences.style.falloutColors.panel } } })} /></label>
           </div>
         {/if}
       </section>

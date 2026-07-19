@@ -507,7 +507,7 @@ For every creation deliverable:
 
 ## Audit repair checkpoints
 
-Status: **R7 COMPLETE — atomic generation-scoped file retranslation**
+Status: **R8 COMPLETE — convergent multi-window session and preference state**
 
 The July 18 independent review found release-blocking correctness and containment issues. Repairs are performed one at a time; each receives focused tests, the full verification suite, visible acceptance when applicable, and its own GitHub checkpoint before the next repair begins.
 
@@ -519,7 +519,7 @@ The July 18 independent review found release-blocking correctness and containmen
 - [x] R5 — Validate exact structured translation output and continue source-only after terminal failure. Focused plan: `docs/plans/TRANSLATION_FAILURE_CONTAINMENT.md`.
 - [x] R6 — Harden realtime configuration acknowledgement, timing, source hints, and reconnects. Focused plan: `docs/plans/REALTIME_SESSION_HARDENING.md`.
 - [x] R7 — Make file target-language retranslation atomic and generation-scoped. Focused plan: `docs/plans/ATOMIC_FILE_RETRANSLATION.md`.
-- [ ] R8 — Repair multi-window snapshot ordering and preference patching.
+- [x] R8 — Repair multi-window snapshot ordering and preference patching. Focused plan: `docs/plans/MULTI_WINDOW_STATE_CONVERGENCE.md`.
 - [ ] R9 — Pin lesson identity and correct cache/placement behavior.
 - [ ] R10 — Introduce explicit file and external-media playback ownership.
 - [ ] R11 — Bound long-session coordinator, event, error, and transcript-rendering costs.
@@ -536,6 +536,8 @@ Approved repair defaults:
 R0 verification: `pnpm verify` passed with zero Svelte errors or warnings, 69 frontend tests, a successful production build, 48 Rust tests, and warning-free clippy.
 
 R7 verification: `pnpm verify` passed with zero Svelte errors or warnings, 81 frontend tests, a successful production build, 85 Rust tests, and warning-free clippy.
+
+R8 verification: `pnpm verify` passed with zero Svelte errors or warnings, 89 frontend tests, a successful production build, 88 Rust tests, and warning-free clippy.
 
 ## Checkpoints and decisions
 

@@ -8,7 +8,7 @@
   import { FIXTURE_EVENTS } from "./fixtures";
   import { activeSegments, canResumeForCoverage, formatTime, reduceSession, shouldPauseForCoverage, subtitleTimelineTime } from "./session";
   import { effectiveStyle } from "./preferences";
-  import { initialSession, loadPreferences, savePreferences, subscribePreferences, subscribeSession } from "./runtime";
+  import { loadPreferences, savePreferencePatch, subscribePreferences, subscribeSession } from "./runtime";
   import SubtitleStack from "./SubtitleStack.svelte";
 
   let session = $state<SessionState>(FIXTURE_EVENTS.reduce(reduceSession, structuredClone(EMPTY_SESSION)));
@@ -41,8 +41,7 @@
   onMount(() => {
     document.documentElement.dataset.surface = "viewer";
     const cleanup: Array<() => void> = [];
-    void initialSession().then((value) => session = value);
-    void subscribeSession(() => session, (value) => session = value).then((unlisten) => cleanup.push(unlisten));
+    void subscribeSession((value) => session = value).then((unlisten) => cleanup.push(unlisten));
     void subscribePreferences((value) => preferences = value).then((unlisten) => cleanup.push(unlisten));
     if (isTauri()) {
       void listen<string>("tray-action", ({ payload }) => {
@@ -237,7 +236,7 @@
     dragCandidate = null;
     if (!wasDragging) return;
     suppressSelection = true;
-    void savePreferences(preferences);
+    void savePreferencePatch({ style: { position: preferences.style.position } }).then((value) => preferences = value);
     window.setTimeout(() => suppressSelection = false, 350);
   }
 </script>

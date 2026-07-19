@@ -11,6 +11,68 @@ export interface Preferences {
   experimentalExternalPause: boolean;
 }
 
+type DeepPartial<T> = T extends object
+  ? { [Key in keyof T]?: DeepPartial<T[Key]> }
+  : T;
+
+export type PreferencePatch = DeepPartial<Preferences>;
+
+export interface PreferenceEnvelope {
+  revision: number;
+  preferences: unknown;
+  rebased: boolean;
+}
+
+export function decodePreferenceEnvelope(
+  envelope: PreferenceEnvelope,
+  currentRevision: number,
+): { revision: number; preferences: Preferences } | undefined {
+  if (!Number.isSafeInteger(envelope.revision) || envelope.revision < 0 || envelope.revision <= currentRevision) return undefined;
+  const preferences = parsePreferences(JSON.stringify(envelope.preferences));
+  return preferences ? { revision: envelope.revision, preferences } : undefined;
+}
+
+export function mergePreferencePatch(preferences: Preferences, patch: PreferencePatch): Preferences {
+  const merged = structuredClone(preferences) as unknown as Record<string, unknown>;
+  mergeObjectPatch(merged, patch as Record<string, unknown>);
+  return parsePreferences(JSON.stringify(merged)) ?? preferences;
+}
+
+export function preferencePatchBetween(before: Preferences, after: Preferences): PreferencePatch {
+  return diffObjects(
+    before as unknown as Record<string, unknown>,
+    after as unknown as Record<string, unknown>,
+  ) as PreferencePatch;
+}
+
+function diffObjects(before: Record<string, unknown>, after: Record<string, unknown>): Record<string, unknown> {
+  const patch: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(after)) {
+    const previous = before[key];
+    if (isPlainObject(previous) && isPlainObject(value)) {
+      const nested = diffObjects(previous, value);
+      if (Object.keys(nested).length > 0) patch[key] = nested;
+    } else if (!Object.is(previous, value)) {
+      patch[key] = structuredClone(value);
+    }
+  }
+  return patch;
+}
+
+function mergeObjectPatch(target: Record<string, unknown>, patch: Record<string, unknown>): void {
+  for (const [key, value] of Object.entries(patch)) {
+    if (isPlainObject(value) && isPlainObject(target[key])) {
+      mergeObjectPatch(target[key], value);
+    } else {
+      target[key] = structuredClone(value);
+    }
+  }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 export function serializePreferences(preferences: Preferences): string {
   return JSON.stringify(preferences);
 }

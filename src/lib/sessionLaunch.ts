@@ -1,7 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import type { Preferences } from "./preferences";
-import { savePreferences } from "./runtime";
 
 export interface FileLaunchResult {
   path: string;
@@ -52,7 +51,6 @@ export async function startFileSession(
     generation: prepared.generation,
   });
   hooks.status?.(`${audio.chunkCount} audio chunk${audio.chunkCount === 1 ? "" : "s"} ready · analyzing`);
-  await savePreferences(preferences);
   await invoke("open_surface", { surface: "viewer" });
   void invoke("start_analysis", {
     generation: prepared.generation,
@@ -74,7 +72,6 @@ export async function startLiveSession(
   if (!isTauri()) throw new Error("Live system audio requires the NonoSub macOS app.");
   await cancelAndReplaceSession();
   hooks.status?.("Choose a browser, window, or display in Apple’s sharing picker…");
-  await savePreferences(preferences);
   await invoke("open_surface", { surface: "overlay" });
   await invoke("start_live_capture", {
     languages: preferences.languages,

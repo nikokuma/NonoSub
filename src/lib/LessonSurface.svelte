@@ -10,7 +10,7 @@
   import { fitLogicalWindowSize, makeMonitorKey, normalizeLessonPlacement, resolveLessonPosition, type MonitorGeometry } from "./floatingPlacement";
   import { buildTutorContext } from "./preferences";
   import { reduceSession } from "./session";
-  import { initialSession, loadPreferences, savePreferences, subscribePreferences, subscribeSession } from "./runtime";
+  import { loadPreferences, savePreferencePatch, subscribePreferences, subscribeSession } from "./runtime";
   import ChalkDemo from "./ChalkDemo.svelte";
   import ChalkPhrase from "./ChalkPhrase.svelte";
   import ChalkStepNumber from "./ChalkStepNumber.svelte";
@@ -66,8 +66,7 @@
   onMount(() => {
     document.documentElement.dataset.surface = "lesson";
     const cleanup: Array<() => void> = [];
-    void initialSession().then((value) => session = value);
-    void subscribeSession(() => session, (value) => session = value).then((unlisten) => cleanup.push(unlisten));
+    void subscribeSession((value) => session = value).then((unlisten) => cleanup.push(unlisten));
     void subscribePreferences((value) => preferences = value).then((unlisten) => cleanup.push(unlisten));
     void tick().then(() => playCueSequence());
     if (isTauri()) {
@@ -272,7 +271,9 @@
         height: size.height,
       }),
     };
-    await savePreferences(preferences);
+    preferences = await savePreferencePatch({
+      lessonPlacements: { [geometry.key]: preferences.lessonPlacements[geometry.key] },
+    });
   }
 
   function errorMessage(value: unknown): string {

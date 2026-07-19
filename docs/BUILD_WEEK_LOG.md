@@ -189,3 +189,12 @@
 - Collect every exact Structured Output batch outside canonical state. One terminal failure rejects the entire target switch, retains the previous subtitles, and emits one recoverable explanation.
 - Starting, replacing, stopping, or cancelling a file/live session now cancels staged retranslation independently of the session pipeline.
 - Full verification passes with zero Svelte errors or warnings, 81 frontend tests, a successful production build, 85 Rust tests, and warning-free clippy.
+
+## July 19 — Multi-window state convergence
+
+- Replaced snapshot-first surface startup with one listener-first coordinator. Events received during snapshot loading are queued, duplicate or already-reflected envelopes are ignored, and sequence gaps or replacement sessions recover through serialized snapshot refreshes.
+- Removed the separate initial snapshot reads from workbench, viewer, overlay, and lesson surfaces so no window can miss an event between initialization and subscription.
+- Added a revisioned Rust preference broker. Every surface now sends the narrowest deep patch; stale independent changes are rebased onto the newest canonical value and same-field conflicts resolve by Rust receipt order.
+- Ordered target-language session changes inside the same broker operation. Style, position, lesson placement, onboarding, and other preference saves cannot cancel or restart file retranslation.
+- Bumped local preference storage to v5 while retaining v4, v3, v2, and legacy fallback reads. Revisions remain memory-only and no transcript, lesson, media, secret, or account data is persisted.
+- Added adversarial coverage for startup races, gap recovery, replacement sessions, concurrent callbacks, stale patches, monitor placement merges, and native menu leaf diffs. Full verification passes with zero Svelte errors or warnings, 89 frontend tests, a successful production build, 88 Rust tests, and warning-free clippy.

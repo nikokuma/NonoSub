@@ -4,7 +4,6 @@ import { DEFAULT_LANGUAGES, DEFAULT_STYLE, DEFAULT_SYNC } from "./contracts";
 const mocks = vi.hoisted(() => ({
   emit: vi.fn(),
   invoke: vi.fn(),
-  savePreferences: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -12,7 +11,6 @@ vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => true,
 }));
 vi.mock("@tauri-apps/api/event", () => ({ emit: mocks.emit }));
-vi.mock("./runtime", () => ({ savePreferences: mocks.savePreferences }));
 
 import { startFileSession, validateVideoPath } from "./sessionLaunch";
 

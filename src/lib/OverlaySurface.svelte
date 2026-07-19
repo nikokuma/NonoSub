@@ -8,7 +8,7 @@
   import { FIXTURE_EVENTS } from "./fixtures";
   import { reduceSession, visibleLiveSegments } from "./session";
   import { effectiveStyle } from "./preferences";
-  import { initialSession, loadPreferences, savePreferences, subscribePreferences, subscribeSession } from "./runtime";
+  import { loadPreferences, savePreferencePatch, subscribePreferences, subscribeSession } from "./runtime";
   import { resolveOverlayGeometry } from "./overlayGeometry";
   import LiveSubtitleStack from "./LiveSubtitleStack.svelte";
 
@@ -84,8 +84,7 @@
   onMount(() => {
     document.documentElement.dataset.surface = "overlay";
     const cleanup: Array<() => void> = [];
-    void initialSession().then((value) => session = value);
-    void subscribeSession(() => session, (value) => session = value).then((unlisten) => cleanup.push(unlisten));
+    void subscribeSession((value) => session = value).then((unlisten) => cleanup.push(unlisten));
     void subscribePreferences((value) => preferences = value).then((unlisten) => cleanup.push(unlisten));
     if (isTauri()) void listen<string>("tray-action", ({ payload }) => {
       if (payload === "arrange_overlay") arranging = !arranging;
@@ -247,7 +246,12 @@
       y: Math.min(.95, Math.max(.05, (position.y + size.height / 2 - monitor.position.y) / monitor.size.height)),
     };
     preferences.style.overlayWidth = size.width / scale;
-    await savePreferences(preferences);
+    preferences = await savePreferencePatch({
+      style: {
+        overlayPosition: preferences.style.overlayPosition,
+        overlayWidth: preferences.style.overlayWidth,
+      },
+    });
   }
 </script>
 

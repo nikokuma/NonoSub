@@ -43,6 +43,7 @@ struct AppState {
     runs: RunCoordinator,
     retranslations: RetranslationCoordinator,
     canonical: Mutex<SessionSnapshot>,
+    preferences: Mutex<Option<CanonicalPreferences>>,
     lesson_cache: Mutex<HashMap<String, LessonCard>>,
     launcher_mode: Mutex<String>,
     context_lesson_segment: Mutex<Option<String>>,
@@ -64,6 +65,7 @@ impl Default for AppState {
             runs: RunCoordinator::default(),
             retranslations: RetranslationCoordinator::default(),
             canonical: Mutex::new(SessionSnapshot::default()),
+            preferences: Mutex::new(None),
             lesson_cache: Mutex::new(HashMap::new()),
             launcher_mode: Mutex::new("file".into()),
             context_lesson_segment: Mutex::new(None),
@@ -259,6 +261,20 @@ type ScopedRetranslationEnvelope<'a> = (
     SequencedSessionEvent,
 );
 
+#[derive(Debug, Clone)]
+struct CanonicalPreferences {
+    revision: u64,
+    preferences: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreferenceEnvelope {
+    revision: u64,
+    preferences: serde_json::Value,
+    rebased: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct ApiKeyStatus {
     present: bool,
@@ -421,6 +437,118 @@ fn get_session_snapshot(state: State<'_, AppState>) -> Result<SessionSnapshot, S
         .lock()
         .map(|snapshot| snapshot.clone())
         .map_err(|_| "Session state is unavailable.".into())
+}
+
+fn merge_preference_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
+    match (target, patch) {
+        (serde_json::Value::Object(target), serde_json::Value::Object(patch)) => {
+            for (key, value) in patch {
+                if let Some(existing) = target.get_mut(key) {
+                    merge_preference_patch(existing, value);
+                } else {
+                    target.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        (target, patch) => *target = patch.clone(),
+    }
+}
+
+fn initialize_preference_state(
+    state: &mut Option<CanonicalPreferences>,
+    preferences: serde_json::Value,
+) -> Result<PreferenceEnvelope, String> {
+    if !preferences.is_object() {
+        return Err("Preferences must be a JSON object.".into());
+    }
+    let current = state.get_or_insert(CanonicalPreferences {
+        revision: 0,
+        preferences,
+    });
+    Ok(PreferenceEnvelope {
+        revision: current.revision,
+        preferences: current.preferences.clone(),
+        rebased: false,
+    })
+}
+
+fn apply_preference_patch(
+    state: &mut CanonicalPreferences,
+    base_revision: u64,
+    patch: serde_json::Value,
+) -> Result<PreferenceEnvelope, String> {
+    if !patch.is_object() {
+        return Err("Preference patches must be JSON objects.".into());
+    }
+    let rebased = base_revision != state.revision;
+    let mut merged = state.preferences.clone();
+    merge_preference_patch(&mut merged, &patch);
+    if !merged.is_object() {
+        return Err("The merged preferences must remain a JSON object.".into());
+    }
+    if merged != state.preferences {
+        state.revision = state.revision.saturating_add(1);
+        state.preferences = merged;
+    }
+    Ok(PreferenceEnvelope {
+        revision: state.revision,
+        preferences: state.preferences.clone(),
+        rebased,
+    })
+}
+
+#[tauri::command]
+fn initialize_preferences(
+    state: State<'_, AppState>,
+    preferences: serde_json::Value,
+) -> Result<PreferenceEnvelope, String> {
+    let mut canonical = state
+        .preferences
+        .lock()
+        .map_err(|_| "Preference state is unavailable.".to_string())?;
+    initialize_preference_state(&mut canonical, preferences)
+}
+
+#[tauri::command]
+fn patch_preferences(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    base_revision: u64,
+    patch: serde_json::Value,
+) -> Result<PreferenceEnvelope, String> {
+    let patches_languages = patch
+        .as_object()
+        .is_some_and(|object| object.contains_key("languages"));
+    let mut canonical = state
+        .preferences
+        .lock()
+        .map_err(|_| "Preference state is unavailable.".to_string())?;
+    let current = canonical
+        .as_mut()
+        .ok_or_else(|| "Preferences have not been initialized.".to_string())?;
+    let previous_revision = current.revision;
+    let previous_languages = current.preferences.get("languages").cloned();
+    let mut candidate = current.clone();
+    let envelope = apply_preference_patch(&mut candidate, base_revision, patch)?;
+    let languages_changed =
+        patches_languages && previous_languages.as_ref() != envelope.preferences.get("languages");
+    if languages_changed {
+        let languages = serde_json::from_value::<LanguageSettings>(
+            envelope
+                .preferences
+                .get("languages")
+                .cloned()
+                .ok_or_else(|| "Canonical language preferences are missing.".to_string())?,
+        )
+        .map_err(|_| "Canonical language preferences are invalid.".to_string())?;
+        apply_language_settings(&app, state.inner(), languages)?;
+    }
+    *current = candidate;
+    if envelope.revision != previous_revision {
+        app.emit("preferences-updated", envelope.clone())
+            .map_err(|error| format!("Could not update preference windows: {error}"))?;
+    }
+    Ok(envelope)
 }
 
 #[tauri::command]
@@ -1237,10 +1365,9 @@ fn record_file_retranslation_failure(
         .map_err(|error| service_error(&format!("Could not update subtitle windows: {error}")))
 }
 
-#[tauri::command]
-fn update_languages(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
+fn apply_language_settings(
+    app: &tauri::AppHandle,
+    state: &AppState,
     languages: LanguageSettings,
 ) -> Result<(), String> {
     let (session_id, previous, mode, processing_mode) = {
@@ -1277,9 +1404,10 @@ fn update_languages(
             snapshot.languages.source = languages.source.clone();
             snapshot.languages.explanation = languages.explanation.clone();
         }
-        if let Some(lease) = begin_file_retranslation(state.inner(), generation, languages)
+        if let Some(lease) = begin_file_retranslation(state, generation, languages)
             .map_err(|error| error.message)?
         {
+            let app = app.clone();
             tauri::async_runtime::spawn(async move {
                 let result = async {
                     let key = api_key()?;
@@ -1314,7 +1442,7 @@ fn update_languages(
         #[cfg(target_os = "macos")]
         live::stop(&state.live);
         let _ = record_event(
-            &app,
+            app,
             SessionEvent::RecoverableError {
                 error: RecoverableError {
                     code: "live_language_changed".into(),
@@ -2197,6 +2325,8 @@ pub fn run() {
             validate_model_access,
             remove_api_key,
             get_session_snapshot,
+            initialize_preferences,
+            patch_preferences,
             prepare_media,
             prepare_audio,
             start_analysis,
@@ -2208,7 +2338,6 @@ pub fn run() {
             request_media_key_permission,
             post_media_play_pause,
             close_lesson_surface,
-            update_languages,
             update_speaker,
             open_surface,
             get_launcher_mode,
@@ -2282,6 +2411,95 @@ mod tests {
         let value = serde_json::to_value(segment).expect("segment should serialize");
         assert_eq!(value["startMs"], 1200);
         assert_eq!(value["translationText"], "What is it?");
+    }
+
+    #[test]
+    fn preference_broker_rebases_stale_leaf_patches_without_losing_unrelated_changes() {
+        let mut slot = None;
+        let initial = serde_json::json!({
+            "style": { "preset": "momento", "position": { "x": 0.5, "y": 0.8 } },
+            "languages": { "source": "auto", "target": "en", "explanation": "en" },
+            "lessonPlacements": {}
+        });
+        let initialized = initialize_preference_state(&mut slot, initial).unwrap();
+        assert_eq!(initialized.revision, 0);
+
+        let current = slot.as_mut().unwrap();
+        let style = apply_preference_patch(
+            current,
+            0,
+            serde_json::json!({ "style": { "preset": "wired" } }),
+        )
+        .unwrap();
+        assert_eq!(style.revision, 1);
+        assert!(!style.rebased);
+
+        let language = apply_preference_patch(
+            current,
+            0,
+            serde_json::json!({ "languages": { "target": "ja", "explanation": "ja" } }),
+        )
+        .unwrap();
+        assert_eq!(language.revision, 2);
+        assert!(language.rebased);
+        assert_eq!(language.preferences["style"]["preset"], "wired");
+        assert_eq!(language.preferences["languages"]["source"], "auto");
+        assert_eq!(language.preferences["languages"]["target"], "ja");
+    }
+
+    #[test]
+    fn preference_broker_merges_independent_monitor_placements_and_orders_conflicts() {
+        let mut state = CanonicalPreferences {
+            revision: 4,
+            preferences: serde_json::json!({
+                "style": { "preset": "clean" },
+                "lessonPlacements": {}
+            }),
+        };
+        apply_preference_patch(
+            &mut state,
+            4,
+            serde_json::json!({ "lessonPlacements": { "display-a": { "x": 0.1, "y": 0.2 } } }),
+        )
+        .unwrap();
+        apply_preference_patch(
+            &mut state,
+            4,
+            serde_json::json!({ "lessonPlacements": { "display-b": { "x": 0.7, "y": 0.3 } } }),
+        )
+        .unwrap();
+        apply_preference_patch(
+            &mut state,
+            5,
+            serde_json::json!({ "style": { "preset": "fallout" } }),
+        )
+        .unwrap();
+        let last = apply_preference_patch(
+            &mut state,
+            5,
+            serde_json::json!({ "style": { "preset": "wired" } }),
+        )
+        .unwrap();
+
+        assert_eq!(last.preferences["lessonPlacements"].as_object().unwrap().len(), 2);
+        assert_eq!(last.preferences["style"]["preset"], "wired");
+        assert_eq!(last.revision, 8);
+        assert!(last.rebased);
+    }
+
+    #[test]
+    fn preference_broker_keeps_the_first_valid_seed_and_rejects_non_object_patches() {
+        let mut slot = None;
+        initialize_preference_state(&mut slot, serde_json::json!({ "level": "beginner" }))
+            .unwrap();
+        let second = initialize_preference_state(
+            &mut slot,
+            serde_json::json!({ "level": "advanced" }),
+        )
+        .unwrap();
+        assert_eq!(second.preferences["level"], "beginner");
+        assert!(apply_preference_patch(slot.as_mut().unwrap(), 0, serde_json::json!("bad"))
+            .is_err());
     }
 
     #[test]
