@@ -39,12 +39,14 @@ Live mode is compiled only on macOS and requires macOS 14 or later.
 1. `AsyncSCContentSharingPicker` presents Apple's native display/application/window picker.
 2. ScreenCaptureKit captures audio only at 48 kHz mono and excludes NonoSub's own process audio.
 3. A stateful converter averages adjacent float samples into 24 kHz PCM16. Approximately 100 ms is base64 encoded per message; PCM is never written to disk.
-4. Rust authenticates a WebSocket to `/v1/realtime/translations?model=gpt-realtime-translate`, configures `session.audio.output.language`, and appends audio continuously.
-5. Source and translated transcript deltas upsert one provisional `Live Audio` segment. Output completion or a quiet delta interval finalizes it.
-6. One unexpected disconnect triggers a single reconnect and a visible `reconnecting` phase. A second failure becomes recoverable rather than affecting file mode.
-7. Stop sends `session.close`, stops appending audio, drains until `session.closed` or a bounded timeout, then closes capture.
+4. Rust authenticates the mode-specific WebSocket and waits for the documented first `session.created` event.
+5. Rust sends one generation/attempt-scoped `session.update`, waits for `session.updated`, and validates the echoed session type, target language, source transcription, input format, and explicit source hint where supported. ScreenCaptureKit does not start and PCM cannot be sent before this acknowledgement.
+6. Approximately 100 ms of audio is appended at a time. The canonical capture clock advances only after each audio append is successfully written; commits and failed writes do not advance it.
+7. Source and translated transcript deltas enter independent append-only clause tracks and pair monotonically within one connection epoch.
+8. One unexpected read, write, or remote close spends a single reconnect allowance. The replacement connection repeats the complete acknowledged handshake before a new timing epoch begins; normal stop/close never reconnects.
+9. Stop sends `session.close`, stops appending audio, drains until `session.closed` or a bounded timeout, then closes capture.
 
-Realtime translation currently auto-detects its source language; the source override is honored by file transcription. Changing the live target stops the active stream and asks the user to restart Live Captions with the new language.
+Realtime translation currently auto-detects its source language because the dedicated translation-session contract does not expose a source hint. Original-only realtime transcription and file transcription honor an explicit source override. Changing the live target stops the active stream and asks the user to restart Live Captions with the new language.
 
 ## Structured lessons
 

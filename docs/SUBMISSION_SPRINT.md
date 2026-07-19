@@ -507,7 +507,7 @@ For every creation deliverable:
 
 ## Audit repair checkpoints
 
-Status: **R5 COMPLETE — exact translation validation and source fallback**
+Status: **R6 COMPLETE — acknowledged realtime configuration and reconnect timing**
 
 The July 18 independent review found release-blocking correctness and containment issues. Repairs are performed one at a time; each receives focused tests, the full verification suite, visible acceptance when applicable, and its own GitHub checkpoint before the next repair begins.
 
@@ -517,7 +517,7 @@ The July 18 independent review found release-blocking correctness and containmen
 - [x] R3 — Add session generations, per-run cancellation, and stale-event rejection. Checkpointed in `780cb8b`.
 - [x] R4 — Preserve stable IDs during file chunk-boundary reconciliation. Checkpointed in `3225d88`. Focused plan: `docs/plans/FILE_BOUNDARY_ID_STABILITY.md`.
 - [x] R5 — Validate exact structured translation output and continue source-only after terminal failure. Focused plan: `docs/plans/TRANSLATION_FAILURE_CONTAINMENT.md`.
-- [ ] R6 — Harden realtime configuration acknowledgement, timing, source hints, and reconnects.
+- [x] R6 — Harden realtime configuration acknowledgement, timing, source hints, and reconnects. Focused plan: `docs/plans/REALTIME_SESSION_HARDENING.md`.
 - [ ] R7 — Make file target-language retranslation atomic and generation-scoped.
 - [ ] R8 — Repair multi-window snapshot ordering and preference patching.
 - [ ] R9 — Pin lesson identity and correct cache/placement behavior.

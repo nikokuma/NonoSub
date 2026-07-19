@@ -156,6 +156,14 @@
 - Added adversarial tests for permanent old-token cancellation, stale fatal-event rejection without sequence mutation, cancellation without fatal output, and exact frontend generation handoff.
 - Full verification passes with zero Svelte warnings, 75 frontend tests, a successful production build, 60 Rust tests, and warning-free clippy.
 
+## July 19 — Acknowledged realtime sessions
+
+- Replaced fire-and-forget Realtime setup with an eight-second bounded `session.created → session.update → session.updated` handshake. Each configuration carries a unique generation/attempt event ID, correlated configuration errors abort safely, and the echoed mode/languages/model/input format are validated before ScreenCaptureKit starts.
+- Kept translated live source detection automatic according to the dedicated translation contract. Original-only realtime transcription now sends the supported optional source-language hint while Auto omits it.
+- Moved the live timing clock from captured buffers to successfully transmitted PCM. Failed appends and commit/control messages cannot create artificial elapsed time.
+- Made WebSocket close frames and unsolicited `session.closed` events eligible for the same single automatic reconnect as read/write failures. Every reconnect repeats the acknowledged configuration before starting a new clause/alignment epoch; requested close never consumes the allowance.
+- Added focused lifecycle, acknowledgement, source-hint, configuration-error, clock, and reconnect regressions. Full verification passes with zero Svelte errors or warnings, 80 frontend tests, a successful production build, 80 Rust tests, and warning-free clippy.
+
 ## July 19 — Stable file boundary identities
 
 - Made the first accepted file subtitle ID canonical across overlapping transcription chunks. A more-complete boundary result now revises the existing line in place instead of replacing it with the later chunk's local ID.

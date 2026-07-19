@@ -30,7 +30,7 @@ use std::{
 };
 use tokio_tungstenite::{
     connect_async,
-    tungstenite::{client::IntoClientRequest, Message},
+    tungstenite::{client::IntoClientRequest, Error as WebSocketError, Message},
     MaybeTlsStream, WebSocketStream,
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -39,6 +39,7 @@ const REALTIME_TRANSLATION_URL: &str =
     "wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate";
 const REALTIME_TRANSCRIPTION_URL: &str =
     "wss://api.openai.com/v1/realtime?model=gpt-realtime-whisper";
+const REALTIME_CONFIGURATION_TIMEOUT: Duration = Duration::from_secs(8);
 const SEND_SAMPLES: usize = 2_400;
 const TERMINAL_QUIET_MS: u64 = 350;
 const IDLE_CLAUSE_MS: u64 = 1_200;
@@ -66,6 +67,8 @@ struct TimedText {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RealtimeEvent {
+    SessionCreated(Value),
+    SessionUpdated(Value),
     SourceDelta(TimedText),
     TranslationDelta(TimedText),
     TranscriptionDelta {
@@ -79,8 +82,31 @@ enum RealtimeEvent {
         text: String,
     },
     Closed,
-    Error(String),
+    Error(RealtimeServerError),
     Ignored,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RealtimeServerError {
+    message: String,
+    kind: Option<String>,
+    code: Option<String>,
+    client_event_id: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct ReconnectAllowance {
+    used: bool,
+}
+
+impl ReconnectAllowance {
+    fn claim(&mut self, closing: bool) -> bool {
+        if closing || self.used {
+            return false;
+        }
+        self.used = true;
+        true
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1238,7 +1264,8 @@ pub async fn start(
         .with_excludes_current_process_audio(true);
     let stream = AsyncSCStream::new(&filter, &config, 8, SCStreamOutputType::Audio);
 
-    let (mut writer, mut reader) = connect_realtime(&api_key, &languages, &processing_mode).await?;
+    let (mut writer, mut reader) =
+        connect_realtime(&api_key, &languages, &processing_mode, generation, 0).await?;
 
     stream.start_capture().await.map_err(|error| {
         capture_error(&format!("System audio capture could not start: {error}"))
@@ -1264,7 +1291,7 @@ pub async fn start(
         let mut closing = false;
         let mut close_started = None;
         let mut closed = false;
-        let mut reconnect_used = false;
+        let mut reconnect = ReconnectAllowance::default();
 
         'capture: loop {
             if cancelled.load(Ordering::Relaxed) && !closing {
@@ -1303,29 +1330,38 @@ pub async fn start(
                             {
                                 while pcm.len() >= SEND_SAMPLES {
                                     let samples: Vec<i16> = pcm.drain(..SEND_SAMPLES).collect();
-                                    sent_samples = sent_samples.saturating_add(SEND_SAMPLES as u64);
                                     let actions = if original_only {
                                         speech_committer.push(samples)
                                     } else {
                                         vec![TranscriptionAudioAction::Append(samples)]
                                     };
                                     for action in actions {
-                                        let event = match action {
+                                        let (event, appended_samples) = match action {
                                             TranscriptionAudioAction::Append(samples) => {
+                                                let appended_samples = samples.len() as u64;
                                                 let mut bytes = Vec::with_capacity(samples.len() * 2);
                                                 for sample in samples { bytes.extend_from_slice(&sample.to_le_bytes()); }
-                                                json!({
+                                                (json!({
                                                     "type": if original_only { "input_audio_buffer.append" } else { "session.input_audio_buffer.append" },
                                                     "audio": BASE64.encode(bytes)
-                                                })
+                                                }), appended_samples)
                                             }
-                                            TranscriptionAudioAction::Commit => json!({ "type": "input_audio_buffer.commit" }),
+                                            TranscriptionAudioAction::Commit => (json!({ "type": "input_audio_buffer.commit" }), 0),
                                         };
-                                        if writer.send(Message::Text(event.to_string().into())).await.is_err() {
-                                            if !reconnect_used {
-                                                reconnect_used = true;
+                                        let sent = writer
+                                            .send(Message::Text(event.to_string().into()))
+                                            .await
+                                            .is_ok();
+                                        record_transmitted_samples(
+                                            &mut sent_samples,
+                                            appended_samples,
+                                            sent,
+                                        );
+                                        if !sent {
+                                            if reconnect.claim(closing) {
                                                 let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
-                                                if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &processing_mode).await {
+                                                pcm.clear();
+                                                if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &processing_mode, generation, 1).await {
                                                     writer = next_writer;
                                                     reader = next_reader;
                                                     if original_only {
@@ -1354,10 +1390,14 @@ pub async fn start(
                 }
                 message = reader.next() => {
                     let Some(message) = message else {
-                        if !reconnect_used {
-                            reconnect_used = true;
+                        if closing {
+                            closed = true;
+                            continue;
+                        }
+                        if reconnect.claim(closing) {
                             let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
-                            if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &processing_mode).await {
+                            pcm.clear();
+                            if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &processing_mode, generation, 1).await {
                                 writer = next_writer;
                                 reader = next_reader;
                                 if original_only {
@@ -1399,17 +1439,63 @@ pub async fn start(
                             RealtimeEvent::TranscriptionDone { item_id, event_id, text } => {
                                 emit_events(&app, generation, transcription.on_done(item_id, event_id, text, capture_clock_ms(sent_samples)));
                             }
-                            RealtimeEvent::Closed => closed = true,
-                            RealtimeEvent::Error(message) => emit_recoverable(&app, generation, "realtime_error", &message),
-                            RealtimeEvent::Ignored => {}
+                            RealtimeEvent::Closed if closing => closed = true,
+                            RealtimeEvent::Closed => {
+                                if reconnect.claim(closing) {
+                                    let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
+                                    pcm.clear();
+                                    if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &processing_mode, generation, 1).await {
+                                        writer = next_writer;
+                                        reader = next_reader;
+                                        if original_only {
+                                            emit_events(&app, generation, transcription.finish(capture_clock_ms(sent_samples)));
+                                            speech_committer = SpeechCommitter::default();
+                                        } else {
+                                            emit_events(&app, generation, coordinator.begin_epoch(capture_clock_ms(sent_samples)));
+                                        }
+                                        let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "ready".into() });
+                                        continue 'capture;
+                                    }
+                                }
+                                emit_recoverable(&app, generation, "live_disconnected", "Live captions closed unexpectedly and the automatic reconnect did not succeed.");
+                                break 'capture;
+                            }
+                            RealtimeEvent::Error(error) => emit_recoverable(&app, generation, "realtime_error", &error.message),
+                            RealtimeEvent::SessionCreated(_)
+                            | RealtimeEvent::SessionUpdated(_)
+                            | RealtimeEvent::Ignored => {}
                         },
-                        Ok(Message::Close(_)) => break,
+                        Ok(Message::Close(_)) if closing => closed = true,
+                        Ok(Message::Close(_)) => {
+                            if reconnect.claim(closing) {
+                                let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
+                                pcm.clear();
+                                if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &processing_mode, generation, 1).await {
+                                    writer = next_writer;
+                                    reader = next_reader;
+                                    if original_only {
+                                        emit_events(&app, generation, transcription.finish(capture_clock_ms(sent_samples)));
+                                        speech_committer = SpeechCommitter::default();
+                                    } else {
+                                        emit_events(&app, generation, coordinator.begin_epoch(capture_clock_ms(sent_samples)));
+                                    }
+                                    let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "ready".into() });
+                                    continue 'capture;
+                                }
+                            }
+                            emit_recoverable(&app, generation, "live_disconnected", "Live captions closed unexpectedly and the automatic reconnect did not succeed.");
+                            break;
+                        }
                         Ok(_) => {}
                         Err(error) => {
-                            if !reconnect_used {
-                                reconnect_used = true;
+                            if closing {
+                                closed = true;
+                                continue;
+                            }
+                            if reconnect.claim(closing) {
                                 let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
-                                if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &processing_mode).await {
+                                pcm.clear();
+                                if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &processing_mode, generation, 1).await {
                                     writer = next_writer;
                                     reader = next_reader;
                                     if original_only {
@@ -1462,6 +1548,12 @@ fn capture_clock_ms(sent_samples: u64) -> u64 {
     sent_samples.saturating_mul(1_000) / 24_000
 }
 
+fn record_transmitted_samples(sent_samples: &mut u64, appended_samples: u64, sent: bool) {
+    if sent {
+        *sent_samples = sent_samples.saturating_add(appended_samples);
+    }
+}
+
 pub fn stop(state: &LiveState) {
     state.cancelled.store(true, Ordering::Relaxed);
 }
@@ -1479,6 +1571,8 @@ async fn connect_realtime(
     api_key: &str,
     languages: &LanguageSettings,
     processing_mode: &CaptionProcessingMode,
+    generation: u64,
+    attempt: u8,
 ) -> Result<(RealtimeWriter, RealtimeReader), ApiError> {
     let url = if processing_mode == &CaptionProcessingMode::OriginalOnly {
         REALTIME_TRANSCRIPTION_URL
@@ -1494,23 +1588,174 @@ async fn connect_realtime(
             .parse()
             .map_err(|_| network_error("Could not authorize the realtime connection."))?,
     );
-    let (socket, _) = connect_async(request)
+    let (mut socket, _) = connect_async(request)
         .await
-        .map_err(|error| network_error(&format!("Could not connect realtime captions: {error}")))?;
-    let (mut writer, reader) = socket.split();
-    let update = realtime_session_update(languages, processing_mode);
-    writer
+        .map_err(realtime_connect_error)?;
+    wait_for_session_created(&mut socket).await?;
+
+    let configuration_event_id = format!("nonosub-config-{generation}-{attempt}");
+    let update =
+        realtime_session_update(languages, processing_mode, configuration_event_id.as_str());
+    socket
         .send(Message::Text(update.to_string().into()))
         .await
         .map_err(|error| {
             network_error(&format!("Could not configure realtime captions: {error}"))
         })?;
+    wait_for_session_updated(
+        &mut socket,
+        languages,
+        processing_mode,
+        configuration_event_id.as_str(),
+    )
+    .await?;
+
+    let (writer, reader) = socket.split();
     Ok((writer, reader))
+}
+
+async fn wait_for_session_created(socket: &mut RealtimeSocket) -> Result<(), ApiError> {
+    let message = tokio::time::timeout(REALTIME_CONFIGURATION_TIMEOUT, socket.next())
+        .await
+        .map_err(|_| configuration_error("Realtime captions timed out before session.created."))?
+        .ok_or_else(|| network_error("Realtime captions closed before session.created."))?
+        .map_err(|error| {
+            network_error(&format!(
+                "Realtime captions failed before session.created: {error}"
+            ))
+        })?;
+
+    let Message::Text(text) = message else {
+        return Err(configuration_error(
+            "Realtime captions did not send session.created as the first event.",
+        ));
+    };
+    validate_session_created_event(parse_realtime_event(&text))
+}
+
+fn validate_session_created_event(event: RealtimeEvent) -> Result<(), ApiError> {
+    match event {
+        RealtimeEvent::SessionCreated(session) if session.is_object() => Ok(()),
+        RealtimeEvent::Error(error) => Err(server_configuration_error(&error)),
+        _ => Err(configuration_error(
+            "Realtime captions did not send session.created as the first event.",
+        )),
+    }
+}
+
+async fn wait_for_session_updated(
+    socket: &mut RealtimeSocket,
+    languages: &LanguageSettings,
+    processing_mode: &CaptionProcessingMode,
+    configuration_event_id: &str,
+) -> Result<(), ApiError> {
+    tokio::time::timeout(REALTIME_CONFIGURATION_TIMEOUT, async {
+        loop {
+            let message = socket
+                .next()
+                .await
+                .ok_or_else(|| network_error("Realtime captions closed before session.updated."))?
+                .map_err(|error| {
+                    network_error(&format!(
+                        "Realtime captions failed before session.updated: {error}"
+                    ))
+                })?;
+            let Message::Text(text) = message else {
+                if matches!(message, Message::Close(_)) {
+                    return Err(network_error(
+                        "Realtime captions closed before session.updated.",
+                    ));
+                }
+                continue;
+            };
+            if validate_session_update_event(
+                parse_realtime_event(&text),
+                languages,
+                processing_mode,
+                configuration_event_id,
+            )? {
+                return Ok(());
+            }
+        }
+    })
+    .await
+    .map_err(|_| configuration_error("Realtime captions timed out before session.updated."))?
+}
+
+fn validate_session_update_event(
+    event: RealtimeEvent,
+    languages: &LanguageSettings,
+    processing_mode: &CaptionProcessingMode,
+    configuration_event_id: &str,
+) -> Result<bool, ApiError> {
+    match event {
+        RealtimeEvent::SessionUpdated(session) => {
+            validate_session_updated(&session, languages, processing_mode)?;
+            Ok(true)
+        }
+        RealtimeEvent::Error(error)
+            if error.client_event_id.as_deref() == Some(configuration_event_id) =>
+        {
+            Err(server_configuration_error(&error))
+        }
+        RealtimeEvent::Error(error) => Err(server_configuration_error(&error)),
+        RealtimeEvent::Closed => Err(network_error(
+            "Realtime captions closed before session.updated.",
+        )),
+        RealtimeEvent::SessionCreated(_) => Err(configuration_error(
+            "Realtime captions repeated session.created before acknowledging configuration.",
+        )),
+        _ => Ok(false),
+    }
+}
+
+fn validate_session_updated(
+    session: &Value,
+    languages: &LanguageSettings,
+    processing_mode: &CaptionProcessingMode,
+) -> Result<(), ApiError> {
+    let expect = |pointer: &str, expected: &str| {
+        (session.pointer(pointer).and_then(Value::as_str) == Some(expected)).then_some(())
+    };
+
+    if processing_mode == &CaptionProcessingMode::OriginalOnly {
+        expect("/type", "transcription")
+            .ok_or_else(|| configuration_mismatch("transcription session type"))?;
+        expect("/audio/input/format/type", "audio/pcm")
+            .ok_or_else(|| configuration_mismatch("24 kHz PCM input format"))?;
+        if session
+            .pointer("/audio/input/format/rate")
+            .and_then(Value::as_u64)
+            != Some(24_000)
+        {
+            return Err(configuration_mismatch("24 kHz PCM input rate"));
+        }
+        expect("/audio/input/transcription/model", "gpt-realtime-whisper")
+            .ok_or_else(|| configuration_mismatch("realtime transcription model"))?;
+        expect("/audio/input/transcription/delay", "low")
+            .ok_or_else(|| configuration_mismatch("low transcription delay"))?;
+        if languages.source != "auto" {
+            expect(
+                "/audio/input/transcription/language",
+                languages.source.as_str(),
+            )
+            .ok_or_else(|| configuration_mismatch("source-language hint"))?;
+        }
+    } else {
+        expect("/type", "translation")
+            .ok_or_else(|| configuration_mismatch("translation session type"))?;
+        expect("/audio/input/transcription/model", "gpt-realtime-whisper")
+            .ok_or_else(|| configuration_mismatch("source transcription model"))?;
+        expect("/audio/output/language", languages.target.as_str())
+            .ok_or_else(|| configuration_mismatch("target language"))?;
+    }
+    Ok(())
 }
 
 fn realtime_session_update(
     languages: &LanguageSettings,
     processing_mode: &CaptionProcessingMode,
+    configuration_event_id: &str,
 ) -> Value {
     if processing_mode == &CaptionProcessingMode::OriginalOnly {
         let mut transcription = json!({
@@ -1521,6 +1766,7 @@ fn realtime_session_update(
             transcription["language"] = Value::String(languages.source.clone());
         }
         json!({
+            "event_id": configuration_event_id,
             "type": "session.update",
             "session": {
                 "type": "transcription",
@@ -1535,6 +1781,7 @@ fn realtime_session_update(
         })
     } else {
         json!({
+            "event_id": configuration_event_id,
             "type": "session.update",
             "session": {
                 "audio": {
@@ -1543,6 +1790,62 @@ fn realtime_session_update(
                 }
             }
         })
+    }
+}
+
+fn realtime_connect_error(error: WebSocketError) -> ApiError {
+    if let WebSocketError::Http(response) = &error {
+        return match response.status().as_u16() {
+            401 => ApiError {
+                kind: ApiErrorKind::Authentication,
+                message: "OpenAI rejected the API key for Live Captions.".into(),
+                retryable: false,
+            },
+            403 | 404 => ApiError {
+                kind: ApiErrorKind::ModelUnavailable,
+                message: "The selected OpenAI realtime model is unavailable for this API key."
+                    .into(),
+                retryable: false,
+            },
+            429 => ApiError {
+                kind: ApiErrorKind::RateLimited,
+                message: "OpenAI rate-limited the Live Captions connection.".into(),
+                retryable: true,
+            },
+            _ => network_error(&format!("Could not connect realtime captions: {error}")),
+        };
+    }
+    network_error(&format!("Could not connect realtime captions: {error}"))
+}
+
+fn configuration_error(message: &str) -> ApiError {
+    ApiError {
+        kind: ApiErrorKind::MalformedResponse,
+        message: message.into(),
+        retryable: false,
+    }
+}
+
+fn configuration_mismatch(field: &str) -> ApiError {
+    configuration_error(&format!(
+        "OpenAI did not acknowledge the requested realtime {field}."
+    ))
+}
+
+fn server_configuration_error(error: &RealtimeServerError) -> ApiError {
+    let detail = error
+        .code
+        .as_deref()
+        .or(error.kind.as_deref())
+        .map(|value| format!(" ({value})"))
+        .unwrap_or_default();
+    ApiError {
+        kind: ApiErrorKind::Service,
+        message: format!(
+            "OpenAI rejected the Live Captions configuration{detail}: {}",
+            error.message
+        ),
+        retryable: false,
     }
 }
 
@@ -1580,6 +1883,12 @@ fn parse_realtime_event(text: &str) -> RealtimeEvent {
         })
     };
     match event_type {
+        "session.created" => {
+            RealtimeEvent::SessionCreated(value.get("session").cloned().unwrap_or(Value::Null))
+        }
+        "session.updated" => {
+            RealtimeEvent::SessionUpdated(value.get("session").cloned().unwrap_or(Value::Null))
+        }
         "session.input_transcript.delta" => timed_delta()
             .map(RealtimeEvent::SourceDelta)
             .unwrap_or(RealtimeEvent::Ignored),
@@ -1621,13 +1930,25 @@ fn parse_realtime_event(text: &str) -> RealtimeEvent {
             }
         }
         "session.closed" => RealtimeEvent::Closed,
-        "error" => RealtimeEvent::Error(
-            value
+        "error" => RealtimeEvent::Error(RealtimeServerError {
+            message: value
                 .pointer("/error/message")
                 .and_then(Value::as_str)
                 .unwrap_or("Realtime captions reported an error.")
                 .to_owned(),
-        ),
+            kind: value
+                .pointer("/error/type")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            code: value
+                .pointer("/error/code")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            client_event_id: value
+                .pointer("/error/event_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        }),
         _ => RealtimeEvent::Ignored,
     }
 }
@@ -1680,6 +2001,29 @@ mod tests {
     }
 
     #[test]
+    fn capture_clock_advances_only_after_successful_audio_appends() {
+        let mut sent_samples = 0;
+        record_transmitted_samples(&mut sent_samples, SEND_SAMPLES as u64, false);
+        assert_eq!(capture_clock_ms(sent_samples), 0);
+        record_transmitted_samples(&mut sent_samples, SEND_SAMPLES as u64, true);
+        assert_eq!(capture_clock_ms(sent_samples), 100);
+        record_transmitted_samples(&mut sent_samples, 0, true);
+        assert_eq!(capture_clock_ms(sent_samples), 100);
+    }
+
+    #[test]
+    fn reconnect_allowance_is_single_use_and_ignores_graceful_close() {
+        let mut graceful = ReconnectAllowance::default();
+        assert!(!graceful.claim(true));
+        assert!(graceful.claim(false));
+        assert!(!graceful.claim(false));
+
+        let mut unexpected = ReconnectAllowance::default();
+        assert!(unexpected.claim(false));
+        assert!(!unexpected.claim(false));
+    }
+
+    #[test]
     fn parses_realtime_translation_deltas_and_errors() {
         assert_eq!(
             parse_realtime_event(
@@ -1703,7 +2047,12 @@ mod tests {
         );
         assert_eq!(
             parse_realtime_event(r#"{"type":"error","error":{"message":"bad audio"}}"#),
-            RealtimeEvent::Error("bad audio".into())
+            RealtimeEvent::Error(RealtimeServerError {
+                message: "bad audio".into(),
+                kind: None,
+                code: None,
+                client_event_id: None,
+            })
         );
         assert_eq!(
             parse_realtime_event(
@@ -2070,16 +2419,24 @@ mod tests {
     #[test]
     fn requests_source_transcripts_for_bilingual_live_captions() {
         let languages = LanguageSettings {
-            source: "auto".into(),
+            source: "en".into(),
             target: "ja".into(),
             explanation: "ja".into(),
         };
-        let event = realtime_session_update(&languages, &CaptionProcessingMode::Translated);
+        let event = realtime_session_update(
+            &languages,
+            &CaptionProcessingMode::Translated,
+            "config-translated",
+        );
+        assert_eq!(event["event_id"], "config-translated");
         assert_eq!(
             event["session"]["audio"]["input"]["transcription"]["model"],
             "gpt-realtime-whisper"
         );
         assert_eq!(event["session"]["audio"]["output"]["language"], "ja");
+        assert!(event["session"]["audio"]["input"]["transcription"]
+            .get("language")
+            .is_none());
     }
 
     #[test]
@@ -2089,7 +2446,12 @@ mod tests {
             target: "en".into(),
             explanation: "en".into(),
         };
-        let event = realtime_session_update(&languages, &CaptionProcessingMode::OriginalOnly);
+        let event = realtime_session_update(
+            &languages,
+            &CaptionProcessingMode::OriginalOnly,
+            "config-original",
+        );
+        assert_eq!(event["event_id"], "config-original");
         assert_eq!(event["session"]["type"], "transcription");
         assert_eq!(
             event["session"]["audio"]["input"]["transcription"]["model"],
@@ -2104,6 +2466,154 @@ mod tests {
             "ja"
         );
         assert!(event["session"]["audio"].get("output").is_none());
+    }
+
+    #[test]
+    fn auto_source_omits_the_transcription_hint() {
+        let languages = LanguageSettings {
+            source: "auto".into(),
+            target: "en".into(),
+            explanation: "en".into(),
+        };
+        let event = realtime_session_update(
+            &languages,
+            &CaptionProcessingMode::OriginalOnly,
+            "config-auto",
+        );
+        assert!(event["session"]["audio"]["input"]["transcription"]
+            .get("language")
+            .is_none());
+    }
+
+    #[test]
+    fn parses_lifecycle_events_and_correlates_configuration_errors() {
+        assert!(matches!(
+            parse_realtime_event(
+                r#"{"type":"session.created","event_id":"server-1","session":{"type":"translation"}}"#
+            ),
+            RealtimeEvent::SessionCreated(session) if session["type"] == "translation"
+        ));
+        assert!(matches!(
+            parse_realtime_event(
+                r#"{"type":"session.updated","event_id":"server-2","session":{"type":"translation"}}"#
+            ),
+            RealtimeEvent::SessionUpdated(session) if session["type"] == "translation"
+        ));
+        assert!(matches!(
+            parse_realtime_event(
+                r#"{"type":"error","event_id":"server-3","error":{"type":"invalid_request_error","code":"invalid_value","message":"bad target","event_id":"nonosub-config-7-0"}}"#
+            ),
+            RealtimeEvent::Error(RealtimeServerError {
+                client_event_id: Some(event_id),
+                code: Some(code),
+                ..
+            }) if event_id == "nonosub-config-7-0" && code == "invalid_value"
+        ));
+    }
+
+    #[test]
+    fn rejects_out_of_order_or_repeated_configuration_lifecycle_events() {
+        let languages = LanguageSettings {
+            source: "auto".into(),
+            target: "en".into(),
+            explanation: "en".into(),
+        };
+        assert!(
+            validate_session_created_event(RealtimeEvent::SessionUpdated(
+                json!({ "type": "translation" })
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_session_created_event(RealtimeEvent::SessionCreated(Value::Null)).is_err()
+        );
+        assert!(validate_session_update_event(
+            RealtimeEvent::SessionCreated(json!({ "type": "translation" })),
+            &languages,
+            &CaptionProcessingMode::Translated,
+            "config-1",
+        )
+        .is_err());
+        let correlated_error = validate_session_update_event(
+            RealtimeEvent::Error(RealtimeServerError {
+                message: "bad target".into(),
+                kind: Some("invalid_request_error".into()),
+                code: Some("invalid_value".into()),
+                client_event_id: Some("config-1".into()),
+            }),
+            &languages,
+            &CaptionProcessingMode::Translated,
+            "config-1",
+        )
+        .expect_err("correlated configuration errors must abort startup");
+        assert!(!correlated_error.retryable);
+    }
+
+    #[test]
+    fn validates_acknowledged_translation_configuration() {
+        let languages = LanguageSettings {
+            source: "ja".into(),
+            target: "en".into(),
+            explanation: "en".into(),
+        };
+        let valid = json!({
+            "type": "translation",
+            "audio": {
+                "input": { "transcription": { "model": "gpt-realtime-whisper" } },
+                "output": { "language": "en" }
+            }
+        });
+        assert!(
+            validate_session_updated(&valid, &languages, &CaptionProcessingMode::Translated)
+                .is_ok()
+        );
+
+        let mut wrong_target = valid.clone();
+        wrong_target["audio"]["output"]["language"] = Value::String("ja".into());
+        let error = validate_session_updated(
+            &wrong_target,
+            &languages,
+            &CaptionProcessingMode::Translated,
+        )
+        .expect_err("wrong target must be rejected");
+        assert_eq!(error.kind, ApiErrorKind::MalformedResponse);
+        assert!(!error.retryable);
+    }
+
+    #[test]
+    fn validates_acknowledged_transcription_configuration_and_source_hint() {
+        let languages = LanguageSettings {
+            source: "ja".into(),
+            target: "en".into(),
+            explanation: "en".into(),
+        };
+        let valid = json!({
+            "type": "transcription",
+            "audio": { "input": {
+                "format": { "type": "audio/pcm", "rate": 24_000 },
+                "transcription": {
+                    "model": "gpt-realtime-whisper",
+                    "delay": "low",
+                    "language": "ja"
+                }
+            }}
+        });
+        assert!(
+            validate_session_updated(&valid, &languages, &CaptionProcessingMode::OriginalOnly)
+                .is_ok()
+        );
+
+        let mut missing_hint = valid;
+        missing_hint["audio"]["input"]["transcription"]
+            .as_object_mut()
+            .expect("transcription object")
+            .remove("language");
+        assert!(validate_session_updated(
+            &missing_hint,
+            &languages,
+            &CaptionProcessingMode::OriginalOnly
+        )
+        .is_err());
     }
 
     #[test]
