@@ -1,7 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { calculateLiveCaptionFontSize, calculateSubtitleFit, colorWithOpacity, readableAccentTextColor, subtitleFitOptionsEqual } from "./subtitlePresentation";
+import { calculateLiveCaptionFontSize, calculateSubtitleFit, colorWithOpacity, liveOverlaySegment, readableAccentTextColor, subtitleFitOptionsEqual } from "./subtitlePresentation";
+import type { SubtitleSegment } from "./contracts";
 
 describe("subtitle presentation", () => {
+  it("keeps partial translation in the transcript but hides it from coordinated overlays", () => {
+    const segment: SubtitleSegment = {
+      id: "live-1",
+      origin: "live",
+      startMs: 0,
+      endMs: 1_000,
+      sourceText: "今日はちょっと。",
+      translationText: "Today is a little",
+      speakerId: "live-audio",
+      isProvisional: false,
+      transcriptionStatus: "complete",
+      translationStatus: "pending",
+    };
+    expect(liveOverlaySegment(segment, "coordinated").translationText).toBeUndefined();
+    expect(liveOverlaySegment(segment, "fast_source")).toBe(segment);
+    expect(segment.translationText).toBe("Today is a little");
+  });
+
   it("shrinks long captions until they fit the available height", () => {
     const result = calculateSubtitleFit({
       basePx: 28,

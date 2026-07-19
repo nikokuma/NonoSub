@@ -228,7 +228,7 @@
 >
   {#if arranging}<div class="grip" aria-hidden="true">⠿ DRAG NONOSUB</div>{/if}
   <div class="caption-host" bind:this={captionHost}>
-    {#if captions.length > 0}<LiveSubtitleStack segment={captions[0]} speaker={captions[0].speakerId ? session.speakers[captions[0].speakerId] : undefined} style={activeStyle} sync={session.liveSync} processingMode={session.processingMode} onselect={selectLine} />{:else}<div class="waiting"><i></i>{waitingLabel}</div>{/if}
+    {#if captions.length > 0}<LiveSubtitleStack segment={captions[0]} speaker={captions[0].speakerId ? session.speakers[captions[0].speakerId] : undefined} style={activeStyle} sync={session.liveSync} liveMode={preferences.sync.liveMode} processingMode={session.processingMode} onselect={selectLine} />{:else}<div class="waiting"><i></i>{waitingLabel}</div>{/if}
     {#if session.fatalError}<div class="error">{session.fatalError}</div>{/if}
   </div>
 </div>

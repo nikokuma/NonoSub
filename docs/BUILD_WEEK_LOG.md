@@ -127,3 +127,14 @@
 - Added critically damped long-hair follow-through with reduced-motion reset; body clips are forbidden from keying the procedural hair, tail, and skirt-secondary bones by both Blender final-export validation and GLB audit.
 - Added portable PBR fallback, submission-safe `NonoToon`, and a development-only altered NonToon-inspired comparison for ramp, rim, hair-specular, and basic-specular behavior. All three render the real skinned candidate without WebGL errors; NonoToon and the experimental variant each held 60 fps in the lesson fixture.
 - Kept `NonoToon` as the release default. The experimental comparison remains development-only until Nico visually prefers it; its zlib attribution is included without granting a license to NonoSub or Nico-owned assets.
+
+## July 18 — Live clause lifecycle repair
+
+- Replaced historical nearest-caption translation matching with independent append-only source and target clause tracks.
+- Added immutable closure at punctuation/quiet, idle, aligned-time, capture-age, and grapheme boundaries; incoming deltas honor an already-reached quiet boundary even if the scheduler has not ticked yet.
+- Paired utterance groups monotonically by realtime epoch and aligned-time compatibility. Hard-split continuations remain attached to their original source and cannot shift the next translation.
+- Kept one lag observation per epoch/alignment frame, updating it with the latest fragment receipt rather than weighting token fragmentation.
+- Added reconnect isolation, one-time late translation fill, coordinated partial-translation hiding, four-second silence clearing, and immediate clearing on stop.
+- Added focused adversarial regressions for shared timestamps, missing timing, elapsed resets, target-first output, source/target split-count mismatches, 441-grapheme streams, late translation, reconnects, and stop behavior.
+- Added `unicode-segmentation` for real grapheme boundaries and recorded its required third-party attribution.
+- Nico accepted the repaired sustained-live behavior after native playback testing; R2 now owns independent visual containment for every subtitle style.

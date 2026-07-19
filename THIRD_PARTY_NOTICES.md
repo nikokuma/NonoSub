@@ -27,6 +27,7 @@ NonoSub's development-only `nontoon` comparison material is an altered Three.js/
 | ScreenCaptureKit for Rust | MIT OR Apache-2.0 | <https://github.com/doom-fish/screencapturekit-rs> |
 | Symphonia | MPL-2.0 | <https://github.com/pdeljanov/Symphonia> |
 | Tokio and tokio-tungstenite | MIT | <https://github.com/tokio-rs/tokio> · <https://github.com/snapview/tokio-tungstenite> |
+| unicode-segmentation | MIT OR Apache-2.0 | <https://github.com/unicode-rs/unicode-segmentation> |
 
 NonoSub does not modify Symphonia. Its corresponding source is available from the pinned crate version and upstream repository above. SPDX license texts are available at <https://spdx.org/licenses/>.
 

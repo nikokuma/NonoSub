@@ -3,14 +3,15 @@
   import CyberiaSubtitleCard from "./CyberiaSubtitleCard.svelte";
   import BroadcastSubtitleCard from "./BroadcastSubtitleCard.svelte";
   import ArcadeSubtitleCard from "./ArcadeSubtitleCard.svelte";
-  import type { CaptionProcessingMode, LiveSyncState, SpeakerProfile, StyleSettings, SubtitleSegment } from "./contracts";
-  import { calculateLiveCaptionFontSize } from "./subtitlePresentation";
+  import type { CaptionProcessingMode, LiveSyncMode, LiveSyncState, SpeakerProfile, StyleSettings, SubtitleSegment } from "./contracts";
+  import { calculateLiveCaptionFontSize, liveOverlaySegment } from "./subtitlePresentation";
 
   let {
     segment,
     speaker,
     style,
     sync,
+    liveMode = "coordinated",
     processingMode = "translated",
     onselect,
   }: {
@@ -18,13 +19,15 @@
     speaker?: SpeakerProfile;
     style: StyleSettings;
     sync?: LiveSyncState;
+    liveMode?: LiveSyncMode;
     processingMode?: CaptionProcessingMode;
     onselect: (segment: SubtitleSegment) => void;
   } = $props();
 
   let viewportWidth = $state(900);
-  const source = $derived(segment.sourceText.trim());
-  const translation = $derived(segment.translationText?.trim() ?? "");
+  const renderedSegment = $derived(liveOverlaySegment(segment, liveMode));
+  const source = $derived(renderedSegment.sourceText.trim());
+  const translation = $derived(renderedSegment.translationText?.trim() ?? "");
   const showSource = $derived(style.displayMode !== "translation");
   const showTranslation = $derived(style.displayMode !== "source");
   const liveFontSize = $derived(calculateLiveCaptionFontSize({
@@ -49,16 +52,16 @@
   style={`font-size:${liveFontSize}px;font-family:${style.fontFamily};--sub-bg:${style.backgroundOpacity}`}
 >
   {#if style.preset === "momento"}
-    <MomentoSubtitleCard {segment} {speaker} {style} liveLabel={delayLabel} degraded={sync?.status === "degraded"} {onselect} />
+    <MomentoSubtitleCard segment={renderedSegment} {speaker} {style} liveLabel={delayLabel} degraded={sync?.status === "degraded"} {onselect} />
   {:else if style.preset === "wired"}
-    <CyberiaSubtitleCard {segment} {speaker} {style} liveLabel={delayLabel} degraded={sync?.status === "degraded"} {onselect} />
+    <CyberiaSubtitleCard segment={renderedSegment} {speaker} {style} liveLabel={delayLabel} degraded={sync?.status === "degraded"} {onselect} />
   {:else if style.preset === "classic-outline" || style.preset === "yellow-drop"}
-    <BroadcastSubtitleCard {segment} {speaker} {style} variant={style.preset} liveLabel={delayLabel} degraded={sync?.status === "degraded"} {onselect} />
+    <BroadcastSubtitleCard segment={renderedSegment} {speaker} {style} variant={style.preset} liveLabel={delayLabel} degraded={sync?.status === "degraded"} {onselect} />
   {:else if style.preset === "fallout"}
-    <ArcadeSubtitleCard {segment} {speaker} {style} liveLabel={delayLabel} degraded={sync?.status === "degraded"} {onselect} />
+    <ArcadeSubtitleCard segment={renderedSegment} {speaker} {style} liveLabel={delayLabel} degraded={sync?.status === "degraded"} {onselect} />
   {:else}
     <button
-      onclick={(event) => event.detail === 0 && !segment.isProvisional && onselect(segment)}
+      onclick={(event) => event.detail === 0 && !renderedSegment.isProvisional && onselect(renderedSegment)}
       disabled={segment.isProvisional}
       aria-label={segment.isProvisional ? "Live caption in progress" : "Right-click this caption to ask Nono"}
     >

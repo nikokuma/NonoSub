@@ -448,6 +448,22 @@ Demo sequence:
 - [ ] Final links and uploads verified.
 - [ ] Submission confirmation captured.
 
+## Deferred concept — Sequential source/translation presentation
+
+After the audit repairs, explore an optional live-caption mode that presents listening and meaning as two deliberate beats instead of always showing both rows together:
+
+1. Accumulate provisional source speech off-screen until a complete source clause is ready.
+2. Show that complete source clause and keep it visible while its translation is generated.
+3. Continue transcribing the next source clause into a hidden ordered queue; new provisional speech must not replace the visible clause.
+4. When the visible clause's translation is finalized, clear the source row and replace it with the translation only.
+5. Hold the translation for a readable interval, approximately 2.5–4 seconds and adaptive to text length, then fade it out.
+6. Promote the next completed queued clause without skipping, merging, or reordering speech.
+7. If the queue grows faster than it can be displayed, shorten dwell time or fall back to coordinated bilingual presentation rather than allowing latency to grow without bound.
+
+This could become a third mode alongside **Coordinated** and **Fast Source**, tentatively named **Listen → Meaning** or **Sequential Learning**. It is not part of R1 or R2 and must not be implemented until the release audit repairs are complete.
+
+Multiple simultaneous stream speakers require separate speaker-aware lanes and ordered queues. The current realtime path intentionally exposes one `Live Audio` identity because it does not provide reliable diarization. Stable live speaker identity, stacked speaker lanes, and overlapping-speaker separation remain post-hackathon research rather than submission scope.
+
 ## Hard scope cut
 
 Do not add before submission:
@@ -491,12 +507,12 @@ For every creation deliverable:
 
 ## Audit repair checkpoints
 
-Status: **R0 COMPLETE — R1 live clause lifecycle is next**
+Status: **R1 ACCEPTED — checkpoint pending**
 
 The July 18 independent review found release-blocking correctness and containment issues. Repairs are performed one at a time; each receives focused tests, the full verification suite, visible acceptance when applicable, and its own GitHub checkpoint before the next repair begins.
 
 - [x] R0 — Preserve and push the current invisible-shell baseline.
-- [ ] R1 — Rebuild live source/translation clause lifecycle so finalized captions cannot reopen.
+- [ ] R1 — Rebuild live source/translation clause lifecycle so finalized captions cannot reopen. Implementation, automated verification, and native sustained-live acceptance complete; checkpoint pending.
 - [ ] R2 — Bound every live subtitle style independently of backend text size.
 - [ ] R3 — Add session generations, per-run cancellation, and stale-event rejection.
 - [ ] R4 — Preserve stable IDs during file chunk-boundary reconciliation.

@@ -2210,6 +2210,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite",
+ "unicode-segmentation",
 ]
 
 [[package]]

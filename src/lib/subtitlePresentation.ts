@@ -1,3 +1,5 @@
+import type { LiveSyncMode, SubtitleSegment } from "./contracts";
+
 export interface SubtitleFitRequest {
   basePx: number;
   minPx: number;
@@ -24,6 +26,16 @@ export interface LiveCaptionDensityRequest {
   translationText: string;
   showSource: boolean;
   showTranslation: boolean;
+}
+
+export function liveOverlaySegment(
+  segment: SubtitleSegment,
+  liveMode: LiveSyncMode,
+): SubtitleSegment {
+  if (liveMode !== "coordinated" || segment.translationStatus === "complete") {
+    return segment;
+  }
+  return { ...segment, translationText: undefined };
 }
 
 /**
