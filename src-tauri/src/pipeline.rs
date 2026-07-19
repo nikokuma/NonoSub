@@ -135,14 +135,10 @@ async fn run_inner(
                 }
             }
         }
-        for segment in all_segments.iter().filter(|segment| {
-            if emitted_sources.get(&segment.id) == Some(&segment.source_text) {
-                false
-            } else {
-                emitted_sources.insert(segment.id.clone(), segment.source_text.clone());
-                true
-            }
-        }) {
+        for segment in all_segments
+            .iter()
+            .filter(|segment| mark_source_revision(&mut emitted_sources, segment))
+        {
             send(
                 events,
                 SessionEvent::TranscriptFinalized {
@@ -482,29 +478,130 @@ fn is_clause_boundary(character: char) -> bool {
 
 pub fn merge_boundary_segments(
     existing: &mut Vec<SubtitleSegment>,
-    incoming: Vec<SubtitleSegment>,
+    mut incoming: Vec<SubtitleSegment>,
 ) {
-    for candidate in incoming {
-        let duplicate = existing.iter().position(|segment| {
-            let overlap_start = segment.start_ms.max(candidate.start_ms);
-            let overlap_end = segment.end_ms.min(candidate.end_ms);
-            let overlap = overlap_end.saturating_sub(overlap_start);
-            let shorter = (segment.end_ms - segment.start_ms)
-                .min(candidate.end_ms - candidate.start_ms)
-                .max(1);
-            overlap * 100 / shorter >= 60
-                && (segment.source_text.contains(&candidate.source_text)
-                    || candidate.source_text.contains(&segment.source_text))
-        });
+    let existing_count = existing.len();
+    let mut matched_existing = HashSet::new();
+    incoming.sort_by(|left, right| {
+        boundary_text_completeness(&right.source_text)
+            .cmp(&boundary_text_completeness(&left.source_text))
+            .then_with(|| left.start_ms.cmp(&right.start_ms))
+            .then_with(|| left.end_ms.cmp(&right.end_ms))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    for mut candidate in incoming {
+        let duplicate = (0..existing_count)
+            .filter(|index| !matched_existing.contains(index))
+            .filter_map(|index| {
+                boundary_match_score(&existing[index], &candidate).map(|score| (index, score))
+            })
+            .max_by(|(left_index, left), (right_index, right)| {
+                left.coverage_per_mille
+                    .cmp(&right.coverage_per_mille)
+                    .then_with(|| left.overlap_ms.cmp(&right.overlap_ms))
+                    .then_with(|| right.edge_distance_ms.cmp(&left.edge_distance_ms))
+                    .then_with(|| right_index.cmp(left_index))
+            })
+            .map(|(index, _)| index);
+        let duplicates_consumed_match = duplicate.is_none()
+            && matched_existing.iter().any(|index| {
+                boundary_match_score(&existing[*index], &candidate).is_some()
+            });
         if let Some(index) = duplicate {
-            if candidate.source_text.chars().count() > existing[index].source_text.chars().count() {
+            matched_existing.insert(index);
+            if boundary_text_completeness(&candidate.source_text)
+                > boundary_text_completeness(&existing[index].source_text)
+            {
+                candidate.id.clone_from(&existing[index].id);
+                if candidate.speaker_id.is_none() {
+                    candidate.speaker_id.clone_from(&existing[index].speaker_id);
+                }
+                candidate.translation_text = None;
+                candidate.ambiguity_note = None;
+                candidate.translation_status = SegmentStatus::Failed;
                 existing[index] = candidate;
             }
-        } else {
+        } else if !duplicates_consumed_match {
             existing.push(candidate);
         }
     }
-    existing.sort_by_key(|segment| segment.start_ms);
+    existing.sort_by(|left, right| {
+        left.start_ms
+            .cmp(&right.start_ms)
+            .then_with(|| left.end_ms.cmp(&right.end_ms))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BoundaryMatchScore {
+    coverage_per_mille: u64,
+    overlap_ms: u64,
+    edge_distance_ms: u64,
+}
+
+fn boundary_match_score(
+    existing: &SubtitleSegment,
+    candidate: &SubtitleSegment,
+) -> Option<BoundaryMatchScore> {
+    if existing.speaker_id.is_some()
+        && candidate.speaker_id.is_some()
+        && existing.speaker_id != candidate.speaker_id
+    {
+        return None;
+    }
+    let existing_text = normalize_boundary_text(&existing.source_text);
+    let candidate_text = normalize_boundary_text(&candidate.source_text);
+    if existing_text.is_empty()
+        || candidate_text.is_empty()
+        || (!existing_text.contains(&candidate_text) && !candidate_text.contains(&existing_text))
+    {
+        return None;
+    }
+
+    let overlap_start = existing.start_ms.max(candidate.start_ms);
+    let overlap_end = existing.end_ms.min(candidate.end_ms);
+    let overlap_ms = overlap_end.saturating_sub(overlap_start);
+    let shorter = existing
+        .end_ms
+        .saturating_sub(existing.start_ms)
+        .min(candidate.end_ms.saturating_sub(candidate.start_ms))
+        .max(1);
+    let coverage_per_mille = ((overlap_ms as u128 * 1_000) / shorter as u128) as u64;
+    if coverage_per_mille < 600 {
+        return None;
+    }
+
+    Some(BoundaryMatchScore {
+        coverage_per_mille,
+        overlap_ms,
+        edge_distance_ms: existing
+            .start_ms
+            .abs_diff(candidate.start_ms)
+            .saturating_add(existing.end_ms.abs_diff(candidate.end_ms)),
+    })
+}
+
+fn normalize_boundary_text(text: &str) -> String {
+    text.chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn boundary_text_completeness(text: &str) -> usize {
+    normalize_boundary_text(text).chars().count()
+}
+
+fn mark_source_revision(
+    emitted_sources: &mut HashMap<String, String>,
+    segment: &SubtitleSegment,
+) -> bool {
+    if emitted_sources.get(&segment.id) == Some(&segment.source_text) {
+        return false;
+    }
+    emitted_sources.insert(segment.id.clone(), segment.source_text.clone());
+    true
 }
 
 fn build_speaker_references(
@@ -600,7 +697,153 @@ mod tests {
             vec![segment("new", 10_050, 12_100, "今日はちょっと")],
         );
         assert_eq!(existing.len(), 1);
-        assert_eq!(existing[0].id, "new");
+        assert_eq!(existing[0].id, "old");
+        assert_eq!(existing[0].source_text, "今日はちょっと");
+    }
+
+    #[test]
+    fn revised_boundary_text_invalidates_only_its_stale_translation() {
+        let mut old = segment("stable", 10_000, 12_000, "今日は");
+        old.translation_text = Some("As for today".into());
+        old.ambiguity_note = Some("Incomplete phrase".into());
+        old.translation_status = SegmentStatus::Complete;
+        let mut candidate = segment("chunk-2-new", 10_050, 12_100, "今日はちょっと");
+        candidate.translation_text = Some("stale candidate translation".into());
+        candidate.translation_status = SegmentStatus::Complete;
+        let mut existing = vec![old];
+
+        merge_boundary_segments(&mut existing, vec![candidate]);
+
+        assert_eq!(existing[0].id, "stable");
+        assert_eq!(existing[0].source_text, "今日はちょっと");
+        assert_eq!(existing[0].translation_text, None);
+        assert_eq!(existing[0].ambiguity_note, None);
+        assert_eq!(existing[0].translation_status, SegmentStatus::Failed);
+    }
+
+    #[test]
+    fn exact_boundary_duplicate_keeps_the_existing_translation_and_timing() {
+        let mut old = segment("stable", 10_000, 12_000, "I  understand.");
+        old.translation_text = Some("分かります。".into());
+        old.translation_status = SegmentStatus::Complete;
+        let mut existing = vec![old.clone()];
+
+        merge_boundary_segments(
+            &mut existing,
+            vec![segment("chunk-2-new", 10_100, 12_200, "i understand.")],
+        );
+
+        assert_eq!(existing, vec![old]);
+    }
+
+    #[test]
+    fn incoming_boundary_matches_are_one_to_one() {
+        let mut existing = vec![
+            segment("first", 10_000, 12_000, "はい"),
+            segment("second", 11_000, 13_000, "はい"),
+        ];
+        merge_boundary_segments(
+            &mut existing,
+            vec![
+                segment("new-a", 10_500, 12_500, "はい、そうです"),
+                segment("new-b", 10_500, 12_500, "はい、そうです"),
+            ],
+        );
+
+        assert_eq!(existing.len(), 2);
+        assert_eq!(
+            existing
+                .iter()
+                .map(|segment| segment.id.as_str())
+                .collect::<HashSet<_>>(),
+            HashSet::from(["first", "second"])
+        );
+        assert!(existing
+            .iter()
+            .all(|segment| segment.source_text == "はい、そうです"));
+    }
+
+    #[test]
+    fn incoming_segments_are_not_deduplicated_against_the_same_chunk() {
+        let mut existing = Vec::new();
+        merge_boundary_segments(
+            &mut existing,
+            vec![
+                segment("new-a", 10_000, 12_000, "同じです"),
+                segment("new-b", 10_100, 11_900, "同じです"),
+            ],
+        );
+
+        assert_eq!(existing.len(), 2);
+        assert_eq!(existing[0].id, "new-a");
+        assert_eq!(existing[1].id, "new-b");
+    }
+
+    #[test]
+    fn fuller_duplicate_wins_even_when_a_shorter_variant_arrives_first() {
+        let mut existing = vec![segment("stable", 10_000, 12_000, "今日は")];
+        merge_boundary_segments(
+            &mut existing,
+            vec![
+                segment("shorter", 10_050, 12_050, "今日"),
+                segment("fuller", 10_050, 12_100, "今日はちょっと"),
+            ],
+        );
+
+        assert_eq!(existing.len(), 1);
+        assert_eq!(existing[0].id, "stable");
+        assert_eq!(existing[0].source_text, "今日はちょっと");
+    }
+
+    #[test]
+    fn same_words_from_a_different_speaker_remain_distinct() {
+        let mut existing = vec![segment("speaker-one", 10_000, 12_000, "待って")];
+        let mut second_speaker = segment("speaker-two", 10_100, 11_900, "待って");
+        second_speaker.speaker_id = Some("speaker-2".into());
+
+        merge_boundary_segments(&mut existing, vec![second_speaker]);
+
+        assert_eq!(existing.len(), 2);
+        assert_eq!(
+            existing
+                .iter()
+                .filter_map(|segment| segment.speaker_id.as_deref())
+                .collect::<HashSet<_>>(),
+            HashSet::from(["speaker-1", "speaker-2"])
+        );
+    }
+
+    #[test]
+    fn stable_id_source_revision_is_emitted_once_per_text_version() {
+        let mut emitted = HashMap::new();
+        let first = segment("stable", 10_000, 12_000, "今日は");
+        let revised = segment("stable", 10_000, 12_100, "今日はちょっと");
+
+        assert!(mark_source_revision(&mut emitted, &first));
+        assert!(!mark_source_revision(&mut emitted, &first));
+        assert!(mark_source_revision(&mut emitted, &revised));
+        assert!(!mark_source_revision(&mut emitted, &revised));
+        assert_eq!(emitted.len(), 1);
+    }
+
+    #[test]
+    fn split_boundary_parts_keep_their_individual_stable_ids() {
+        let mut existing = vec![
+            segment("old-part-1", 10_000, 12_000, "今日はちょっと"),
+            segment("old-part-2", 12_000, 14_000, "予定があります"),
+        ];
+        merge_boundary_segments(
+            &mut existing,
+            vec![
+                segment("new-part-1", 10_050, 12_100, "今日はちょっとだけ"),
+                segment("new-part-2", 12_050, 14_100, "予定がありますので"),
+            ],
+        );
+
+        assert_eq!(existing[0].id, "old-part-1");
+        assert_eq!(existing[0].source_text, "今日はちょっとだけ");
+        assert_eq!(existing[1].id, "old-part-2");
+        assert_eq!(existing[1].source_text, "予定がありますので");
     }
 
     #[test]

@@ -155,3 +155,12 @@
 - Classified ordinary replacement/cancellation separately from service failure. Cancelled pipelines finish silently instead of emitting a fatal error or reopening recovery UI.
 - Added adversarial tests for permanent old-token cancellation, stale fatal-event rejection without sequence mutation, cancellation without fatal output, and exact frontend generation handoff.
 - Full verification passes with zero Svelte warnings, 75 frontend tests, a successful production build, 60 Rust tests, and warning-free clippy.
+
+## July 19 — Stable file boundary identities
+
+- Made the first accepted file subtitle ID canonical across overlapping transcription chunks. A more-complete boundary result now revises the existing line in place instead of replacing it with the later chunk's local ID.
+- Added normalized text matching, deterministic overlap scoring, and one-to-one reconciliation against only pre-existing segments. Distinct or simultaneous lines from the same incoming chunk can no longer collapse into one identity.
+- Exact duplicates retain their completed translation and timing. A real source-text revision clears its old translation and ambiguity note, then returns only that stable subtitle to the translation queue.
+- Stable source revisions emit once per text version, so the canonical transcript updates without duplicate IDs or repeated event churn. A selected subtitle continues resolving through the revision.
+- Added adversarial coverage for longer boundary replacements, shorter-before-fuller arrival order, exact duplicates, repeated simultaneous phrases, cross-speaker overlap, same-chunk overlaps, split long-sentence parts, translation invalidation, and frontend selection retention.
+- Full verification passes with zero Svelte warnings, 76 frontend tests, a successful production build, 68 Rust tests, and warning-free clippy.

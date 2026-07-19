@@ -46,6 +46,32 @@ describe("session contract", () => {
     expect(latestLiveSegments(withFinal.segments)).toEqual([finalized]);
   });
 
+  it("updates a reconciled file boundary in place without orphaning selection", () => {
+    const original = {
+      ...FIXTURE_SEGMENTS[0],
+      id: "stable-boundary-id",
+      sourceText: "今日は",
+      translationText: "As for today",
+      translationStatus: "complete" as const,
+    };
+    const selected = {
+      ...EMPTY_SESSION,
+      segments: [original],
+      selectedSegmentId: original.id,
+    };
+    const revised = {
+      ...original,
+      sourceText: "今日はちょっと",
+      translationText: undefined,
+      translationStatus: "failed" as const,
+    };
+
+    const next = reduceSession(selected, { type: "transcript_finalized", segment: revised });
+
+    expect(next.segments).toEqual([revised]);
+    expect(next.selectedSegmentId).toBe("stable-boundary-id");
+  });
+
   it("shows only the current live caption while preserving finalized history", () => {
     const finalized = { ...FIXTURE_SEGMENTS[0], id: "live-1", origin: "live" as const };
     const provisional = { ...FIXTURE_SEGMENTS[1], id: "live-2", origin: "live" as const, isProvisional: true };

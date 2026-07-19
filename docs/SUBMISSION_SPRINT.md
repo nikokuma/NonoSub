@@ -507,15 +507,15 @@ For every creation deliverable:
 
 ## Audit repair checkpoints
 
-Status: **R3 VERIFIED — session generation isolation**
+Status: **R4 VERIFIED — stable file boundary identities**
 
 The July 18 independent review found release-blocking correctness and containment issues. Repairs are performed one at a time; each receives focused tests, the full verification suite, visible acceptance when applicable, and its own GitHub checkpoint before the next repair begins.
 
 - [x] R0 — Preserve and push the current invisible-shell baseline.
 - [x] R1 — Rebuild live source/translation clause lifecycle so finalized captions cannot reopen. Accepted and checkpointed in `dc37d09`.
 - [x] R2 — Bound every live subtitle style independently of backend text size. Accepted and checkpointed in `7e18141`.
-- [x] R3 — Add session generations, per-run cancellation, and stale-event rejection. Focused plan: `docs/plans/SESSION_GENERATION_ISOLATION.md`.
-- [ ] R4 — Preserve stable IDs during file chunk-boundary reconciliation.
+- [x] R3 — Add session generations, per-run cancellation, and stale-event rejection. Checkpointed in `780cb8b`.
+- [x] R4 — Preserve stable IDs during file chunk-boundary reconciliation. Focused plan: `docs/plans/FILE_BOUNDARY_ID_STABILITY.md`.
 - [ ] R5 — Validate exact structured translation output and continue source-only after terminal failure.
 - [ ] R6 — Harden realtime configuration acknowledgement, timing, source hints, and reconnects.
 - [ ] R7 — Make file target-language retranslation atomic and generation-scoped.
