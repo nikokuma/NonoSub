@@ -59,6 +59,44 @@ export const ORIGINAL_ONLY_FIXTURE_EVENTS: SessionEvent[] = [
   { type: "live_sync_changed", sync: { targetDelayMs: 0, observedLagMs: 0, status: "steady", visibleSegmentId: "live-original-fixture" } },
 ];
 
+export const OVERLAP_FILE_FIXTURE_EVENTS: SessionEvent[] = [
+  { type: "session_reset", mode: "file", languages: { source: "ja", target: "en", explanation: "en" }, processingMode: "translated" },
+  { type: "phase_changed", phase: "ready" },
+  { type: "speaker_discovered", speaker: { id: "speaker-1", displayName: "Aiko", color: "#ff83bd" } },
+  { type: "speaker_discovered", speaker: { id: "speaker-2", displayName: "Sato", color: "#78dfc2" } },
+  {
+    type: "transcript_finalized",
+    segment: {
+      id: "overlap-a",
+      origin: "file",
+      startMs: 0,
+      endMs: 60_000,
+      sourceText: "ちょっと待ってください、まだ説明が終わっていないので、今ここで次の話を始めると大事なところが聞こえなくなってしまいます。",
+      translationText: "Please wait a moment—I haven't finished explaining yet, and if we start the next conversation now, the important part will be impossible to hear.",
+      speakerId: "speaker-1",
+      isProvisional: false,
+      transcriptionStatus: "complete",
+      translationStatus: "complete",
+    },
+  },
+  {
+    type: "transcript_finalized",
+    segment: {
+      id: "overlap-b",
+      origin: "file",
+      startMs: 0,
+      endMs: 60_000,
+      sourceText: "分かっていますけど、こちらも時間がないから、結論だけでも先に教えてもらえませんか。",
+      translationText: "I understand, but we're running out of time too, so could you at least tell us the conclusion first?",
+      speakerId: "speaker-2",
+      isProvisional: false,
+      transcriptionStatus: "complete",
+      translationStatus: "complete",
+    },
+  },
+  { type: "coverage_changed", readyThroughMs: 60_000 },
+];
+
 export const FIXTURE_LESSON: LessonCard = {
   schemaVersion: 2,
   selectedSegmentId: "seg-4",

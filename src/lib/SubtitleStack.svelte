@@ -48,16 +48,23 @@
 >
   {#each segments as segment (segment.id)}
     {@const speaker = segment.speakerId ? speakers[segment.speakerId] : undefined}
+    <div class="segment-wrap" data-segment-id={segment.id}>
     {#if style.preset === "momento"}
       <MomentoSubtitleCard {segment} {speaker} {style} {onselect} />
-    {:else if style.preset === "cyberia"}
+    {:else if style.preset === "wired"}
       <CyberiaSubtitleCard {segment} {speaker} {style} {onselect} />
     {:else if style.preset === "classic-outline" || style.preset === "yellow-drop"}
       <BroadcastSubtitleCard {segment} {speaker} {style} variant={style.preset} {onselect} />
-    {:else if style.preset === "arcade"}
+    {:else if style.preset === "fallout"}
       <ArcadeSubtitleCard {segment} {speaker} {style} {onselect} />
     {:else}
-      <button class="subtitle-line effect-{style.effect}" class:provisional={segment.isProvisional} onclick={() => !segment.isProvisional && onselect(segment)} disabled={segment.isProvisional}>
+      <button
+        class="subtitle-line effect-{style.effect}"
+        class:provisional={segment.isProvisional}
+        onclick={(event) => event.detail === 0 && !segment.isProvisional && onselect(segment)}
+        disabled={segment.isProvisional}
+        aria-label={segment.isProvisional ? "Caption in progress" : "Right-click this caption to ask Nono"}
+      >
         {#if style.showSpeakerNames && (speaker || segment.origin === "live")}
           <span class="speaker" style={`color:${speaker?.color ?? "#79e9cb"}`}>{speaker?.displayName ?? "Live Audio"}</span>
         {/if}
@@ -65,9 +72,10 @@
         {#if style.displayMode !== "source"}<span class="translation">{segment.translationText ?? "Nono is translating…"}</span>{/if}
       </button>
     {/if}
+    </div>
   {/each}
 </div>
 
 <style>
-  .subtitles{width:min(92vw,900px);display:grid;gap:9px;touch-action:none;user-select:none;font-size:var(--fit-font-size,28px);transform:scale(var(--fit-scale,1));transform-origin:center}.subtitles.preview{width:100%;max-width:900px}.subtitles.movable{cursor:grab}.subtitle-line{width:100%;border:0;background:transparent;padding:0;color:white;text-align:center;display:grid;justify-items:center}.subtitle-line:disabled{cursor:default}.subtitle-line span:not(.speaker){padding:3px 12px;background:rgba(0,0,0,var(--sub-bg));line-height:1.25;max-width:100%;overflow-wrap:anywhere;text-wrap:balance}.speaker{font-size:.36em;text-transform:uppercase;font-weight:900;letter-spacing:.14em;margin-bottom:3px}.source{font-weight:850}.translation{font-size:.62em;color:#faf8ff}.provisional{opacity:.72}.effect-outline span:not(.speaker){text-shadow:-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000,0 3px 12px #000}.effect-shadow span:not(.speaker){text-shadow:0 3px 10px #000}
+  .subtitles{width:min(92vw,900px);display:grid;gap:9px;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;font-size:var(--fit-font-size,28px);transform:scale(var(--fit-scale,1));transform-origin:center}.segment-wrap{display:contents}.subtitles.preview{width:100%;max-width:900px}.subtitles.movable{cursor:grab}.subtitle-line{width:100%;border:0;background:transparent;padding:0;color:white;text-align:center;display:grid;justify-items:center}.subtitle-line:disabled{cursor:default}.subtitle-line span:not(.speaker){padding:3px 12px;background:rgba(0,0,0,var(--sub-bg));line-height:1.25;max-width:100%;overflow-wrap:anywhere;text-wrap:balance}.speaker{font-size:.36em;text-transform:uppercase;font-weight:900;letter-spacing:.14em;margin-bottom:3px}.source{font-weight:850}.translation{font-size:.62em;color:#faf8ff}.provisional{opacity:.72}.effect-outline span:not(.speaker){text-shadow:-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000,0 3px 12px #000}.effect-shadow span:not(.speaker){text-shadow:0 3px 10px #000}
 </style>

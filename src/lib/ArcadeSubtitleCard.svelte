@@ -22,17 +22,18 @@
   const translation = $derived(segment.translationText?.trim() ?? "");
   const showSource = $derived(style.displayMode !== "translation");
   const showTranslation = $derived(style.displayMode !== "source");
-  const panel = $derived(colorWithOpacity(style.arcadeColors.panel, style.backgroundOpacity));
+  const panel = $derived(colorWithOpacity(style.falloutColors.panel, style.backgroundOpacity));
 </script>
 
 <button
   class="arcade-card"
   class:provisional={segment.isProvisional}
   class:degraded
-  style={`--arcade-text:${style.arcadeColors.text};--arcade-panel:${panel}`}
-  onclick={() => !segment.isProvisional && onselect(segment)}
+  class:live={Boolean(liveLabel)}
+  style={`--arcade-text:${style.falloutColors.text};--arcade-panel:${panel}`}
+  onclick={(event) => event.detail === 0 && !segment.isProvisional && onselect(segment)}
   disabled={segment.isProvisional}
-  aria-label={segment.isProvisional ? "Caption in progress" : "Open this caption in Nono"}
+  aria-label={segment.isProvisional ? "Caption in progress" : "Right-click this caption to ask Nono"}
 >
   <span class="dialogue-strip">
     <span class="metadata">
@@ -120,7 +121,7 @@
   .arcade-card:focus-visible .dialogue-strip { outline: 1px solid var(--arcade-text); outline-offset: -.05em; }
 
   @media (prefers-reduced-motion: no-preference) {
-    .caption-stack { animation: phosphor-in 120ms steps(3, end) both; }
+    .arcade-card:not(.live) .caption-stack { animation: phosphor-in 120ms steps(3, end) both; }
   }
 
   @keyframes phosphor-in {

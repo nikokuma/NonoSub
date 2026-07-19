@@ -1,13 +1,15 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
-  import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
+  import { invoke, isTauri } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import type { ModelReadiness, SessionState, SpeakerProfile, SubtitlePreset, SubtitleSegment } from "./contracts";
   import { EMPTY_SESSION } from "./contracts";
   import { FIXTURE_EVENTS } from "./fixtures";
   import { formatTime, reduceSession } from "./session";
+  import { applyPreferenceAction } from "./preferences";
   import { initialSession, loadPreferences, savePreferences, subscribePreferences, subscribeSession } from "./runtime";
+  import { errorMessage, startFileSession, startLiveSession } from "./sessionLaunch";
   import SubtitleStylePreview from "./SubtitleStylePreview.svelte";
 
   const LANGUAGE_OPTIONS = [
@@ -15,7 +17,7 @@
     ["fr", "French"], ["de", "German"], ["ko", "Korean"], ["zh", "Chinese"],
     ["pt", "Portuguese"], ["it", "Italian"], ["ru", "Russian"],
   ] as const;
-  const PRESETS: SubtitlePreset[] = ["clean", "classic-outline", "yellow-drop", "arcade", "momento", "cyberia"];
+  const PRESETS: SubtitlePreset[] = ["clean", "classic-outline", "yellow-drop", "fallout", "momento", "wired"];
 
   let session = $state<SessionState>(FIXTURE_EVENTS.reduce(reduceSession, structuredClone(EMPTY_SESSION)));
   let preferences = $state(loadPreferences());
@@ -30,6 +32,7 @@
   let renaming = $state<string | undefined>();
   let renameValue = $state("");
   let hideWhenViewerReady = $state(false);
+  let surfacedFatalError = $state<string>();
 
   $effect(() => {
     if (hideWhenViewerReady && session.mode === "file" && session.phase === "ready" && isTauri()) {
@@ -38,12 +41,19 @@
     }
   });
 
+  $effect(() => {
+    if (!isTauri() || !session.fatalError || session.fatalError === surfacedFatalError) return;
+    surfacedFatalError = session.fatalError;
+    mediaMessage = session.fatalError;
+    void invoke("open_surface", { surface: "workbench" });
+  });
+
   onMount(() => {
     document.documentElement.dataset.surface = "workbench";
     void Promise.all([
       document.fonts.load('400 24px "DotGothic16"', "行きたくないわけじゃないんですけど、今日はちょっと予定があって難しいかもしれません。"),
       document.fonts.load('700 18px "JetBrains Mono"', "It’s not that I don’t want to go, but I already have plans today."),
-      document.fonts.load('400 18px "Share Tech Mono"', "ARCADE SUBTITLE PREVIEW"),
+      document.fonts.load('400 18px "Share Tech Mono"', "FALLOUT SUBTITLE PREVIEW"),
     ]);
     const cleanup: Array<() => void> = [];
     void initialSession().then((value) => session = value);
@@ -56,14 +66,11 @@
         liveReady = status.present;
       });
       void listen<string>("tray-action", ({ payload }) => {
-        if (payload === "open_video") void chooseMedia();
-        else if (payload === "start_live") void startLive();
-        else if (payload === "languages") document.querySelector<HTMLElement>("#languages")?.focus();
-        else if (payload.startsWith("level_")) {
-          preferences.level = payload.slice(6) as typeof preferences.level;
-          void persist();
-        } else if (payload.startsWith("preset_")) {
-          preferences.style.preset = payload.slice(7) as SubtitlePreset;
+        if (payload === "languages") document.querySelector<HTMLElement>("#languages")?.focus();
+        const updated = applyPreferenceAction(preferences, payload);
+        if (updated) {
+          preferences = updated;
+          if (payload === "external_pause_on") void invoke("request_media_key_permission").catch(() => false);
           void persist();
         }
       }).then((unlisten) => cleanup.push(unlisten));
@@ -75,6 +82,13 @@
     await savePreferences(preferences);
   }
 
+  async function updateExternalPause() {
+    if (preferences.experimentalExternalPause && isTauri()) {
+      await invoke("request_media_key_permission").catch(() => false);
+    }
+    await persist();
+  }
+
   async function chooseMedia() {
     if (!isTauri()) {
       mediaMessage = "The browser preview uses deterministic Japanese fixtures.";
@@ -83,19 +97,15 @@
     const path = await open({ multiple: false, filters: [{ name: "Video", extensions: ["mp4", "mov"] }] });
     if (!path) return;
     busy = true;
-    mediaMessage = "Opening video and preparing compatible playback…";
     try {
-      const prepared = await invoke<{ path: string; file_name: string }>("prepare_media", { path });
-      mediaMessage = `Decoding ${prepared.file_name} locally…`;
-      const audio = await invoke<{ durationMs: number; chunkCount: number }>("prepare_audio");
-      mediaMessage = `${audio.chunkCount} audio chunk${audio.chunkCount === 1 ? "" : "s"} ready · analyzing`;
-      await persist();
-      await invoke("open_surface", { surface: "viewer" });
-      hideWhenViewerReady = true;
-      void invoke("start_analysis", { languages: preferences.languages, processingMode: preferences.processingMode }).catch((error) => {
-        hideWhenViewerReady = false;
-        mediaMessage = errorMessage(error);
+      await startFileSession(path, preferences, {
+        status: (message) => mediaMessage = message,
+        analysisError: (message) => {
+          hideWhenViewerReady = false;
+          mediaMessage = message;
+        },
       });
+      hideWhenViewerReady = true;
     } catch (error) {
       mediaMessage = errorMessage(error);
     } finally {
@@ -115,10 +125,7 @@
     busy = true;
     mediaMessage = "Choose a browser, window, or display in Apple’s sharing picker…";
     try {
-      await persist();
-      await invoke("open_surface", { surface: "overlay" });
-      await invoke("start_live_capture", { languages: preferences.languages, syncMode: preferences.sync.liveMode, processingMode: preferences.processingMode });
-      mediaMessage = "Listening · live audio is sent to OpenAI and never saved.";
+      await startLiveSession(preferences, { status: (message) => mediaMessage = message });
     } catch (error) {
       mediaMessage = errorMessage(error);
     } finally {
@@ -128,7 +135,13 @@
 
   async function selectLine(segment: SubtitleSegment) {
     selectedId = segment.id;
-    if (isTauri()) await invoke("select_lesson_segment", { segmentId: segment.id });
+    if (isTauri()) await invoke("open_lesson_composer", {
+      segmentId: segment.id,
+      sourceSurface: "workbench",
+      cursorX: window.innerWidth * .72,
+      cursorY: window.innerHeight * .35,
+      experimentalExternalPause: false,
+    });
   }
 
   async function saveApiKey() {
@@ -143,6 +156,7 @@
       await persist();
       onboarding = false;
       apiMessage = readiness.live ? "All models are ready." : "File mode is ready. Live translation is unavailable for this project.";
+      if (isTauri()) window.setTimeout(() => void invoke("hide_surface", { surface: "workbench" }), 700);
     } catch (error) { apiMessage = errorMessage(error); }
   }
 
@@ -158,12 +172,9 @@
   }
 
   function presetLabel(preset: SubtitlePreset) {
-    return ({ clean: "Clean", "classic-outline": "Classic Outline", "yellow-drop": "Yellow Drop", arcade: "Arcade", momento: "Momento Cutout", "cyberia": "Cyberia" })[preset];
+    return ({ clean: "Clean", "classic-outline": "Classic Outline", "yellow-drop": "Yellow Drop", fallout: "Fallout", momento: "Momento", wired: "Wired" })[preset];
   }
 
-  function errorMessage(error: unknown): string {
-    return typeof error === "object" && error && "message" in error ? String(error.message) : String(error);
-  }
 </script>
 
 <div class="workbench-shell">
@@ -174,7 +185,7 @@
 
   <main>
     <section class="command-deck">
-      <div class="intro"><span class="eyebrow">NONOSUB / CONTROL DECK</span><h1>Watch normally.<br><em>Understand everything.</em></h1><p>NonoSub disappears into the subtitles, then brings Nono back when a line deserves an explanation.</p></div>
+      <div class="intro"><span class="eyebrow">NONOSUB / SETTINGS & TRANSCRIPT</span><h1>Configure quietly.<br><em>Watch without an app.</em></h1><p>This diagnostic view holds setup, styling, language routing, transcript inspection, and recovery. Normal watching stays in the viewer or floating subtitles.</p></div>
       <div class="launch-grid">
         <button class="launch file" onclick={chooseMedia} disabled={busy}><span>LOCAL VIDEO</span><b>Open MP4 or MOV</b><small>Diarized · contextual · submission-ready</small></button>
         <button class="launch live" onclick={startLive} disabled={busy || !liveReady}><span>LIVE CAPTIONS</span><b>Listen to another app</b><small>Apple system-audio picker · macOS 14+</small></button>
@@ -190,6 +201,8 @@
         <label class="explanation">Nono explains in<select bind:value={preferences.languages.explanation} onchange={persist}>{#each LANGUAGE_OPTIONS.filter(([code]) => code !== "auto") as language}<option value={language[0]}>{language[1]}</option>{/each}</select></label>
         <label class="live-timing">Live timing<select bind:value={preferences.sync.liveMode} disabled={preferences.processingMode === "original_only"} onchange={persist}><option value="coordinated">Coordinated bilingual</option><option value="fast_source">Fast source</option></select></label>
         <p class="language-note">Display changes what you see. Caption processing controls whether NonoSub requests a translation. Original-only subtitles remain clickable for translation, language, and culture questions.</p>
+        <label class="external-pause"><input type="checkbox" bind:checked={preferences.experimentalExternalPause} onchange={updateExternalPause} /> Experimental: pause external media when Ask Nono opens</label>
+        <p class="external-note">Best effort. macOS may require Accessibility permission and does not guarantee which media app receives the play/pause key.</p>
         {#if session.mode && session.phase !== "complete" && session.processingMode !== preferences.processingMode}<p class="next-session">Processing change applies to the next session.</p>{/if}
       </section>
 
@@ -203,21 +216,21 @@
           <label>Effect <select bind:value={preferences.style.effect} onchange={persist}><option value="outline">Outline</option><option value="shadow">Shadow</option><option value="none">None</option></select></label>
           <label class="check"><input type="checkbox" bind:checked={preferences.style.showSpeakerNames} onchange={persist} /> Speaker names</label>
         </div>
-        {#if preferences.style.preset === "cyberia"}
-          <div class="cyberia-colors" aria-label="Cyberia colors">
-            <span>CYBERIA COLORS</span>
-            <label>Panel <input type="color" bind:value={preferences.style.cyberiaColors.panel} onchange={persist} /></label>
-            <label>Selected wash <input type="color" bind:value={preferences.style.cyberiaColors.wash} onchange={persist} /></label>
-            <label>Source text <input type="color" bind:value={preferences.style.cyberiaColors.sourceText} onchange={persist} /></label>
-            <label>Translation <input type="color" bind:value={preferences.style.cyberiaColors.translationText} onchange={persist} /></label>
-            <label>Metadata <input type="color" bind:value={preferences.style.cyberiaColors.metadata} onchange={persist} /></label>
-            <label>Fallback speaker <input type="color" bind:value={preferences.style.cyberiaColors.fallbackAccent} onchange={persist} /></label>
+        {#if preferences.style.preset === "wired"}
+          <div class="cyberia-colors" aria-label="Wired colors">
+            <span>WIRED COLORS</span>
+            <label>Panel <input type="color" bind:value={preferences.style.wiredColors.panel} onchange={persist} /></label>
+            <label>Selected wash <input type="color" bind:value={preferences.style.wiredColors.wash} onchange={persist} /></label>
+            <label>Source text <input type="color" bind:value={preferences.style.wiredColors.sourceText} onchange={persist} /></label>
+            <label>Translation <input type="color" bind:value={preferences.style.wiredColors.translationText} onchange={persist} /></label>
+            <label>Metadata <input type="color" bind:value={preferences.style.wiredColors.metadata} onchange={persist} /></label>
+            <label>Fallback speaker <input type="color" bind:value={preferences.style.wiredColors.fallbackAccent} onchange={persist} /></label>
           </div>
-        {:else if preferences.style.preset === "arcade"}
-          <div class="cyberia-colors arcade-colors" aria-label="Arcade colors">
-            <span>ARCADE COLORS</span>
-            <label>Terminal text <input type="color" bind:value={preferences.style.arcadeColors.text} onchange={persist} /></label>
-            <label>Dialogue strip <input type="color" bind:value={preferences.style.arcadeColors.panel} onchange={persist} /></label>
+        {:else if preferences.style.preset === "fallout"}
+          <div class="cyberia-colors arcade-colors" aria-label="Fallout colors">
+            <span>FALLOUT COLORS</span>
+            <label>Terminal text <input type="color" bind:value={preferences.style.falloutColors.text} onchange={persist} /></label>
+            <label>Dialogue strip <input type="color" bind:value={preferences.style.falloutColors.panel} onchange={persist} /></label>
           </div>
         {/if}
       </section>
@@ -249,5 +262,6 @@
 <style>
   .workbench-shell{height:100vh;display:grid;grid-template-rows:64px 1fr;background:#080a0f;color:#f8f8fc}.workbench-shell:before{content:"";position:fixed;inset:64px auto 0 0;width:3px;background:linear-gradient(#5fe8e1,#ff70b7 48%,transparent 90%)}header{display:flex;align-items:center;justify-content:space-between;padding:0 24px;border-bottom:1px solid #222833;background:#0b0e14}.brand{display:flex;align-items:center;gap:11px}.brand>span,.nono-mark{width:37px;height:37px;display:grid;place-items:center;background:#ff70b7;color:white;border-radius:8px;font-weight:900;box-shadow:0 0 24px #ff70b744}.brand b{display:block}.brand small{display:block;color:#767e8c;font-size:9px}.model-state{display:flex;align-items:center;gap:7px;color:#707986;font-size:8px;letter-spacing:.12em}.model-state i{width:6px;height:6px;border-radius:50%;background:#6b3141;margin-left:10px}.model-state i.ready{background:#68e7c5;box-shadow:0 0 10px #68e7c5}main{min-height:0;display:grid;grid-template-columns:minmax(620px,1fr) 390px}.command-deck{overflow-y:auto;padding:44px clamp(30px,5vw,74px);border-right:1px solid #222833;background:radial-gradient(circle at 7% 0,#182032 0,transparent 34%),linear-gradient(135deg,#080b10,#0c0e15)}.intro{max-width:720px}.eyebrow{font-size:8px;font-weight:900;letter-spacing:.18em;color:#69ddd9}.intro h1{font-size:43px;line-height:1.02;letter-spacing:-1.9px;margin:12px 0}.intro h1 em{font-style:normal;color:#ff70b7}.intro p{max-width:590px;color:#9098a7;font-size:12px;line-height:1.65}.launch-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:30px 0 10px}.launch{min-height:120px;text-align:left;padding:20px;border:1px solid #29313e;background:#10151e;color:white;position:relative;overflow:hidden}.launch:after{content:"";position:absolute;right:-30px;bottom:-40px;width:100px;height:100px;border:1px solid #6ce9e433;transform:rotate(45deg)}.launch.live{border-color:#ff70b755;background:#17121c}.launch span{display:block;color:#69ddd9;font-size:8px;letter-spacing:.16em;font-weight:900}.launch.live span{color:#ff83c1}.launch b{display:block;font-size:18px;margin:9px 0}.launch small{color:#727c89}.launch:disabled{opacity:.45}.status-line{height:34px;display:flex;align-items:center;gap:9px;border:1px solid #222a35;padding:0 12px;background:#0c1017;color:#8b94a1;font-size:9px}.status-line i{width:5px;height:5px;background:#69ddd9;box-shadow:0 0 8px #69ddd9}.status-line b{margin-left:auto;color:#ff83c1;font-size:8px}.language-panel,.styles{margin-top:28px;border:1px solid #252d39;background:#0d1118;padding:20px}.language-panel{display:grid;grid-template-columns:1.2fr 1fr auto 1fr;gap:12px;align-items:end}.language-panel h2,.styles h2,.rail-head h2{font-size:17px;margin:4px 0}.language-panel .explanation{grid-column:2/4}.language-panel .live-timing{grid-column:4}.language-note{grid-column:2/5;margin:0;color:#606b79;font-size:8px;line-height:1.45}.language-panel label,.fine-controls label,.section-head label,.modal label{display:grid;gap:6px;color:#77818d;font-size:8px;text-transform:uppercase;letter-spacing:.1em}.language-panel select,.fine-controls select,.modal input{border:1px solid #2b3441;background:#090d13;color:white;padding:9px}.arrow{padding-bottom:10px;color:#ff70b7}.section-head{display:flex;justify-content:space-between;align-items:end}.section-head input{accent-color:#ff70b7}.preset-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(92px,1fr));gap:6px;margin:15px 0}.preset-row button{border:1px solid #29313c;background:#121720;padding:9px 4px;font-size:8px}.preset-row button.chosen{border-color:#ff70b7;color:#ff9acb;background:#251522}.fine-controls{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end}.fine-controls input[type=range]{accent-color:#ff70b7}.check{display:flex!important;align-items:center!important;padding-bottom:9px}.cyberia-colors{display:grid;grid-template-columns:auto repeat(6,minmax(66px,1fr));gap:9px;align-items:end;margin-top:15px;padding-top:14px;border-top:1px solid #252d39}.arcade-colors{grid-template-columns:auto repeat(2,minmax(90px,160px))}.cyberia-colors>span{align-self:center;color:#4ac8ff;font-size:8px;font-weight:900;letter-spacing:.14em}.cyberia-colors label{display:grid;gap:5px;color:#77818d;font-size:7px;text-transform:uppercase;letter-spacing:.07em}.cyberia-colors input{width:100%;height:28px;border:1px solid #2b3441;background:#090d13;padding:2px}.transcript-rail{min-height:0;display:grid;grid-template-rows:70px 1fr auto 42px;background:#0b0e14}.rail-head{display:flex;align-items:center;justify-content:space-between;padding:0 17px;border-bottom:1px solid #222833}.rail-head>span{color:#697381;font-size:8px}.transcript{min-height:0;overflow-y:auto;padding:8px}.transcript>button{width:100%;display:grid;grid-template-columns:42px 1fr;gap:8px;text-align:left;border:1px solid transparent;background:none;color:inherit;padding:10px;border-radius:4px}.transcript>button:hover,.transcript>button.current{background:#111720;border-color:#283342}.transcript time{font-size:9px;color:#697381}.transcript strong{font-size:8px;text-transform:uppercase;letter-spacing:.09em}.transcript p{font-size:11px;margin:4px 0}.transcript span{display:block;color:#858d99;font-size:9px;line-height:1.4}.empty{margin:30px 18px;color:#626b78;font-size:11px;line-height:1.6}.speakers{border-top:1px solid #222833;padding:12px 16px}.speakers>div{display:flex;align-items:center;gap:7px;margin-top:8px}.speakers input[type=color]{width:15px;height:15px;border:0;padding:0;background:none}.speakers button{border:0;background:none;font-size:9px}.rename{width:110px;background:#090d13;color:white;border:1px solid #ff70b7}.privacy{border:0;border-top:1px solid #222833;background:#0e1219;color:#7c8591;font-size:8px;text-transform:uppercase;letter-spacing:.12em}.modal-backdrop{position:fixed;inset:0;z-index:50;display:grid;place-items:center;background:#04060bd9;backdrop-filter:blur(12px)}.modal{width:min(560px,90vw);position:relative;padding:30px;background:#10151e;border:1px solid #354050;box-shadow:0 30px 100px #000}.modal .close{position:absolute;right:14px;top:10px;border:0;background:none;color:#7d8590;font-size:24px}.nono-mark{margin-bottom:15px}.modal h1{font-size:29px;margin:8px 0}.modal>p{color:#969daa;font-size:11px;line-height:1.6}.privacy-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:18px 0}.privacy-grid div{display:grid;gap:5px;border:1px solid #293340;padding:13px}.privacy-grid b{color:#69ddd9;font-size:8px}.privacy-grid span{color:#818995;font-size:9px}.fine{background:#0a0e14;padding:12px}.modal label{margin-top:14px}.save{width:100%;margin-top:10px;border:0;background:linear-gradient(90deg,#db4e99,#795bea);padding:11px;color:white;font-weight:800}.api-message{color:#69ddd9!important}@media(max-width:1050px){main{grid-template-columns:1fr 340px}.command-deck{padding:30px}.preset-row{grid-template-columns:repeat(3,1fr)}.cyberia-colors{grid-template-columns:repeat(4,1fr)}.cyberia-colors>span{grid-column:1/-1}.arcade-colors{grid-template-columns:repeat(2,1fr)}.language-panel{grid-template-columns:1fr 1fr}.language-panel .explanation,.language-panel .live-timing,.language-note{grid-column:auto}.arrow{display:none}}
   .language-panel .processing{grid-column:2}.language-panel .explanation{grid-column:3}.language-note,.next-session{grid-column:2/5;margin:0;font-size:8px;line-height:1.45}.language-note{color:#606b79}.next-session{color:#ff9acb}.language-panel select:disabled,.fine-controls select:disabled{opacity:.52}
+  .language-panel .external-pause{grid-column:2/5;display:flex;align-items:center;gap:7px;text-transform:none;letter-spacing:0;color:#a8b0bc}.external-note{grid-column:2/5;margin:0;color:#6f7885;font-size:7px;line-height:1.4}
   @media(max-width:1050px){.language-panel .processing,.language-panel .explanation,.language-panel .live-timing,.language-note,.next-session{grid-column:auto}}
 </style>

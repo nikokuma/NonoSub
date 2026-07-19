@@ -29,10 +29,11 @@
   class="broadcast-card variant-{variant}"
   class:provisional={segment.isProvisional}
   class:degraded
+  class:live={Boolean(liveLabel)}
   style={`--broadcast-panel:rgba(0,0,0,${style.backgroundOpacity})`}
-  onclick={() => !segment.isProvisional && onselect(segment)}
+  onclick={(event) => event.detail === 0 && !segment.isProvisional && onselect(segment)}
   disabled={segment.isProvisional}
-  aria-label={segment.isProvisional ? "Caption in progress" : "Open this caption in Nono"}
+  aria-label={segment.isProvisional ? "Caption in progress" : "Right-click this caption to ask Nono"}
 >
   {#if liveLabel}<span class="live-signal">{liveLabel}</span>{/if}
   {#if style.showSpeakerNames && (speaker || segment.origin === "live")}
@@ -68,6 +69,7 @@
   .broadcast-card:disabled { cursor: default; }
   .caption-stack { display: grid; justify-items: center; gap: .08em; width: fit-content; max-width: 100%; min-width: 0; padding: .2em .62em .24em; background: var(--broadcast-panel); }
   .caption { display: block; width: fit-content; max-width: 100%; overflow-wrap: anywhere; word-break: auto-phrase; text-wrap: balance; }
+  .live .caption { text-wrap: wrap; }
   .source { font-size: 1em; font-weight: 700; line-height: 1.16; }
   .translation { font-size: .7em; font-weight: 700; line-height: 1.18; }
   .speaker, .live-signal { font-size: max(9px, .38em); font-weight: 700; letter-spacing: .1em; line-height: 1.05; text-transform: uppercase; }
@@ -109,7 +111,7 @@
   .broadcast-card:active:not(:disabled) .caption-stack { transform: scale(.985); }
 
   @media (prefers-reduced-motion: no-preference) {
-    .caption-stack { animation: caption-in 110ms ease-out both; }
+    .broadcast-card:not(.live) .caption-stack { animation: caption-in 110ms ease-out both; }
   }
 
   @keyframes caption-in {

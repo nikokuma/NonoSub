@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_LANGUAGES, DEFAULT_STYLE, DEFAULT_SYNC, type SpeakerProfile } from "./contracts";
 import { FIXTURE_SEGMENTS } from "./fixtures";
-import { buildTutorContext, effectiveStyle, parsePreferences, renameSpeaker, serializePreferences } from "./preferences";
+import { applyPreferenceAction, buildTutorContext, effectiveStyle, parsePreferences, renameSpeaker, serializePreferences } from "./preferences";
 
 describe("local preferences and tutor context", () => {
   it("round-trips styles and clamps persisted overlay position", () => {
-    const serialized = serializePreferences({ level: "advanced", style: { ...DEFAULT_STYLE, position: { x: 4, y: -2 } }, languages: DEFAULT_LANGUAGES, sync: DEFAULT_SYNC, processingMode: "translated", onboardingComplete: true });
+    const serialized = serializePreferences({ level: "advanced", style: { ...DEFAULT_STYLE, position: { x: 4, y: -2 } }, languages: DEFAULT_LANGUAGES, sync: DEFAULT_SYNC, processingMode: "translated", onboardingComplete: true, lessonPlacements: {}, experimentalExternalPause: false });
     const parsed = parsePreferences(serialized);
     expect(parsed?.level).toBe("advanced");
     expect(parsed?.style.position).toEqual({ x: 0.92, y: 0.12 });
@@ -17,7 +17,7 @@ describe("local preferences and tutor context", () => {
     expect(parsed?.processingMode).toBe("translated");
   });
 
-  it("migrates the placeholder Nono Pop preset to Momento Cutout", () => {
+  it("migrates the placeholder Nono Pop preset to Momento", () => {
     const parsed = parsePreferences(JSON.stringify({
       level: "beginner",
       style: { ...DEFAULT_STYLE, preset: "nono-pop" },
@@ -35,57 +35,61 @@ describe("local preferences and tutor context", () => {
     expect(parsed?.style.preset).toBe(DEFAULT_STYLE.preset);
   });
 
-  it("migrates older styles to the complete Cyberia palette", () => {
-    const legacyStyle = { ...DEFAULT_STYLE } as Partial<typeof DEFAULT_STYLE>;
-    delete legacyStyle.cyberiaColors;
+  it("migrates older styles to the complete Wired palette", () => {
+    const legacyStyle = { ...DEFAULT_STYLE } as Partial<typeof DEFAULT_STYLE> & { cyberiaColors?: typeof DEFAULT_STYLE.wiredColors };
+    delete legacyStyle.wiredColors;
     const parsed = parsePreferences(JSON.stringify({
       level: "beginner",
       style: legacyStyle,
       languages: DEFAULT_LANGUAGES,
     }));
-    expect(parsed?.style.cyberiaColors).toEqual(DEFAULT_STYLE.cyberiaColors);
+    expect(parsed?.style.wiredColors).toEqual(DEFAULT_STYLE.wiredColors);
   });
 
-  it("round-trips customized Cyberia colors", () => {
+  it("migrates Cyberia to Wired while preserving customized colors", () => {
     const style = {
       ...DEFAULT_STYLE,
-      preset: "cyberia" as const,
-      cyberiaColors: { ...DEFAULT_STYLE.cyberiaColors, panel: "#123456", sourceText: "#fedcba" },
-    };
-    const parsed = parsePreferences(serializePreferences({ level: "advanced", style, languages: DEFAULT_LANGUAGES, sync: DEFAULT_SYNC, processingMode: "translated", onboardingComplete: true }));
-    expect(parsed?.style.cyberiaColors.panel).toBe("#123456");
-    expect(parsed?.style.cyberiaColors.sourceText).toBe("#fedcba");
+      preset: "cyberia",
+      cyberiaColors: { ...DEFAULT_STYLE.wiredColors, panel: "#123456", sourceText: "#fedcba" },
+    } as unknown as Partial<typeof DEFAULT_STYLE> & { preset: string; cyberiaColors: typeof DEFAULT_STYLE.wiredColors };
+    delete style.wiredColors;
+    const parsed = parsePreferences(JSON.stringify({ level: "advanced", style, languages: DEFAULT_LANGUAGES }));
+    expect(parsed?.style.preset).toBe("wired");
+    expect(parsed?.style.wiredColors.panel).toBe("#123456");
+    expect(parsed?.style.wiredColors.sourceText).toBe("#fedcba");
   });
 
-  it.each(["classic-outline", "yellow-drop", "arcade"] as const)("round-trips the %s preset", (preset) => {
+  it.each(["classic-outline", "yellow-drop", "fallout"] as const)("round-trips the %s preset", (preset) => {
     const style = { ...DEFAULT_STYLE, preset };
-    const parsed = parsePreferences(serializePreferences({ level: "beginner", style, languages: DEFAULT_LANGUAGES, sync: DEFAULT_SYNC, processingMode: "translated", onboardingComplete: true }));
+    const parsed = parsePreferences(serializePreferences({ level: "beginner", style, languages: DEFAULT_LANGUAGES, sync: DEFAULT_SYNC, processingMode: "translated", onboardingComplete: true, lessonPlacements: {}, experimentalExternalPause: false }));
     expect(parsed?.style.preset).toBe(preset);
   });
 
-  it("migrates older styles to the default Arcade palette", () => {
+  it("migrates older styles to the default Fallout palette", () => {
     const legacyStyle = { ...DEFAULT_STYLE } as Partial<typeof DEFAULT_STYLE>;
-    delete legacyStyle.arcadeColors;
+    delete legacyStyle.falloutColors;
     const parsed = parsePreferences(JSON.stringify({
       level: "beginner",
       style: legacyStyle,
       languages: DEFAULT_LANGUAGES,
     }));
-    expect(parsed?.style.arcadeColors).toEqual(DEFAULT_STYLE.arcadeColors);
+    expect(parsed?.style.falloutColors).toEqual(DEFAULT_STYLE.falloutColors);
   });
 
-  it("round-trips a green Arcade terminal palette", () => {
+  it("migrates Arcade to Fallout while preserving a green terminal palette", () => {
     const style = {
       ...DEFAULT_STYLE,
-      preset: "arcade" as const,
+      preset: "arcade",
       arcadeColors: { text: "#53ff9b", panel: "#071109" },
-    };
-    const parsed = parsePreferences(serializePreferences({ level: "advanced", style, languages: DEFAULT_LANGUAGES, sync: DEFAULT_SYNC, processingMode: "translated", onboardingComplete: true }));
-    expect(parsed?.style.arcadeColors).toEqual(style.arcadeColors);
+    } as unknown as Partial<typeof DEFAULT_STYLE> & { preset: string; arcadeColors: typeof DEFAULT_STYLE.falloutColors };
+    delete style.falloutColors;
+    const parsed = parsePreferences(JSON.stringify({ level: "advanced", style, languages: DEFAULT_LANGUAGES }));
+    expect(parsed?.style.preset).toBe("fallout");
+    expect(parsed?.style.falloutColors).toEqual(style.arcadeColors);
   });
 
   it("round-trips original-only processing", () => {
-    const parsed = parsePreferences(serializePreferences({ level: "beginner", style: DEFAULT_STYLE, languages: DEFAULT_LANGUAGES, sync: DEFAULT_SYNC, processingMode: "original_only", onboardingComplete: true }));
+    const parsed = parsePreferences(serializePreferences({ level: "beginner", style: DEFAULT_STYLE, languages: DEFAULT_LANGUAGES, sync: DEFAULT_SYNC, processingMode: "original_only", onboardingComplete: true, lessonPlacements: {}, experimentalExternalPause: false }));
     expect(parsed?.processingMode).toBe("original_only");
   });
 
@@ -105,5 +109,30 @@ describe("local preferences and tutor context", () => {
   it("includes selected, preceding, and available following dialogue", () => {
     const context = buildTutorContext(FIXTURE_SEGMENTS, "seg-4", 2, 1);
     expect(context.map((segment) => segment.id)).toEqual(["seg-2", "seg-3", "seg-4", "seg-5"]);
+  });
+
+  it("migrates and clamps normalized lesson placement", () => {
+    const parsed = parsePreferences(JSON.stringify({
+      level: "beginner",
+      style: DEFAULT_STYLE,
+      languages: DEFAULT_LANGUAGES,
+      lessonPlacements: { display: { monitorKey: "display", x: 2, y: -1 } },
+    }));
+    expect(parsed?.lessonPlacements.display).toEqual({ monitorKey: "display", x: 1, y: 0 });
+  });
+
+  it("applies native menu preference actions without mutating input", () => {
+    const base = parsePreferences(JSON.stringify({ level: "beginner", style: DEFAULT_STYLE, languages: DEFAULT_LANGUAGES }))!;
+    const updated = applyPreferenceAction(base, "display_source");
+    expect(updated?.style.displayMode).toBe("source");
+    expect(base.style.displayMode).toBe("both");
+    expect(applyPreferenceAction(base, "live_mode_fast_source")?.sync.liveMode).toBe("fast_source");
+    expect(base.experimentalExternalPause).toBe(false);
+    expect(applyPreferenceAction(base, "external_pause_on")?.experimentalExternalPause).toBe(true);
+  });
+
+  it("defaults experimental external pause off for v3 preferences", () => {
+    const parsed = parsePreferences(JSON.stringify({ level: "beginner", style: DEFAULT_STYLE, languages: DEFAULT_LANGUAGES }));
+    expect(parsed?.experimentalExternalPause).toBe(false);
   });
 });

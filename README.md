@@ -10,11 +10,11 @@ Built from scratch for OpenAI Build Week 2026 in the Education category using Co
 
 The repository currently contains:
 
-- a menu-bar controller plus separate Wired workbench, borderless viewer, compact live overlay, and floating lesson windows;
+- a menu-bar-first controller plus a temporary Clop-like file/live launcher, borderless viewer, compact live overlay, transparent chalkboard lesson, and optional Settings & Transcript workbench;
 - local MP4/MOV playback through Tauri's range-capable scoped asset protocol;
 - generalized source, subtitle, and explanation languages with an in-memory canonical session shared across every window;
-- synchronized bilingual or fast original-only overlays, transcript history, click-to-pause/resume ownership, speaker rename/color, persistent placement, live Settings previews, and six focused subtitle presets: Clean, Classic Outline, Yellow Drop, Arcade, Momento Cutout, and Cyberia;
-- Beginner, Intermediate, and Advanced progressive chalkboard lessons with one-to-three focused teaching moments, GPT-selected chalk colors/marks, deterministic diagrams, and scroll-preserving follow-up history;
+- synchronized bilingual or fast original-only overlays, transcript history, Ask Nono pause/resume ownership, speaker rename/color, persistent placement, live Settings previews, and six focused subtitle presets: Clean, Classic Outline, Yellow Drop, Fallout, Momento, and Wired;
+- Beginner, Intermediate, and Advanced progressive chalkboard lessons with one-to-three focused teaching moments, GPT-selected chalk colors/marks, deterministic diagrams, and a collapsed-by-default scroll-preserving follow-up drawer;
 - a full-stage Three.js Nono presentation with bounded twin-tail point/underline cues, reduced-motion support, and a complete chalk-only fallback;
 - a production character pipeline with a single canonical armature, export-only body masking, four-influence weight cleanup, restrained procedural hair follow-through, 130%-bounded tail reach, portable materials, a native `NonoToon` shader, and a development-only partial NonToon comparison;
 - OS credential-vault storage for the OpenAI key, a non-sensitive local configured marker, and live model-access validation;

@@ -20,10 +20,30 @@ export type SubtitlePreset =
   | "clean"
   | "classic-outline"
   | "yellow-drop"
-  | "arcade"
+  | "fallout"
   | "momento"
-  | "cyberia";
-export type AppSurface = "workbench" | "viewer" | "overlay" | "lesson";
+  | "wired";
+export type AppSurface = "workbench" | "viewer" | "overlay" | "lesson" | "launcher";
+export type LauncherMode = "file" | "live";
+export type LauncherState = "idle" | "hovering" | "preparing" | "starting" | "error";
+
+export interface LessonPlacement {
+  monitorKey: string;
+  x: number;
+  y: number;
+}
+
+export type LessonSurfaceMode = "compose" | "thinking" | "lesson" | "error";
+
+export interface LessonOpenContext {
+  sourceSurface: "viewer" | "overlay" | "workbench";
+  segmentId: string;
+  cursorX: number;
+  cursorY: number;
+  externalMediaControl: ExternalMediaControlResult;
+}
+
+export type ExternalMediaControlResult = "not_requested" | "paused" | "permission_required" | "failed" | "unsupported";
 
 export interface LanguageSettings {
   source: "auto" | string;
@@ -63,7 +83,7 @@ export interface SpeakerProfile {
   reference?: { startMs: number; endMs: number };
 }
 
-export interface CyberiaColors {
+export interface WiredColors {
   panel: string;
   wash: string;
   sourceText: string;
@@ -72,7 +92,7 @@ export interface CyberiaColors {
   fallbackAccent: string;
 }
 
-export interface ArcadeColors {
+export interface FalloutColors {
   text: string;
   panel: string;
 }
@@ -88,8 +108,8 @@ export interface StyleSettings {
   effect: "none" | "outline" | "shadow";
   displayMode: SubtitleDisplayMode;
   showSpeakerNames: boolean;
-  cyberiaColors: CyberiaColors;
-  arcadeColors: ArcadeColors;
+  wiredColors: WiredColors;
+  falloutColors: FalloutColors;
 }
 
 export interface BoardSection {
@@ -232,7 +252,7 @@ export const DEFAULT_STYLE: StyleSettings = {
   effect: "outline",
   displayMode: "both",
   showSpeakerNames: true,
-  cyberiaColors: {
+  wiredColors: {
     panel: "#05081c",
     wash: "#0b2944",
     sourceText: "#c9e6fa",
@@ -240,7 +260,7 @@ export const DEFAULT_STYLE: StyleSettings = {
     metadata: "#5fa8dc",
     fallbackAccent: "#4ac8ff",
   },
-  arcadeColors: {
+  falloutColors: {
     text: "#f0a14a",
     panel: "#0b0d08",
   },

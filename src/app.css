@@ -18,7 +18,9 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; width: 100%; min-height: 100%; overflow: hidden; }
-html[data-surface="overlay"], html[data-surface="overlay"] body { background: transparent !important; }
+html[data-surface="overlay"], html[data-surface="overlay"] body,
+html[data-surface="lesson"], html[data-surface="lesson"] body,
+html[data-surface="launcher"], html[data-surface="launcher"] body { background: transparent !important; }
 body { min-height: 100vh; background: #080a0f; }
 button, input, select, textarea { font: inherit; }
 button { color: inherit; cursor: pointer; }

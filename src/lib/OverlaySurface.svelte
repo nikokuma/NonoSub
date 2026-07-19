@@ -2,21 +2,34 @@
   import { onMount } from "svelte";
   import { invoke, isTauri } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import { PhysicalPosition, PhysicalSize, currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
-  import type { SessionState, SubtitleSegment } from "./contracts";
+  import { LogicalSize, PhysicalPosition, currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
+  import type { SessionState, SubtitlePreset, SubtitleSegment } from "./contracts";
   import { EMPTY_SESSION } from "./contracts";
   import { FIXTURE_EVENTS } from "./fixtures";
   import { reduceSession, visibleLiveSegments } from "./session";
   import { effectiveStyle } from "./preferences";
   import { initialSession, loadPreferences, savePreferences, subscribePreferences, subscribeSession } from "./runtime";
+  import { resolveOverlayGeometry } from "./overlayGeometry";
   import LiveSubtitleStack from "./LiveSubtitleStack.svelte";
 
   let session = $state<SessionState>(FIXTURE_EVENTS.reduce(reduceSession, structuredClone(EMPTY_SESSION)));
   let preferences = $state(loadPreferences());
   let arranging = $state(false);
   let visible = $state(true);
+  let suppressSelection = false;
+  let dragCandidate: { pointerId: number; startX: number; startY: number; target: HTMLElement } | null = null;
+  let dragging = $state(false);
+  let captionHost: HTMLDivElement;
+  let fitTimer: ReturnType<typeof setTimeout> | undefined;
+  let suppressPlacementUntil = 0;
+  const fixturePreset = typeof window !== "undefined" && !isTauri()
+    ? parseFixturePreset(new URLSearchParams(window.location.search).get("preset"))
+    : undefined;
   const captions = $derived(session.mode === "live" ? visibleLiveSegments(session.segments, session.liveSync) : session.segments.slice(-1));
-  const activeStyle = $derived(effectiveStyle(preferences.style, session.processingMode));
+  const activeStyle = $derived({
+    ...effectiveStyle(preferences.style, session.processingMode),
+    preset: fixturePreset ?? effectiveStyle(preferences.style, session.processingMode).preset,
+  });
   const waitingLabel = $derived(session.phase === "reconnecting"
     ? "Reconnecting to Nono…"
     : session.processingMode === "original_only"
@@ -24,6 +37,12 @@
     : session.mode === "live" && session.segments.length > 0
       ? "Nono is coordinating subtitles…"
       : "Listening for speech…");
+
+  function parseFixturePreset(value: string | null): SubtitlePreset | undefined {
+    return value && ["clean", "classic-outline", "yellow-drop", "fallout", "momento", "wired"].includes(value)
+      ? value as SubtitlePreset
+      : undefined;
+  }
 
   onMount(() => {
     document.documentElement.dataset.surface = "overlay";
@@ -33,13 +52,15 @@
     void subscribePreferences((value) => preferences = value).then((unlisten) => cleanup.push(unlisten));
     if (isTauri()) void listen<string>("tray-action", ({ payload }) => {
       if (payload === "arrange_overlay") arranging = !arranging;
+      if (payload === "show_subtitles") visible = true;
       if (payload === "toggle_subtitles") visible = !visible;
     }).then((unlisten) => cleanup.push(unlisten));
     if (isTauri()) {
       const overlayWindow = getCurrentWindow();
-      void restorePlacement();
+      void restorePlacement().then(() => scheduleContentFit());
       let placementTimer: ReturnType<typeof setTimeout> | undefined;
       void overlayWindow.onMoved(() => {
+        if (performance.now() < suppressPlacementUntil) return;
         if (placementTimer) clearTimeout(placementTimer);
         placementTimer = setTimeout(() => void rememberPlacement(), 180);
       }).then((unlisten) => cleanup.push(() => {
@@ -47,34 +68,133 @@
         unlisten();
       }));
       void overlayWindow.onResized(() => {
+        if (performance.now() < suppressPlacementUntil) return;
         if (placementTimer) clearTimeout(placementTimer);
         placementTimer = setTimeout(() => void rememberPlacement(), 180);
       }).then((unlisten) => cleanup.push(unlisten));
+
+      const contentObserver = new ResizeObserver(() => scheduleContentFit());
+      if (captionHost) contentObserver.observe(captionHost);
+      cleanup.push(() => {
+        contentObserver.disconnect();
+        if (fitTimer) clearTimeout(fitTimer);
+      });
     }
     return () => cleanup.forEach((stop) => stop());
   });
 
   async function selectLine(segment: SubtitleSegment) {
-    if (isTauri()) await invoke("select_lesson_segment", { segmentId: segment.id });
+    if (suppressSelection) {
+      suppressSelection = false;
+      return;
+    }
+    if (isTauri()) await invoke("open_lesson_composer", {
+      segmentId: segment.id,
+      sourceSurface: "overlay",
+      cursorX: window.innerWidth / 2,
+      cursorY: window.innerHeight / 2,
+      experimentalExternalPause: preferences.experimentalExternalPause,
+    });
   }
 
-  async function startDragging() {
-    if (isTauri()) await getCurrentWindow().startDragging();
+  async function openComposer(event: MouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    const segmentId = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-segment-id]")?.dataset.segmentId;
+    const segment = session.segments.find((candidate) => candidate.id === segmentId);
+    if (!isTauri() || !segment || segment.isProvisional) return;
+    await invoke("open_lesson_composer", {
+      segmentId: segment.id,
+      sourceSurface: "overlay",
+      cursorX: event.clientX,
+      cursorY: event.clientY,
+      experimentalExternalPause: preferences.experimentalExternalPause,
+    });
+  }
+
+  function suppressLookup(node: HTMLElement) {
+    const prevent = (event: Event) => event.preventDefault();
+    for (const name of ["selectstart", "dragstart", "webkitmouseforcewillbegin"]) node.addEventListener(name, prevent);
+    return { destroy: () => {
+      for (const name of ["selectstart", "dragstart", "webkitmouseforcewillbegin"]) node.removeEventListener(name, prevent);
+    } };
+  }
+
+  function beginDragging(event: PointerEvent) {
+    if (!isTauri() || event.button !== 0) return;
+    const target = event.currentTarget as HTMLElement;
+    target.setPointerCapture(event.pointerId);
+    dragCandidate = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      target,
+    };
+  }
+
+  function moveDragging(event: PointerEvent) {
+    if (!dragCandidate || dragCandidate.pointerId !== event.pointerId || dragging) return;
+    if (Math.hypot(event.clientX - dragCandidate.startX, event.clientY - dragCandidate.startY) < 6) return;
+    dragging = true;
+    suppressSelection = true;
+    void getCurrentWindow().startDragging().finally(() => {
+      dragging = false;
+      dragCandidate = null;
+      window.setTimeout(() => suppressSelection = false, 350);
+    });
+  }
+
+  function finishDragging(event: PointerEvent) {
+    if (dragCandidate?.target.hasPointerCapture(event.pointerId)) dragCandidate.target.releasePointerCapture(event.pointerId);
+    if (!dragging) dragCandidate = null;
   }
 
   async function restorePlacement() {
     const monitor = await currentMonitor();
     if (!monitor) return;
     const overlayWindow = getCurrentWindow();
-    const width = Math.min(preferences.style.overlayWidth, monitor.size.width * 0.9);
-    const height = Math.min(220, monitor.size.height * 0.3);
-    await overlayWindow.setSize(new PhysicalSize(width, height));
-    const x = monitor.position.x + preferences.style.overlayPosition.x * monitor.size.width - width / 2;
-    const y = monitor.position.y + preferences.style.overlayPosition.y * monitor.size.height - height / 2;
-    await overlayWindow.setPosition(new PhysicalPosition(
-      Math.round(Math.min(monitor.position.x + monitor.size.width - width, Math.max(monitor.position.x, x))),
-      Math.round(Math.min(monitor.position.y + monitor.size.height - height, Math.max(monitor.position.y, y))),
-    ));
+    const geometry = overlayGeometry(monitor, 180);
+    suppressPlacementUntil = performance.now() + 500;
+    await overlayWindow.setSize(new LogicalSize(geometry.logicalWidth, geometry.logicalHeight));
+    await overlayWindow.setPosition(new PhysicalPosition(geometry.physicalX, geometry.physicalY));
+  }
+
+  function scheduleContentFit() {
+    if (!isTauri()) return;
+    if (fitTimer) clearTimeout(fitTimer);
+    fitTimer = setTimeout(() => void fitWindowToContent(), 34);
+  }
+
+  async function fitWindowToContent() {
+    const monitor = await currentMonitor();
+    if (!monitor || !captionHost) return;
+    const contentHeight = Math.ceil(captionHost.getBoundingClientRect().height);
+    if (!Number.isFinite(contentHeight) || contentHeight <= 0) return;
+    const geometry = overlayGeometry(monitor, contentHeight);
+    const overlayWindow = getCurrentWindow();
+    const currentSize = await overlayWindow.innerSize();
+    const sizeChanged = Math.abs(currentSize.width - geometry.physicalWidth) > 2
+      || Math.abs(currentSize.height - geometry.physicalHeight) > 2;
+    suppressPlacementUntil = performance.now() + 500;
+    if (sizeChanged) await overlayWindow.setSize(new LogicalSize(geometry.logicalWidth, geometry.logicalHeight));
+    await overlayWindow.setPosition(new PhysicalPosition(geometry.physicalX, geometry.physicalY));
+  }
+
+  function overlayGeometry(
+    monitor: NonNullable<Awaited<ReturnType<typeof currentMonitor>>>,
+    contentHeight: number,
+  ) {
+    return resolveOverlayGeometry({
+      x: monitor.position.x,
+      y: monitor.position.y,
+      width: monitor.size.width,
+      height: monitor.size.height,
+      scaleFactor: monitor.scaleFactor || 1,
+    }, {
+      normalizedPosition: preferences.style.overlayPosition,
+      preferredLogicalWidth: preferences.style.overlayWidth,
+      contentLogicalHeight: contentHeight,
+    });
   }
 
   async function rememberPlacement() {
@@ -82,21 +202,37 @@
     if (!monitor) return;
     const overlayWindow = getCurrentWindow();
     const [position, size] = await Promise.all([overlayWindow.outerPosition(), overlayWindow.outerSize()]);
+    const scale = monitor.scaleFactor || 1;
     preferences.style.overlayPosition = {
       x: Math.min(.95, Math.max(.05, (position.x + size.width / 2 - monitor.position.x) / monitor.size.width)),
       y: Math.min(.95, Math.max(.05, (position.y + size.height / 2 - monitor.position.y) / monitor.size.height)),
     };
-    preferences.style.overlayWidth = size.width;
+    preferences.style.overlayWidth = size.width / scale;
     await savePreferences(preferences);
   }
 </script>
 
-<div class="overlay-shell" class:hidden={!visible} class:arranging>
-  {#if arranging}<button class="grip" onpointerdown={startDragging}>⠿ MOVE NONOSUB</button>{/if}
-  {#if captions.length > 0}<LiveSubtitleStack segment={captions[0]} speaker={captions[0].speakerId ? session.speakers[captions[0].speakerId] : undefined} style={activeStyle} sync={session.liveSync} processingMode={session.processingMode} onselect={selectLine} />{:else}<div class="waiting"><i></i>{waitingLabel}</div>{/if}
-  {#if session.fatalError}<div class="error">{session.fatalError}</div>{/if}
+<div
+  class="overlay-shell"
+  class:hidden={!visible}
+  class:arranging
+  class:dragging
+  use:suppressLookup
+  oncontextmenu={openComposer}
+  onpointerdown={beginDragging}
+  onpointermove={moveDragging}
+  onpointerup={finishDragging}
+  onpointercancel={finishDragging}
+  role="group"
+  aria-label="Live subtitle overlay. Drag to reposition; right-click to ask Nono."
+>
+  {#if arranging}<div class="grip" aria-hidden="true">⠿ DRAG NONOSUB</div>{/if}
+  <div class="caption-host" bind:this={captionHost}>
+    {#if captions.length > 0}<LiveSubtitleStack segment={captions[0]} speaker={captions[0].speakerId ? session.speakers[captions[0].speakerId] : undefined} style={activeStyle} sync={session.liveSync} processingMode={session.processingMode} onselect={selectLine} />{:else}<div class="waiting"><i></i>{waitingLabel}</div>{/if}
+    {#if session.fatalError}<div class="error">{session.fatalError}</div>{/if}
+  </div>
 </div>
 
 <style>
-  .overlay-shell{position:fixed;inset:0;display:grid;place-content:center;background:transparent;padding:20px}.overlay-shell.hidden{opacity:0;pointer-events:none}.overlay-shell.arranging{border:1px dashed #71e7df88;background:#0710161f}.grip{position:absolute;left:50%;top:4px;transform:translateX(-50%);border:1px solid #6de8df66;background:#08121bd9;color:#77e8df;border-radius:10px;padding:4px 10px;font-size:8px;letter-spacing:.14em}.waiting{display:flex;align-items:center;gap:9px;padding:8px 12px;border:1px solid #ffffff20;background:#080b11d9;border-radius:8px;color:#aeb5c0;font-size:10px}.waiting i{width:6px;height:6px;border-radius:50%;background:#70e7c6;box-shadow:0 0 10px #70e7c6}.error{position:absolute;left:50%;bottom:4px;transform:translateX(-50%);background:#280e18e8;color:#ffafd1;padding:5px 10px;border-radius:5px;font-size:8px}
+  .overlay-shell{position:fixed;inset:0;display:grid;place-content:center;background:transparent;padding:20px;cursor:grab;touch-action:none}.caption-host{width:100%;min-width:0;display:grid;place-items:center}.overlay-shell.dragging{cursor:grabbing}.overlay-shell.hidden{opacity:0;pointer-events:none}.overlay-shell.arranging{border:1px dashed #71e7df88;background:#0710161f}.grip{position:absolute;left:50%;top:4px;transform:translateX(-50%);border:1px solid #6de8df66;background:#08121bd9;color:#77e8df;border-radius:10px;padding:4px 10px;font-size:8px;letter-spacing:.14em;pointer-events:none}.waiting{display:flex;align-items:center;gap:9px;padding:8px 12px;border:1px solid #ffffff20;background:#080b11d9;border-radius:8px;color:#aeb5c0;font-size:10px}.waiting i{width:6px;height:6px;border-radius:50%;background:#70e7c6;box-shadow:0 0 10px #70e7c6}.error{margin-top:6px;background:#280e18e8;color:#ffafd1;padding:5px 10px;border-radius:5px;font-size:8px}
 </style>

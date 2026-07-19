@@ -1,4 +1,4 @@
-import { DEFAULT_LANGUAGES, DEFAULT_STYLE, DEFAULT_SYNC, type CaptionProcessingMode, type LanguageSettings, type LearnerLevel, type SpeakerProfile, type StyleSettings, type SubtitleSegment, type SyncSettings } from "./contracts";
+import { DEFAULT_LANGUAGES, DEFAULT_STYLE, DEFAULT_SYNC, type CaptionProcessingMode, type LanguageSettings, type LearnerLevel, type LessonPlacement, type SpeakerProfile, type StyleSettings, type SubtitleSegment, type SyncSettings } from "./contracts";
 
 export interface Preferences {
   style: StyleSettings;
@@ -7,6 +7,8 @@ export interface Preferences {
   sync: SyncSettings;
   processingMode: CaptionProcessingMode;
   onboardingComplete: boolean;
+  lessonPlacements: Record<string, LessonPlacement>;
+  experimentalExternalPause: boolean;
 }
 
 export function serializePreferences(preferences: Preferences): string {
@@ -20,9 +22,17 @@ export function parsePreferences(serialized: string): Preferences | undefined {
     const savedPreset = (parsed.style as { preset?: string }).preset;
     const preset = savedPreset === "nono-pop"
       ? "momento"
-      : ["clean", "classic-outline", "yellow-drop", "arcade", "momento", "cyberia"].includes(savedPreset ?? "")
-        ? savedPreset
-        : DEFAULT_STYLE.preset;
+      : savedPreset === "cyberia"
+        ? "wired"
+        : savedPreset === "arcade"
+          ? "fallout"
+          : ["clean", "classic-outline", "yellow-drop", "fallout", "momento", "wired"].includes(savedPreset ?? "")
+            ? savedPreset
+            : DEFAULT_STYLE.preset;
+    const legacyStyle = parsed.style as Partial<StyleSettings> & {
+      cyberiaColors?: StyleSettings["wiredColors"];
+      arcadeColors?: StyleSettings["falloutColors"];
+    };
     return {
       level: parsed.level as LearnerLevel,
       languages: {
@@ -31,6 +41,8 @@ export function parsePreferences(serialized: string): Preferences | undefined {
         explanation: parsed.languages?.explanation ?? parsed.languages?.target ?? DEFAULT_LANGUAGES.explanation,
       },
       onboardingComplete: parsed.onboardingComplete ?? false,
+      lessonPlacements: parseLessonPlacements(parsed.lessonPlacements),
+      experimentalExternalPause: parsed.experimentalExternalPause === true,
       processingMode: parsed.processingMode === "original_only" ? "original_only" : "translated",
       sync: {
         liveMode: parsed.sync?.liveMode === "fast_source" ? "fast_source" : DEFAULT_SYNC.liveMode,
@@ -48,19 +60,37 @@ export function parsePreferences(serialized: string): Preferences | undefined {
           y: clamp(parsed.style.overlayPosition?.y ?? DEFAULT_STYLE.overlayPosition.y, 0.05, 0.95),
         },
         overlayWidth: clamp(parsed.style.overlayWidth ?? DEFAULT_STYLE.overlayWidth, 520, 1200),
-        cyberiaColors: {
-          ...DEFAULT_STYLE.cyberiaColors,
-          ...parsed.style.cyberiaColors,
+        wiredColors: {
+          ...DEFAULT_STYLE.wiredColors,
+          ...(legacyStyle.cyberiaColors ?? {}),
+          ...legacyStyle.wiredColors,
         },
-        arcadeColors: {
-          ...DEFAULT_STYLE.arcadeColors,
-          ...parsed.style.arcadeColors,
+        falloutColors: {
+          ...DEFAULT_STYLE.falloutColors,
+          ...(legacyStyle.arcadeColors ?? {}),
+          ...legacyStyle.falloutColors,
         },
       },
     };
   } catch {
     return undefined;
   }
+}
+
+function parseLessonPlacements(value: unknown): Record<string, LessonPlacement> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const placements: Record<string, LessonPlacement> = {};
+  for (const [key, candidate] of Object.entries(value)) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const placement = candidate as Partial<LessonPlacement>;
+    if (!Number.isFinite(placement.x) || !Number.isFinite(placement.y)) continue;
+    placements[key] = {
+      monitorKey: typeof placement.monitorKey === "string" && placement.monitorKey ? placement.monitorKey : key,
+      x: clamp(placement.x as number, 0, 1),
+      y: clamp(placement.y as number, 0, 1),
+    };
+  }
+  return placements;
 }
 
 export function renameSpeaker(
@@ -87,6 +117,45 @@ export function buildTutorContext(
 
 export function effectiveStyle(style: StyleSettings, processingMode: CaptionProcessingMode): StyleSettings {
   return processingMode === "original_only" ? { ...style, displayMode: "source" } : style;
+}
+
+export function applyPreferenceAction(preferences: Preferences, action: string): Preferences | undefined {
+  if (action.startsWith("preset_")) {
+    const preset = action.slice(7);
+    if (!["clean", "classic-outline", "yellow-drop", "fallout", "momento", "wired"].includes(preset)) return undefined;
+    return { ...preferences, style: { ...preferences.style, preset: preset as StyleSettings["preset"] } };
+  }
+  if (action.startsWith("level_")) {
+    const level = action.slice(6);
+    if (!["beginner", "intermediate", "advanced"].includes(level)) return undefined;
+    return { ...preferences, level: level as LearnerLevel };
+  }
+  if (action.startsWith("display_")) {
+    const displayMode = action.slice(8);
+    if (!["source", "translation", "both"].includes(displayMode)) return undefined;
+    return { ...preferences, style: { ...preferences.style, displayMode: displayMode as StyleSettings["displayMode"] } };
+  }
+  if (action === "live_mode_coordinated" || action === "live_mode_fast_source") {
+    return {
+      ...preferences,
+      sync: { liveMode: action === "live_mode_fast_source" ? "fast_source" : "coordinated" },
+    };
+  }
+  if (action === "toggle_speaker_names") {
+    return {
+      ...preferences,
+      style: { ...preferences.style, showSpeakerNames: !preferences.style.showSpeakerNames },
+    };
+  }
+  if (action === "external_pause_on" || action === "external_pause_off" || action === "toggle_external_pause") {
+    return {
+      ...preferences,
+      experimentalExternalPause: action === "toggle_external_pause"
+        ? !preferences.experimentalExternalPause
+        : action === "external_pause_on",
+    };
+  }
+  return undefined;
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {

@@ -11,11 +11,11 @@ import {
   type SessionState,
   type StyleSettings,
 } from "./contracts";
-import { FIXTURE_EVENTS, LONG_LIVE_FIXTURE_EVENTS, ORIGINAL_ONLY_FIXTURE_EVENTS } from "./fixtures";
+import { FIXTURE_EVENTS, LONG_LIVE_FIXTURE_EVENTS, ORIGINAL_ONLY_FIXTURE_EVENTS, OVERLAP_FILE_FIXTURE_EVENTS } from "./fixtures";
 import { parsePreferences, serializePreferences, type Preferences } from "./preferences";
 import { applySequencedEvent, reduceSession } from "./session";
 
-const PREFERENCES_KEY = "nonosub-preferences-v2";
+const PREFERENCES_KEY = "nonosub-preferences-v4";
 
 export function defaultPreferences(): Preferences {
   return {
@@ -25,12 +25,17 @@ export function defaultPreferences(): Preferences {
     sync: { ...DEFAULT_SYNC },
     processingMode: "translated",
     onboardingComplete: false,
+    lessonPlacements: {},
+    experimentalExternalPause: false,
   };
 }
 
 export function loadPreferences(): Preferences {
   if (typeof localStorage === "undefined") return defaultPreferences();
-  const saved = localStorage.getItem(PREFERENCES_KEY) ?? localStorage.getItem("nonosub-preferences");
+  const saved = localStorage.getItem(PREFERENCES_KEY)
+    ?? localStorage.getItem("nonosub-preferences-v3")
+    ?? localStorage.getItem("nonosub-preferences-v2")
+    ?? localStorage.getItem("nonosub-preferences");
   return saved ? parsePreferences(saved) ?? defaultPreferences() : defaultPreferences();
 }
 
@@ -52,6 +57,8 @@ export async function initialSession(): Promise<SessionState> {
     const fixtureName = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("fixture") : undefined;
     const fixture = fixtureName === "live-long"
       ? LONG_LIVE_FIXTURE_EVENTS
+      : fixtureName === "overlap-long"
+        ? OVERLAP_FILE_FIXTURE_EVENTS
       : fixtureName === "original-only"
         ? ORIGINAL_ONLY_FIXTURE_EVENTS
         : FIXTURE_EVENTS;

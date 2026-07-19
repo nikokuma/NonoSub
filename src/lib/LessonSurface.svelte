@@ -1,18 +1,21 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { invoke, isTauri } from "@tauri-apps/api/core";
-  import { emit } from "@tauri-apps/api/event";
-  import type { LessonCard, LessonMessage, SessionState, SubtitleSegment } from "./contracts";
+  import { listen } from "@tauri-apps/api/event";
+  import { LogicalSize, PhysicalPosition, currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
+  import type { LessonCard, LessonMessage, LessonOpenContext, LessonSurfaceMode, SessionState } from "./contracts";
   import { EMPTY_SESSION } from "./contracts";
-  import { FIXTURE_EVENTS, FIXTURE_LESSON, QUICK_PROMPTS } from "./fixtures";
+  import { FIXTURE_EVENTS, FIXTURE_LESSON } from "./fixtures";
   import { dominantChalkColor, isLessonSkipped, lessonStepOrder } from "./lesson";
+  import { fitLogicalWindowSize, makeMonitorKey, normalizeLessonPlacement, resolveLessonPosition, type MonitorGeometry } from "./floatingPlacement";
   import { buildTutorContext } from "./preferences";
   import { reduceSession } from "./session";
-  import { initialSession, loadPreferences, subscribePreferences, subscribeSession } from "./runtime";
+  import { initialSession, loadPreferences, savePreferences, subscribePreferences, subscribeSession } from "./runtime";
   import ChalkDemo from "./ChalkDemo.svelte";
   import ChalkPhrase from "./ChalkPhrase.svelte";
   import ChalkStepNumber from "./ChalkStepNumber.svelte";
   import NonoScene from "./NonoScene.svelte";
+  import LessonQuestionComposer from "./LessonQuestionComposer.svelte";
   import { IDLE_TAIL_PRESENTATION, type TailPresentation, type TailPresentationPhase } from "./tailPresentation";
 
   type BoardPhase = "idle" | "erasing" | "thinking" | "writing";
@@ -21,11 +24,8 @@
   let preferences = $state(loadPreferences());
   let messages = $state<LessonMessage[]>([]);
   let threads = $state<Record<string, LessonMessage[]>>({});
-  let input = $state("");
   let loading = $state(false);
   let error = $state("");
-  let history = $state<HTMLDivElement>();
-  let shouldFollow = true;
   let activeSegmentId: string | undefined;
   let requestGeneration = 0;
   let boardPhase = $state<BoardPhase>("idle");
@@ -38,8 +38,12 @@
   let tailRigAvailable = $state(false);
   let cueGeneration = 0;
   let underlineProgress = $state<Record<string, number>>({});
+  let mode = $state<LessonSurfaceMode>("compose");
+  let followupOpen = $state(false);
+  let openContext = $state<LessonOpenContext>({ sourceSurface: "workbench", segmentId: "", cursorX: 0, cursorY: 0, externalMediaControl: "not_requested" });
+  let placementTimer: ReturnType<typeof setTimeout> | undefined;
 
-  const selected = $derived(session.segments.find((segment) => segment.id === session.selectedSegmentId) ?? session.segments[3]);
+  const selected = $derived(session.segments.find((segment) => segment.id === session.selectedSegmentId) ?? (isTauri() ? undefined : session.segments[3]));
   const latestAssistant = $derived(messages.findLast((message) => message.card?.selectedSegmentId === selected?.id));
   const latestCard = $derived(latestAssistant?.card ?? (isTauri() ? undefined : FIXTURE_LESSON));
   const latestCardKey = $derived(latestAssistant?.id ?? (isTauri() ? undefined : "fixture"));
@@ -66,16 +70,38 @@
     void subscribeSession(() => session, (value) => session = value).then((unlisten) => cleanup.push(unlisten));
     void subscribePreferences((value) => preferences = value).then((unlisten) => cleanup.push(unlisten));
     void tick().then(() => playCueSequence());
-    const escape = (event: KeyboardEvent) => event.key === "Escape" && void closeLesson();
+    if (isTauri()) {
+      void invoke<LessonOpenContext | null>("get_lesson_open_context").then((context) => {
+        if (context) applyOpenContext(context);
+      });
+      void listen<LessonOpenContext>("lesson-composer-opened", ({ payload }) => {
+        applyOpenContext(payload);
+      }).then((unlisten) => cleanup.push(unlisten));
+      void getCurrentWindow().onMoved(() => {
+        if (placementTimer) clearTimeout(placementTimer);
+        placementTimer = setTimeout(() => void rememberLessonPlacement(), 180);
+      }).then((unlisten) => cleanup.push(unlisten));
+    }
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (followupOpen) followupOpen = false;
+      else void closeLesson();
+    };
     window.addEventListener("keydown", escape);
-    return () => { cleanup.forEach((stop) => stop()); window.removeEventListener("keydown", escape); };
+    return () => {
+      cleanup.forEach((stop) => stop());
+      if (placementTimer) clearTimeout(placementTimer);
+      window.removeEventListener("keydown", escape);
+    };
   });
 
-  $effect(() => {
-    const count = messages.length;
-    if (count < 0 || !shouldFollow) return;
-    void tick().then(() => history?.scrollTo({ top: history.scrollHeight, behavior: "smooth" }));
-  });
+  function applyOpenContext(context: LessonOpenContext) {
+    openContext = context;
+    mode = "compose";
+    followupOpen = false;
+    error = "";
+    void resizeLessonWindow("compose");
+  }
 
   $effect(() => {
     const nextSegmentId = selected?.id;
@@ -83,14 +109,13 @@
     if (activeSegmentId) threads[activeSegmentId] = messages;
     activeSegmentId = nextSegmentId;
     messages = nextSegmentId ? [...(threads[nextSegmentId] ?? [])] : [];
-    input = "";
     error = "";
     loading = false;
     boardPhase = "idle";
     activeMomentIndex = 0;
     activeCardKey = undefined;
     skippedCardKey = undefined;
-    shouldFollow = true;
+    followupOpen = false;
     requestGeneration += 1;
     cancelCueSequence();
   });
@@ -104,11 +129,6 @@
     cancelCueSequence();
   });
 
-  function trackScroll() {
-    if (!history) return;
-    shouldFollow = history.scrollHeight - history.scrollTop - history.clientHeight < 60;
-  }
-
   async function ask(question: string) {
     if (!selected || !question.trim() || loading) return;
     cancelCueSequence();
@@ -117,9 +137,10 @@
     const eraseExistingBoard = Boolean(currentMoment);
     const userMessage: LessonMessage = { id: crypto.randomUUID(), role: "user", text: question.trim() };
     messages = [...messages, userMessage];
-    input = "";
     loading = true;
     error = "";
+    followupOpen = false;
+    mode = eraseExistingBoard ? "lesson" : "thinking";
     boardPhase = eraseExistingBoard ? "erasing" : "thinking";
     try {
       const request: Promise<LessonCard> = isTauri()
@@ -139,6 +160,8 @@
       const [card] = await Promise.all([request, eraseTransition]);
       if (requestId !== requestGeneration || selected?.id !== requestSegment.id) return;
       messages = [...messages, { id: crypto.randomUUID(), role: "assistant", text: card.moments[0].speechBubble, card }];
+      mode = "lesson";
+      await resizeLessonWindow("lesson");
       boardPhase = "writing";
       await sleep(720);
       if (requestId === requestGeneration) {
@@ -149,6 +172,8 @@
       if (requestId !== requestGeneration) return;
       error = errorMessage(requestError);
       boardPhase = "idle";
+      mode = "error";
+      await resizeLessonWindow("compose");
     } finally {
       if (requestId === requestGeneration) loading = false;
     }
@@ -178,9 +203,76 @@
   async function closeLesson() {
     cancelCueSequence();
     if (isTauri()) {
-      await invoke("hide_surface", { surface: "lesson" });
-      await emit("lesson-closed");
+      await invoke("close_lesson_surface");
     }
+  }
+
+  async function startWindowDrag(event: PointerEvent) {
+    if (!isTauri() || event.button !== 0) return;
+    event.preventDefault();
+    await getCurrentWindow().startDragging();
+  }
+
+  function monitorGeometry(monitor: NonNullable<Awaited<ReturnType<typeof currentMonitor>>>): MonitorGeometry {
+    const base = {
+      x: monitor.position.x,
+      y: monitor.position.y,
+      width: monitor.size.width,
+      height: monitor.size.height,
+    };
+    return { ...base, key: makeMonitorKey(monitor.name, base) };
+  }
+
+  async function restoreLessonPlacement() {
+    const monitor = await currentMonitor();
+    if (!monitor) return;
+    const geometry = monitorGeometry(monitor);
+    const lessonWindow = getCurrentWindow();
+    const scale = monitor.scaleFactor || 1;
+    const { width, height } = fitLogicalWindowSize({ width: 980, height: 620 }, geometry, scale);
+    await lessonWindow.setSize(new LogicalSize(width, height));
+    const physicalWidth = Math.round(width * scale);
+    const physicalHeight = Math.round(height * scale);
+    const placement = preferences.lessonPlacements[geometry.key];
+    const position = resolveLessonPosition(geometry, physicalWidth, physicalHeight, placement);
+    await lessonWindow.setPosition(new PhysicalPosition(position.x, position.y));
+  }
+
+  async function resizeLessonWindow(targetMode: "compose" | "lesson") {
+    if (!isTauri()) return;
+    const monitor = await currentMonitor();
+    if (!monitor) return;
+    const geometry = monitorGeometry(monitor);
+    const lessonWindow = getCurrentWindow();
+    const current = await lessonWindow.outerPosition();
+    const scale = monitor.scaleFactor || 1;
+    const desired = targetMode === "compose" ? { width: 720, height: 210 } : { width: 980, height: 620 };
+    const { width, height } = fitLogicalWindowSize(desired, geometry, scale);
+    await lessonWindow.setSize(new LogicalSize(width, height));
+    const physicalWidth = Math.round(width * scale);
+    const physicalHeight = Math.round(height * scale);
+    const x = Math.min(geometry.x + geometry.width - physicalWidth - 18, Math.max(geometry.x + 18, current.x));
+    const y = Math.min(geometry.y + geometry.height - physicalHeight - 18, Math.max(geometry.y + 18, current.y));
+    await lessonWindow.setPosition(new PhysicalPosition(Math.round(x), Math.round(y)));
+  }
+
+  async function rememberLessonPlacement() {
+    if (!isTauri()) return;
+    const monitor = await currentMonitor();
+    if (!monitor) return;
+    const geometry = monitorGeometry(monitor);
+    const lessonWindow = getCurrentWindow();
+    const [position, size] = await Promise.all([lessonWindow.outerPosition(), lessonWindow.outerSize()]);
+    preferences.lessonPlacements = {
+      ...preferences.lessonPlacements,
+      [geometry.key]: normalizeLessonPlacement(geometry, {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+      }),
+    };
+    await savePreferences(preferences);
   }
 
   function errorMessage(value: unknown): string {
@@ -263,10 +355,23 @@
   }
 </script>
 
+{#if selected && mode !== "lesson"}
+  <div class="composer-shell">
+    <LessonQuestionComposer
+      segment={selected}
+      style={preferences.style}
+      {mode}
+      {error}
+      externalMediaControl={openContext.externalMediaControl}
+      onsubmit={(question) => void ask(question)}
+      oncancel={closeLesson}
+      ondrag={startWindowDrag}
+    />
+  </div>
+{:else}
 <div class="lesson-shell">
-  <header data-tauri-drag-region><div><span>の</span><b>NONO / LANGUAGE ROOM</b></div><button onclick={closeLesson}>×</button></header>
-  <main>
-    <section class="stage">
+  <section class="stage">
+      <button class="floating-close" aria-label="Close Nono lesson" onclick={closeLesson}>×</button>
       <NonoScene presentation={tailPresentation} mood={nonoMood} onRigStatus={(available) => tailRigAvailable = available} />
       <svg class="chalk-filter" width="0" height="0" aria-hidden="true">
         <filter id="chalk-roughen" x="-4%" y="-8%" width="108%" height="116%" color-interpolation-filters="sRGB">
@@ -274,9 +379,13 @@
           <feDisplacementMap in="SourceGraphic" in2="noise" scale="0.45" xChannelSelector="R" yChannelSelector="G" />
         </filter>
       </svg>
-      <div class="bubble" class:thinking={boardPhase === "thinking"}>{bubbleText}</div>
+      <div class="bubble" class:thinking={boardPhase === "thinking"}>
+        <button class="drag-handle bubble-drag" aria-label="Move lesson window" onpointerdown={startWindowDrag}></button>
+        {bubbleText}
+      </div>
       <div class="lesson-stack">
         <div class="board-prop" class:image-failed={boardImageFailed}>
+          <button class="drag-handle board-drag" aria-label="Move lesson window" onpointerdown={startWindowDrag}></button>
           {#if !boardImageFailed}<img class="board-art" src="/assets/nono-chalkboard-anime.png" alt="" aria-hidden="true" onerror={() => boardImageFailed = true} />{/if}
           <div class="board" class:thinking={boardPhase === "thinking"} bind:this={boardElement}>
             {#if boardPhase === "erasing"}<div class="erase-sweep" aria-hidden="true"><span></span></div>{/if}
@@ -330,46 +439,45 @@
             {:else if !loading}<div class="board-empty">Ask a question and Nono will organize the answer here.</div>{/if}
           </div>
         </div>
-        {#if latestCard && currentMoment && latestCard.moments.length > 1 && !lessonSkipped}
-          <nav class="deck-controls" aria-label="Lesson moments">
-            <div class="progress" aria-label={`Teaching moment ${activeMomentIndex + 1} of ${latestCard.moments.length}`}>
-              {#each latestCard.moments as _, index}<span class:active={index === activeMomentIndex} class:complete={index < activeMomentIndex}></span>{/each}
-            </div>
+        <nav class="deck-controls" aria-label="Lesson controls">
+          <div class="progress-wrap">
+            {#if latestCard && currentMoment && !lessonSkipped}
+              <div class="progress" aria-label={`Teaching moment ${activeMomentIndex + 1} of ${latestCard.moments.length}`}>
+                {#each latestCard.moments as _, index}<span class:active={index === activeMomentIndex} class:complete={index < activeMomentIndex}></span>{/each}
+              </div>
+              <small>Lesson {activeMomentIndex + 1} of {latestCard.moments.length}</small>
+            {:else}<small>Ask Nono about this line</small>{/if}
+          </div>
+          {#if latestCard && currentMoment && latestCard.moments.length > 1 && !lessonSkipped}
             {#if hasMoreMoments}
-              <button class="skip" onclick={skipRemaining} disabled={boardPhase !== "idle"}>Skip remaining</button>
-              <button class="next" onclick={nextMoment} disabled={boardPhase !== "idle"}>Next lesson · {latestCard.moments[activeMomentIndex + 1].title}</button>
-            {:else}<em>Lesson complete</em>{/if}
-          </nav>
-        {/if}
+              <button class="skip" onclick={skipRemaining} disabled={boardPhase !== "idle"}>Skip</button>
+              <button class="next" onclick={nextMoment} disabled={boardPhase !== "idle"}>Next · {latestCard.moments[activeMomentIndex + 1].title}</button>
+            {:else}<em>Complete</em>{/if}
+          {/if}
+          {#if followupOpen && selected}
+            <div class="followup-composer">
+              <LessonQuestionComposer segment={selected} style={preferences.style} mode="compose" compact onsubmit={(question) => void ask(question)} oncancel={() => followupOpen = false} />
+            </div>
+          {:else}
+            <button class="ask-toggle" onclick={() => followupOpen = true} disabled={!selected || loading}>Ask Another</button>
+          {/if}
+        </nav>
       </div>
-    </section>
-
-    <aside class="lesson-thread">
-      <div class="quick">{#each QUICK_PROMPTS as prompt}<button onclick={() => ask(prompt)} disabled={!selected || loading}>{prompt}</button>{/each}</div>
-      <div class="history" bind:this={history} onscroll={trackScroll} aria-live="polite">
-        {#if messages.length === 0}<p class="welcome">This lesson stays in memory only for the current session. Ask as many follow-ups as you like.</p>{/if}
-        {#each messages as message}<div class="message {message.role}"><span>{message.role === "assistant" ? "NONO" : "YOU"}</span>{message.text}</div>{/each}
-        {#if error}<div class="message error"><span>CONNECTION</span>{error}<button onclick={() => ask(messages.findLast((message) => message.role === "user")?.text ?? "Break it down")}>Retry</button></div>{/if}
-      </div>
-      {#if latestCard}<div class="suggestions">{#each latestCard.suggestedFollowUps as prompt}<button onclick={() => ask(prompt)}>{prompt}</button>{/each}</div>{/if}
-      <form onsubmit={(event) => { event.preventDefault(); void ask(input); }}><textarea bind:value={input} placeholder="Ask for a translation, grammar, tone, or culture…" disabled={!selected || loading}></textarea><button disabled={!input.trim() || loading}>↑</button></form>
-    </aside>
-  </main>
+  </section>
 </div>
+{/if}
 
 <style>
-  .lesson-shell{height:100vh;display:grid;grid-template-rows:42px 1fr;background:#0a0d13;color:#f7f5fb;border:1px solid #303846}
-  header{display:flex;align-items:center;justify-content:space-between;padding:0 12px;border-bottom:1px solid #29313d;background:#0d1118}
-  header>div{display:flex;align-items:center;gap:8px;font-size:8px;letter-spacing:.13em;color:#82909d}
-  header span{width:23px;height:23px;display:grid;place-items:center;background:#ff70b7;color:white;border-radius:5px}
-  header button{border:0;background:none;color:#76808c;font-size:20px}
-  main{min-height:0;display:grid;grid-template-columns:minmax(400px,1.3fr) minmax(240px,.7fr)}
-  .stage{position:relative;overflow:hidden;padding:148px 22px 20px;background:radial-gradient(circle at 8% 8%,#ffd7e8 0,transparent 32%),linear-gradient(145deg,#f5eee4 0%,#dfece7 50%,#d8e1ee 100%)}
+  .composer-shell{width:100vw;height:100vh;box-sizing:border-box;background:transparent}
+  .lesson-shell{height:100vh;display:grid;grid-template-rows:minmax(0,1fr);align-content:start;color:#f7f5fb;background:transparent;overflow:hidden}
+  .stage{position:relative;min-height:0;overflow:visible;padding:102px 20px 6px 148px;background:transparent}
+  .floating-close{position:absolute;z-index:30;right:19px;top:76px;width:28px;height:28px;border:1px solid #fff7;background:#142019d9;color:#f4f0df;border-radius:50%;font-size:18px;line-height:1;box-shadow:0 5px 16px #0007}.floating-close:hover{background:#9a315c;color:white}
   .chalk-filter{position:absolute;pointer-events:none}
-  .bubble{position:absolute;z-index:9;left:175px;right:20px;top:24px;min-height:72px;padding:15px 18px;background:#fff;color:#24232a;border:2px solid #4f3b46;border-radius:20px 20px 20px 5px;font-size:11px;line-height:1.55;box-shadow:6px 7px 0 #b79fad55;transition:color .2s,transform .2s}
+  .bubble{position:absolute;z-index:9;left:186px;right:52px;top:18px;min-height:72px;padding:15px 18px;background:#fff;color:#24232a;border:2px solid #4f3b46;border-radius:20px 20px 20px 5px;font-size:11px;line-height:1.55;box-shadow:6px 7px 0 #291e2355;transition:color .2s,transform .2s}
   .bubble.thinking{color:#78576b;transform:translateY(2px)}
-  .lesson-stack{position:relative;z-index:2;display:grid;align-content:center;gap:8px;min-height:0}
-  .board-prop{position:relative;width:100%;aspect-ratio:16/9;margin:auto;filter:drop-shadow(0 14px 12px #65452d44)}
+  .drag-handle{position:absolute;z-index:22;border:0;background:transparent;opacity:0;transition:opacity .15s}.drag-handle:hover{opacity:1}.drag-handle::after{content:"MOVE";display:block;padding:3px 7px;border:1px solid #f4f0df66;border-radius:8px;background:#173c2bcc;color:#f4f0df;font:700 6px/1 "JetBrains Mono",monospace;letter-spacing:.14em}.bubble-drag{left:12px;right:12px;top:-8px;height:15px}.bubble-drag::after{width:max-content;margin:auto}.board-drag{left:24%;right:19%;top:5.2%;height:9%}.board-drag::after{width:max-content;margin:auto}
+  .lesson-stack{position:relative;z-index:2;display:grid;align-content:center;gap:5px;min-height:0}
+  .board-prop{position:relative;width:100%;aspect-ratio:16/9;margin:auto;filter:drop-shadow(0 14px 12px #20160f77)}
   .board-art{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none;user-select:none}
   .board{position:absolute;inset:13.2% 12.8% 15.8%;padding:8px 10px;display:grid;grid-template-rows:auto auto minmax(0,1fr);color:#f4f0df;font-family:"Klee One","Hiragino Maru Gothic ProN","Noto Sans",cursive;font-weight:600;overflow:hidden;text-shadow:0 1px 1px #00150b88}
   .board.thinking::before{content:"";position:absolute;inset:0;z-index:-1;background:radial-gradient(circle at 50% 45%,#7ab09322,transparent 58%)}
@@ -398,20 +506,14 @@
   .ambiguity>b{color:#f39bc4;font-size:13px;transform:rotate(-8deg);text-shadow:0 0 4px #f39bc455}
   .board-empty{display:grid;place-content:center;min-height:0;text-align:center;color:#b8b099;font-size:11px}
   .board-empty.waiting{grid-template-columns:repeat(3,7px);gap:6px}.waiting span{width:7px;height:7px;background:#eee6d2;border-radius:50%;animation:think 1s ease-in-out infinite}.waiting span:nth-child(2){animation-delay:.15s}.waiting span:nth-child(3){animation-delay:.3s}.waiting p{grid-column:1/-1;margin:8px 0 0}
-  .deck-controls{position:relative;z-index:10;display:grid;grid-template-columns:auto auto minmax(120px,1fr);align-items:center;gap:8px;min-height:35px;padding:5px 8px 5px 12px;border:1px solid #b7a59b66;border-radius:12px;background:#fff9;color:#4b3d43;box-shadow:3px 4px 0 #b79fad33;font-family:Inter,sans-serif}
-  .deck-controls button{border:1px solid #8d777f55;border-radius:8px;padding:7px 10px;font-size:7px;cursor:pointer}.deck-controls button:disabled{opacity:.45}.deck-controls .skip{background:transparent;color:#75646b}.deck-controls .next{justify-self:end;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#244d3c;color:#fff8e7;border-color:#244d3c;font-weight:700}.deck-controls em{grid-column:2/-1;justify-self:end;font-style:normal;font-size:7px;letter-spacing:.13em;color:#2e776b}
+  .deck-controls{position:relative;z-index:10;display:flex;align-items:center;justify-content:flex-end;gap:6px;min-height:36px;margin:0 10%;padding:4px 5px 4px 10px;border:1px solid #c9bdac77;border-radius:12px;background:#f7f1e9e8;color:#4b3d43;box-shadow:3px 5px 0 #17100d55;font-family:Inter,sans-serif}.progress-wrap{display:flex;align-items:center;gap:8px;margin-right:auto}.progress-wrap small{font-size:7px;color:#75646b;white-space:nowrap}
+  .deck-controls button{border:1px solid #8d777f55;border-radius:8px;padding:7px 10px;font-size:7px;cursor:pointer}.deck-controls button:disabled{opacity:.45}.deck-controls .skip{background:transparent;color:#75646b}.deck-controls .next{max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#244d3c;color:#fff8e7;border-color:#244d3c;font-weight:700}.deck-controls .ask-toggle{background:#28212a;color:#fff;border-color:#28212a}.deck-controls em{font-style:normal;font-size:7px;letter-spacing:.13em;color:#2e776b}
   .progress{display:flex;gap:4px}.progress span{width:18px;height:4px;background:#a8929c55;border-radius:2px}.progress span.active{background:#e3a924}.progress span.complete{background:#43a597}
-  .lesson-thread{min-height:0;display:grid;grid-template-rows:auto 1fr auto auto;border-left:1px solid #29313d;background:#0c1016}
-  .quick,.suggestions{display:flex;gap:5px;padding:9px;overflow-x:auto;border-bottom:1px solid #242b35}
-  .quick button,.suggestions button{white-space:nowrap;border:1px solid #2c3541;background:#131923;color:#bbc3ce;padding:6px 8px;border-radius:12px;font-size:7px}
-  .history{min-height:0;overflow-y:auto;padding:12px;display:grid;align-content:start;gap:8px}
-  .welcome{color:#687381;font-size:9px;line-height:1.6}.message{padding:9px 10px;background:#171e28;border:1px solid #26303d;border-radius:8px;font-size:9px;line-height:1.5;white-space:pre-wrap}
-  .message span{display:block;color:#6ce1d9;font-size:7px;letter-spacing:.13em;margin-bottom:4px}.message.user{margin-left:18%;background:#211625;border-color:#462b42}.message.user span{color:#ff84bf}.message.error{border-color:#833953;color:#ffc0d9}.message.error button{display:block;margin-top:7px;border:0;background:#ff70b7;color:white;padding:4px 8px;border-radius:5px}
-  .suggestions{border-top:1px solid #242b35;border-bottom:0}.lesson-thread form{display:grid;grid-template-columns:1fr 36px;margin:0 9px 9px;border:1px solid #2b3542;background:#111721;border-radius:8px}.lesson-thread textarea{height:48px;resize:none;border:0;background:none;color:white;padding:9px;font-size:9px;outline:0}.lesson-thread form button{margin:8px;width:28px;height:28px;border:0;border-radius:50%;background:#ff70b7;color:white}
+  .followup-composer{flex:1;min-width:260px;height:44px;z-index:40}
   @keyframes chalk{from{opacity:0;transform:translateY(5px);filter:blur(2px)}to{opacity:1;transform:none;filter:none}}
   @keyframes erase-board{0%{opacity:1;clip-path:inset(0)}55%{filter:blur(1px)}100%{opacity:.08;clip-path:inset(0 100% 0 0);filter:blur(3px)}}
   @keyframes eraser-sweep{0%{left:102%;transform:rotate(-7deg)}45%{transform:rotate(6deg)}100%{left:-54px;transform:rotate(-4deg)}}
   @keyframes dust-sweep{0%{opacity:0;transform:translateX(70%)}35%{opacity:1}100%{opacity:0;transform:translateX(-70%)}}
   @keyframes think{0%,100%{opacity:.25;transform:translateY(0)}50%{opacity:1;transform:translateY(-4px)}}
-  @media(max-width:680px){main{grid-template-columns:1fr}.lesson-thread{position:absolute;right:0;top:42px;bottom:0;width:42%;background:#0c1016f5}.stage{padding-right:44%}.board-prop{margin-top:auto;margin-bottom:auto}.deck-controls{grid-template-columns:auto auto 1fr}}
+  @media(max-width:800px){.stage{padding-left:108px}.bubble{left:126px}.deck-controls{margin-inline:4%}.deck-controls .next{max-width:150px}.progress-wrap small{display:none}}
 </style>

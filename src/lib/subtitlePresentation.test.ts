@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateSubtitleFit, colorWithOpacity, readableAccentTextColor, subtitleFitOptionsEqual } from "./subtitlePresentation";
+import { calculateLiveCaptionFontSize, calculateSubtitleFit, colorWithOpacity, readableAccentTextColor, subtitleFitOptionsEqual } from "./subtitlePresentation";
 
 describe("subtitle presentation", () => {
   it("shrinks long captions until they fit the available height", () => {
@@ -23,6 +23,38 @@ describe("subtitle presentation", () => {
 
     expect(result.fontSizePx).toBe(12);
     expect(result.scale).toBe(0.75);
+  });
+
+  it("uses stable density steps for growing live captions", () => {
+    expect(calculateLiveCaptionFontSize({
+      basePx: 28,
+      viewportWidth: 900,
+      sourceText: "短い字幕です。",
+      translationText: "This is short.",
+      showSource: true,
+      showTranslation: true,
+    })).toBe(28);
+
+    expect(calculateLiveCaptionFontSize({
+      basePx: 28,
+      viewportWidth: 900,
+      sourceText: "配信についてもう少し長く話しているので、字幕が複数行になっても安定して表示される必要があります。".repeat(2),
+      translationText: "This is a long explanation that continues while the live caption is growing and should remain visually stable instead of being measured and scaled on every incoming fragment.".repeat(2),
+      showSource: true,
+      showTranslation: true,
+    })).toBe(17);
+  });
+
+  it("does not count hidden translation text toward live density", () => {
+    const request = {
+      basePx: 28,
+      viewportWidth: 900,
+      sourceText: "今日はちょっと……。",
+      translationText: "A very long translation that should not affect source-only mode. ".repeat(8),
+      showSource: true,
+    };
+    expect(calculateLiveCaptionFontSize({ ...request, showTranslation: false })).toBe(28);
+    expect(calculateLiveCaptionFontSize({ ...request, showTranslation: true })).toBeLessThan(28);
   });
 
   it("chooses readable text for light and dark speaker colors", () => {

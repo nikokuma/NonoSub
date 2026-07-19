@@ -5,13 +5,14 @@ mod contracts;
 #[cfg(target_os = "macos")]
 mod live;
 mod media;
+mod media_keys;
 mod openai;
 mod pipeline;
 
 use contracts::{
-    CaptionProcessingMode, LanguageSettings, LearnerLevel, LessonCard, LiveSyncMode,
-    LiveSyncState, PreparedMediaInfo, RecoverableError, SequencedSessionEvent, SessionEvent,
-    SessionMode, SessionSnapshot, SpeakerProfile, SubtitleSegment, TutorMessage,
+    CaptionProcessingMode, LanguageSettings, LearnerLevel, LessonCard, LiveSyncMode, LiveSyncState,
+    PreparedMediaInfo, RecoverableError, SequencedSessionEvent, SessionEvent, SessionMode,
+    SessionSnapshot, SpeakerProfile, SubtitleSegment, TutorMessage,
 };
 use serde::Serialize;
 use std::{
@@ -42,6 +43,12 @@ struct AppState {
     session_counter: AtomicU64,
     canonical: Mutex<SessionSnapshot>,
     lesson_cache: Mutex<HashMap<String, LessonCard>>,
+    launcher_mode: Mutex<String>,
+    context_lesson_segment: Mutex<Option<String>>,
+    context_lesson_source: Mutex<Option<String>>,
+    lesson_open_context: Mutex<Option<LessonOpenContext>>,
+    subtitles_visible: AtomicBool,
+    external_media_paused_for_lesson: AtomicBool,
     #[cfg(target_os = "macos")]
     live: live::LiveState,
 }
@@ -57,6 +64,12 @@ impl Default for AppState {
             session_counter: AtomicU64::new(0),
             canonical: Mutex::new(SessionSnapshot::default()),
             lesson_cache: Mutex::new(HashMap::new()),
+            launcher_mode: Mutex::new("file".into()),
+            context_lesson_segment: Mutex::new(None),
+            context_lesson_source: Mutex::new(None),
+            lesson_open_context: Mutex::new(None),
+            subtitles_visible: AtomicBool::new(true),
+            external_media_paused_for_lesson: AtomicBool::new(false),
             #[cfg(target_os = "macos")]
             live: live::LiveState::default(),
         }
@@ -93,6 +106,26 @@ struct PreparedAudio {
     duration_ms: u64,
     chunk_count: usize,
     sample_rate: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ExternalMediaControlResult {
+    NotRequested,
+    Paused,
+    PermissionRequired,
+    Failed,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LessonOpenContext {
+    source_surface: String,
+    segment_id: String,
+    cursor_x: f64,
+    cursor_y: f64,
+    external_media_control: ExternalMediaControlResult,
 }
 
 fn keyring_entry() -> Result<keyring::Entry, String> {
@@ -466,14 +499,127 @@ async fn request_lesson(
 }
 
 #[tauri::command]
-fn select_lesson_segment(
+#[allow(clippy::too_many_arguments)] // Tauri exposes these as named webview command parameters.
+fn open_lesson_composer(
     app: tauri::AppHandle,
-    segment_id: Option<String>,
-) -> Result<(), openai::ApiError> {
-    record_event(&app, SessionEvent::LessonSelected { segment_id })?;
-    show_surface(&app, "lesson").map_err(|message| service_error(&message))?;
-    app.emit("lesson-opened", ())
-        .map_err(|error| service_error(&format!("Could not notify the player: {error}")))
+    state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
+    segment_id: String,
+    source_surface: String,
+    cursor_x: f64,
+    cursor_y: f64,
+    experimental_external_pause: bool,
+) -> Result<(), String> {
+    let expected_label = match source_surface.as_str() {
+        "viewer" => "viewer",
+        "overlay" => "overlay",
+        "workbench" => "main",
+        _ => return Err("Unknown lesson source surface.".into()),
+    };
+    if window.label() != expected_label {
+        return Err("Lesson source window did not match the requested surface.".into());
+    }
+    let finalized = state
+        .canonical
+        .lock()
+        .map_err(|_| "Session state is unavailable.".to_string())?
+        .segments
+        .iter()
+        .any(|segment| segment.id == segment_id && !segment.is_provisional);
+    if !finalized {
+        return Err("Wait for this subtitle to finish before asking Nono.".into());
+    }
+
+    record_event(
+        &app,
+        SessionEvent::LessonSelected {
+            segment_id: Some(segment_id.clone()),
+        },
+    )
+    .map_err(|error| error.message)?;
+
+    let external_media_control = if source_surface == "overlay" && experimental_external_pause {
+        if !cfg!(target_os = "macos") {
+            ExternalMediaControlResult::Unsupported
+        } else if !media_keys::permission_status() {
+            ExternalMediaControlResult::PermissionRequired
+        } else if state
+            .external_media_paused_for_lesson
+            .load(Ordering::Relaxed)
+        {
+            ExternalMediaControlResult::Paused
+        } else {
+            match media_keys::post_play_pause() {
+                Ok(()) => {
+                    state
+                        .external_media_paused_for_lesson
+                        .store(true, Ordering::Relaxed);
+                    ExternalMediaControlResult::Paused
+                }
+                Err(message) if message == "permission_required" => {
+                    ExternalMediaControlResult::PermissionRequired
+                }
+                Err(_) => ExternalMediaControlResult::Failed,
+            }
+        }
+    } else {
+        ExternalMediaControlResult::NotRequested
+    };
+
+    show_surface(&app, "lesson")?;
+    place_composer_near_cursor(&app, &window, cursor_x, cursor_y);
+    let payload = LessonOpenContext {
+        source_surface,
+        segment_id,
+        cursor_x,
+        cursor_y,
+        external_media_control,
+    };
+    *state
+        .lesson_open_context
+        .lock()
+        .map_err(|_| "Lesson state is unavailable.".to_string())? = Some(payload.clone());
+    app.emit("lesson-composer-opened", payload)
+        .map_err(|error| format!("Could not open Ask Nono: {error}"))
+}
+
+#[tauri::command]
+fn get_lesson_open_context(
+    state: State<'_, AppState>,
+) -> Result<Option<LessonOpenContext>, String> {
+    state
+        .lesson_open_context
+        .lock()
+        .map(|context| context.clone())
+        .map_err(|_| "Lesson state is unavailable.".into())
+}
+
+#[tauri::command]
+fn media_key_permission_status() -> bool {
+    media_keys::permission_status()
+}
+
+#[tauri::command]
+fn request_media_key_permission() -> bool {
+    media_keys::request_permission()
+}
+
+#[tauri::command]
+fn post_media_play_pause() -> ExternalMediaControlResult {
+    match media_keys::post_play_pause() {
+        Ok(()) => ExternalMediaControlResult::Paused,
+        Err(message) if message == "permission_required" => {
+            ExternalMediaControlResult::PermissionRequired
+        }
+        Err(message) if message == "unsupported" => ExternalMediaControlResult::Unsupported,
+        Err(_) => ExternalMediaControlResult::Failed,
+    }
+}
+
+#[tauri::command]
+fn close_lesson_surface(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    close_lesson(&app, state.inner());
+    Ok(())
 }
 
 #[tauri::command]
@@ -580,12 +726,7 @@ fn update_languages(
                 }
             }
             let ready_through_ms = segments.last().map_or(0, |segment| segment.end_ms);
-            let _ = record_event(
-                &app,
-                SessionEvent::CoverageChanged {
-                    ready_through_ms,
-                },
-            );
+            let _ = record_event(&app, SessionEvent::CoverageChanged { ready_through_ms });
             let _ = record_event(
                 &app,
                 SessionEvent::PhaseChanged {
@@ -620,8 +761,25 @@ fn update_speaker(app: tauri::AppHandle, speaker: SpeakerProfile) -> Result<(), 
 }
 
 #[tauri::command]
-fn open_surface(app: tauri::AppHandle, surface: String) -> Result<(), String> {
+fn open_surface(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    surface: String,
+) -> Result<(), String> {
+    if matches!(surface.as_str(), "viewer" | "overlay") {
+        state.subtitles_visible.store(true, Ordering::Relaxed);
+        let _ = app.emit("tray-action", "show_subtitles");
+    }
     show_surface(&app, &surface)
+}
+
+#[tauri::command]
+fn get_launcher_mode(state: State<'_, AppState>) -> Result<String, String> {
+    state
+        .launcher_mode
+        .lock()
+        .map(|mode| mode.clone())
+        .map_err(|_| "Launcher state is unavailable.".into())
 }
 
 #[tauri::command]
@@ -708,7 +866,6 @@ async fn start_live_capture(
             if let Some(window) = app.get_webview_window("overlay") {
                 let _ = window.hide();
             }
-            let _ = show_surface(&app, "workbench");
             Err(error)
         }
     }
@@ -845,9 +1002,9 @@ fn apply_event(snapshot: &mut SessionSnapshot, event: &SessionEvent) {
                 .speakers
                 .insert(speaker.id.clone(), speaker.clone());
         }
-        SessionEvent::CoverageChanged {
-            ready_through_ms,
-        } => snapshot.ready_through_ms = *ready_through_ms,
+        SessionEvent::CoverageChanged { ready_through_ms } => {
+            snapshot.ready_through_ms = *ready_through_ms
+        }
         SessionEvent::LiveSyncChanged { sync } => snapshot.live_sync = Some(sync.clone()),
         SessionEvent::LessonSelected { segment_id } => {
             snapshot.selected_segment_id = segment_id.clone()
@@ -858,8 +1015,89 @@ fn apply_event(snapshot: &mut SessionSnapshot, event: &SessionEvent) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct WindowSpec {
+    label: &'static str,
+    width: f64,
+    height: f64,
+    min_width: f64,
+    min_height: f64,
+    decorations: bool,
+    transparent: bool,
+    shadow: bool,
+    always_on_top: bool,
+    resizable: bool,
+}
+
+fn window_spec(surface: &str) -> Result<WindowSpec, String> {
+    match surface {
+        "workbench" => Ok(WindowSpec {
+            label: "main",
+            width: 1320.0,
+            height: 840.0,
+            min_width: 960.0,
+            min_height: 680.0,
+            decorations: true,
+            transparent: false,
+            shadow: true,
+            always_on_top: false,
+            resizable: true,
+        }),
+        "viewer" => Ok(WindowSpec {
+            label: "viewer",
+            width: 1180.0,
+            height: 720.0,
+            min_width: 720.0,
+            min_height: 440.0,
+            decorations: false,
+            transparent: false,
+            shadow: true,
+            always_on_top: false,
+            resizable: true,
+        }),
+        "overlay" => Ok(WindowSpec {
+            label: "overlay",
+            width: 900.0,
+            height: 220.0,
+            min_width: 520.0,
+            min_height: 130.0,
+            decorations: false,
+            transparent: true,
+            shadow: false,
+            always_on_top: true,
+            resizable: true,
+        }),
+        "lesson" => Ok(WindowSpec {
+            label: "lesson",
+            width: 720.0,
+            height: 210.0,
+            min_width: 600.0,
+            min_height: 180.0,
+            decorations: false,
+            transparent: true,
+            shadow: false,
+            always_on_top: true,
+            resizable: false,
+        }),
+        "launcher" => Ok(WindowSpec {
+            label: "launcher",
+            width: 420.0,
+            height: 190.0,
+            min_width: 420.0,
+            min_height: 190.0,
+            decorations: false,
+            transparent: true,
+            shadow: false,
+            always_on_top: true,
+            resizable: false,
+        }),
+        _ => Err("Unknown NonoSub surface.".into()),
+    }
+}
+
 fn show_surface(app: &tauri::AppHandle, surface: &str) -> Result<(), String> {
-    let label = surface_label(surface)?;
+    let spec = window_spec(surface)?;
+    let label = spec.label;
     if let Some(window) = app.get_webview_window(label) {
         window.show().map_err(|error| error.to_string())?;
         let _ = window.set_focus();
@@ -867,33 +1105,15 @@ fn show_surface(app: &tauri::AppHandle, surface: &str) -> Result<(), String> {
         return Ok(());
     }
     let url = WebviewUrl::App(surface_path(surface).into());
-    let mut builder = WebviewWindowBuilder::new(app, label, url).title("NonoSub");
-    builder = match surface {
-        "viewer" => builder
-            .inner_size(1180.0, 720.0)
-            .min_inner_size(720.0, 440.0)
-            .decorations(false)
-            .resizable(true),
-        "overlay" => builder
-            .inner_size(900.0, 220.0)
-            .min_inner_size(520.0, 130.0)
-            .decorations(false)
-            .transparent(true)
-            .shadow(false)
-            .always_on_top(true)
-            .resizable(true),
-        "lesson" => builder
-            .inner_size(1040.0, 720.0)
-            .min_inner_size(900.0, 640.0)
-            .decorations(false)
-            .always_on_top(true)
-            .resizable(true),
-        "workbench" => builder
-            .inner_size(1320.0, 840.0)
-            .min_inner_size(960.0, 680.0)
-            .resizable(true),
-        _ => return Err("Unknown NonoSub surface.".into()),
-    };
+    let builder = WebviewWindowBuilder::new(app, label, url)
+        .title("NonoSub")
+        .inner_size(spec.width, spec.height)
+        .min_inner_size(spec.min_width, spec.min_height)
+        .decorations(spec.decorations)
+        .transparent(spec.transparent)
+        .shadow(spec.shadow)
+        .always_on_top(spec.always_on_top)
+        .resizable(spec.resizable);
     let window = builder.build().map_err(|error| error.to_string())?;
     window.show().map_err(|error| error.to_string())?;
     window.set_focus().map_err(|error| error.to_string())?;
@@ -906,23 +1126,104 @@ fn surface_path(surface: &str) -> String {
 }
 
 fn surface_label(surface: &str) -> Result<&'static str, String> {
-    match surface {
-        "workbench" => Ok("main"),
-        "viewer" => Ok("viewer"),
-        "overlay" => Ok("overlay"),
-        "lesson" => Ok("lesson"),
-        _ => Err("Unknown NonoSub surface.".into()),
+    window_spec(surface).map(|spec| spec.label)
+}
+
+fn place_composer_near_cursor(
+    app: &tauri::AppHandle,
+    source: &tauri::WebviewWindow,
+    cursor_x: f64,
+    cursor_y: f64,
+) {
+    let Ok(Some(monitor)) = source.current_monitor() else {
+        return;
+    };
+    let Some(lesson) = app.get_webview_window("lesson") else {
+        return;
+    };
+    let scale = monitor.scale_factor();
+    let logical_monitor_width = monitor.size().width as f64 / scale;
+    let logical_monitor_height = monitor.size().height as f64 / scale;
+    let logical_width = 720.0_f64.min(logical_monitor_width * 0.9);
+    let logical_height = 210.0_f64.min(logical_monitor_height * 0.9);
+    let _ = lesson.set_size(tauri::LogicalSize::new(logical_width, logical_height));
+
+    let Ok(source_position) = source.outer_position() else {
+        return;
+    };
+    let cursor_global_x = source_position.x as f64 + cursor_x * scale;
+    let cursor_global_y = source_position.y as f64 + cursor_y * scale;
+    let width = (logical_width * scale).round() as u32;
+    let height = (logical_height * scale).round() as u32;
+    let (x, y) = composer_position(
+        (
+            monitor.position().x,
+            monitor.position().y,
+            monitor.size().width,
+            monitor.size().height,
+        ),
+        (width, height),
+        (cursor_global_x.round() as i32, cursor_global_y.round() as i32),
+        18,
+    );
+    let _ = lesson.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
+fn composer_position(
+    monitor: (i32, i32, u32, u32),
+    window: (u32, u32),
+    cursor: (i32, i32),
+    margin: i32,
+) -> (i32, i32) {
+    let (monitor_x, monitor_y, monitor_width, monitor_height) = monitor;
+    let (window_width, window_height) = window;
+    let (cursor_x, cursor_y) = cursor;
+    let min_x = monitor_x + margin;
+    let max_x = monitor_x + monitor_width.saturating_sub(window_width) as i32 - margin;
+    let min_y = monitor_y + margin;
+    let max_y = monitor_y + monitor_height.saturating_sub(window_height) as i32 - margin;
+    let centered_x = cursor_x - window_width as i32 / 2;
+    let above_y = cursor_y - window_height as i32 - margin;
+    let preferred_y = if above_y >= min_y {
+        above_y
+    } else {
+        cursor_y + margin
+    };
+    (
+        centered_x.clamp(min_x, max_x.max(min_x)),
+        preferred_y.clamp(min_y, max_y.max(min_y)),
+    )
+}
+
+fn close_lesson(app: &tauri::AppHandle, state: &AppState) {
+    if let Some(window) = app.get_webview_window("lesson") {
+        let _ = window.hide();
     }
+    if state
+        .external_media_paused_for_lesson
+        .swap(false, Ordering::Relaxed)
+    {
+        let _ = media_keys::post_play_pause();
+    }
+    if let Ok(mut context) = state.lesson_open_context.lock() {
+        *context = None;
+    }
+    let _ = app.emit("lesson-closed", ());
+    update_activation_policy(app);
 }
 
 fn update_activation_policy(app: &tauri::AppHandle) {
     #[cfg(target_os = "macos")]
     {
-        let regular = ["main", "viewer"].iter().any(|label| {
-            app.get_webview_window(label)
-                .and_then(|window| window.is_visible().ok())
-                .unwrap_or(false)
-        });
+        let visible = ["main", "viewer"]
+            .into_iter()
+            .filter(|label| {
+                app.get_webview_window(label)
+                    .and_then(|window| window.is_visible().ok())
+                    .unwrap_or(false)
+            })
+            .collect::<Vec<_>>();
+        let regular = requires_regular_activation(visible.iter().copied());
         let _ = app.set_activation_policy(if regular {
             tauri::ActivationPolicy::Regular
         } else {
@@ -931,24 +1232,67 @@ fn update_activation_policy(app: &tauri::AppHandle) {
     }
 }
 
+fn requires_regular_activation<'a>(labels: impl IntoIterator<Item = &'a str>) -> bool {
+    labels
+        .into_iter()
+        .any(|label| matches!(label, "main" | "viewer"))
+}
+
+fn subtitle_preset_menu<R: tauri::Runtime>(
+    app: &impl Manager<R>,
+) -> tauri::Result<tauri::menu::Submenu<R>> {
+    SubmenuBuilder::new(app, "Subtitle preset")
+        .text("preset_clean", "Clean")
+        .text("preset_classic-outline", "Classic Outline")
+        .text("preset_yellow-drop", "Yellow Drop")
+        .text("preset_fallout", "Fallout")
+        .text("preset_momento", "Momento")
+        .text("preset_wired", "Wired")
+        .build()
+}
+
+fn subtitle_timing_menu<R: tauri::Runtime>(
+    app: &impl Manager<R>,
+) -> tauri::Result<tauri::menu::Submenu<R>> {
+    SubmenuBuilder::new(app, "Subtitle timing")
+        .text("subtitle_earlier", "100 ms Earlier")
+        .text("subtitle_later", "100 ms Later")
+        .text("subtitle_reset", "Reset")
+        .build()
+}
+
+fn subtitle_display_menu<R: tauri::Runtime>(
+    app: &impl Manager<R>,
+) -> tauri::Result<tauri::menu::Submenu<R>> {
+    SubmenuBuilder::new(app, "Subtitle display")
+        .text("display_source", "Original only")
+        .text("display_translation", "Translation only")
+        .text("display_both", "Original + translation")
+        .build()
+}
+
+fn live_timing_menu<R: tauri::Runtime>(
+    app: &impl Manager<R>,
+) -> tauri::Result<tauri::menu::Submenu<R>> {
+    SubmenuBuilder::new(app, "Live timing")
+        .text("live_mode_coordinated", "Coordinated")
+        .text("live_mode_fast_source", "Fast Source")
+        .build()
+}
+
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let levels = SubmenuBuilder::new(app, "Learner level")
         .text("level_beginner", "Beginner")
         .text("level_intermediate", "Intermediate")
         .text("level_advanced", "Advanced")
         .build()?;
-    let presets = SubmenuBuilder::new(app, "Subtitle preset")
-        .text("preset_clean", "Clean")
-        .text("preset_classic-outline", "Classic Outline")
-        .text("preset_yellow-drop", "Yellow Drop")
-        .text("preset_arcade", "Arcade")
-        .text("preset_momento", "Momento Cutout")
-        .text("preset_cyberia", "Cyberia")
-        .build()?;
-    let timing = SubmenuBuilder::new(app, "Subtitle timing")
-        .text("subtitle_earlier", "100 ms Earlier")
-        .text("subtitle_later", "100 ms Later")
-        .text("subtitle_reset", "Reset")
+    let presets = subtitle_preset_menu(app)?;
+    let timing = subtitle_timing_menu(app)?;
+    let display = subtitle_display_menu(app)?;
+    let live_timing = live_timing_menu(app)?;
+    let experimental = SubmenuBuilder::new(app, "Experimental")
+        .text("external_pause_on", "External Media Pause: On")
+        .text("external_pause_off", "External Media Pause: Off")
         .build()?;
     let menu = MenuBuilder::new(app)
         .text("open_video", "Open Video…")
@@ -956,14 +1300,19 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         .text("stop_session", "Stop Current Session")
         .separator()
         .text("toggle_subtitles", "Show / Hide Subtitles")
+        .text("show_lesson", "Show Nono Lesson")
+        .text("hide_lesson", "Hide Nono Lesson")
         .text("arrange_overlay", "Arrange Subtitle Overlay")
         .text("play_pause", "Play / Pause")
         .item(&timing)
+        .item(&display)
+        .item(&live_timing)
+        .item(&experimental)
         .item(&presets)
         .item(&levels)
         .text("languages", "Languages…")
         .separator()
-        .text("show_workbench", "Show Workbench")
+        .text("show_workbench", "Settings & Transcript")
         .text("quit", "Quit NonoSub")
         .build()?;
     let icon = app.default_window_icon().cloned();
@@ -974,43 +1323,157 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     if let Some(icon) = icon {
         tray = tray.icon(icon);
     }
-    tray.on_menu_event(|app, event| {
-        let id = event.id().as_ref();
-        match id {
-            "open_video" => {
-                let _ = show_surface(app, "workbench");
-                let _ = app.emit("tray-action", "open_video");
-            }
-            "start_live" => {
-                let _ = show_surface(app, "workbench");
-                let _ = app.emit("tray-action", "start_live");
-            }
-            "stop_session" => {
-                let state = app.state::<AppState>();
-                state.cancelled.store(true, Ordering::Relaxed);
-                #[cfg(target_os = "macos")]
-                live::stop(&state.live);
-                let _ = record_event(app, SessionEvent::Complete);
-            }
-            "toggle_subtitles" | "arrange_overlay" | "play_pause" | "subtitle_earlier"
-            | "subtitle_later" | "subtitle_reset" | "languages" => {
-                let _ = app.emit("tray-action", id);
-                if id == "languages" {
-                    let _ = show_surface(app, "workbench");
+    tray.build(app)?;
+    Ok(())
+}
+
+fn show_launcher(app: &tauri::AppHandle, mode: &str) {
+    let state = app.state::<AppState>();
+    if let Ok(mut current) = state.launcher_mode.lock() {
+        *current = mode.into();
+    }
+    let _ = show_surface(app, "launcher");
+    let _ = app.emit("launcher-action", mode);
+}
+
+fn dispatch_action(app: &tauri::AppHandle, id: &str) {
+    match id {
+        "open_video" => show_launcher(app, "file"),
+        "start_live" => show_launcher(app, "live"),
+        "stop_session" => {
+            let state = app.state::<AppState>();
+            let mode = state
+                .canonical
+                .lock()
+                .ok()
+                .and_then(|snapshot| snapshot.mode.clone());
+            state.cancelled.store(true, Ordering::Relaxed);
+            #[cfg(target_os = "macos")]
+            live::stop(&state.live);
+            let _ = record_event(app, SessionEvent::Complete);
+            if mode == Some(SessionMode::Live) {
+                if let Some(window) = app.get_webview_window("overlay") {
+                    let _ = window.hide();
                 }
             }
-            "show_workbench" => {
-                let _ = show_surface(app, "workbench");
-            }
-            "quit" => app.exit(0),
-            value if value.starts_with("preset_") || value.starts_with("level_") => {
-                let _ = app.emit("tray-action", value);
-            }
-            _ => {}
+            update_activation_policy(app);
         }
+        "toggle_subtitles" => {
+            let state = app.state::<AppState>();
+            let visible = !state.subtitles_visible.fetch_xor(true, Ordering::Relaxed);
+            let mode = state
+                .canonical
+                .lock()
+                .ok()
+                .and_then(|snapshot| snapshot.mode.clone());
+            if mode == Some(SessionMode::Live) {
+                if let Some(window) = app.get_webview_window("overlay") {
+                    if visible {
+                        let _ = window.show();
+                    } else {
+                        let _ = window.hide();
+                    }
+                } else if visible {
+                    let _ = show_surface(app, "overlay");
+                }
+            }
+            let _ = app.emit("tray-action", id);
+            update_activation_policy(app);
+        }
+        "arrange_overlay" => {
+            app.state::<AppState>()
+                .subtitles_visible
+                .store(true, Ordering::Relaxed);
+            let _ = show_surface(app, "overlay");
+            let _ = app.emit("tray-action", "show_subtitles");
+            let _ = app.emit("tray-action", id);
+        }
+        "show_lesson" => {
+            let state = app.state::<AppState>();
+            let context_segment = state
+                .context_lesson_segment
+                .lock()
+                .ok()
+                .and_then(|mut segment| segment.take());
+            if let Some(segment_id) = context_segment {
+                let _ = record_event(
+                    app,
+                    SessionEvent::LessonSelected {
+                        segment_id: Some(segment_id),
+                    },
+                );
+            }
+            let has_selection = state
+                .canonical
+                .lock()
+                .is_ok_and(|snapshot| snapshot.selected_segment_id.is_some());
+            if has_selection {
+                let _ = show_surface(app, "lesson");
+                let source_label = state
+                    .context_lesson_source
+                    .lock()
+                    .ok()
+                    .and_then(|mut source| source.take());
+                let source = source_label
+                    .and_then(|label| app.get_webview_window(&label))
+                    .or_else(|| visible_lesson_source(app));
+                if let Some(source) = source {
+                    let source_surface = if source.label() == "viewer" { "viewer" } else if source.label() == "overlay" { "overlay" } else { "workbench" };
+                    let scale = source.scale_factor().unwrap_or(1.0);
+                    let size = source.inner_size().unwrap_or(tauri::PhysicalSize::new(720, 420));
+                    let cursor_x = size.width as f64 / scale / 2.0;
+                    let cursor_y = size.height as f64 / scale / 2.0;
+                    place_composer_near_cursor(app, &source, cursor_x, cursor_y);
+                    let segment_id = state.canonical.lock().ok().and_then(|snapshot| snapshot.selected_segment_id.clone()).unwrap_or_default();
+                    let payload = LessonOpenContext {
+                        source_surface: source_surface.into(),
+                        segment_id,
+                        cursor_x,
+                        cursor_y,
+                        external_media_control: ExternalMediaControlResult::NotRequested,
+                    };
+                    if let Ok(mut context) = state.lesson_open_context.lock() {
+                        *context = Some(payload.clone());
+                    }
+                    let _ = app.emit("lesson-composer-opened", payload);
+                }
+            }
+        }
+        "hide_lesson" => {
+            let state = app.state::<AppState>();
+            close_lesson(app, state.inner());
+        }
+        "languages" | "show_workbench" => {
+            let _ = show_surface(app, "workbench");
+            let _ = app.emit("tray-action", id);
+        }
+        "quit" => app.exit(0),
+        "play_pause"
+        | "subtitle_earlier"
+        | "subtitle_later"
+        | "subtitle_reset"
+        | "toggle_speaker_names"
+        | "display_source"
+        | "display_translation"
+        | "display_both"
+        | "live_mode_coordinated"
+        | "live_mode_fast_source"
+        | "external_pause_on"
+        | "external_pause_off" => {
+            let _ = app.emit("tray-action", id);
+        }
+        value if value.starts_with("preset_") || value.starts_with("level_") => {
+            let _ = app.emit("tray-action", value);
+        }
+        _ => {}
+    }
+}
+
+fn visible_lesson_source(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
+    ["viewer", "overlay"].into_iter().find_map(|label| {
+        app.get_webview_window(label)
+            .filter(|window| window.is_visible().unwrap_or(false))
     })
-    .build(app)?;
-    Ok(())
 }
 
 fn service_error(message: &str) -> openai::ApiError {
@@ -1030,8 +1493,7 @@ pub fn run() {
         .setup(|app| {
             setup_tray(app)?;
             let has_key = api_key_marker_exists(app.handle());
-            let show_debug_workbench = cfg!(debug_assertions);
-            if has_key && !show_debug_workbench {
+            if has_key {
                 let _ = app.get_webview_window("main").map(|window| window.hide());
                 #[cfg(target_os = "macos")]
                 let _ = app
@@ -1042,10 +1504,15 @@ pub fn run() {
             }
             Ok(())
         })
+        .on_menu_event(|app, event| dispatch_action(app, event.id().as_ref()))
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
+                if window.label() == "lesson" {
+                    let state = window.app_handle().state::<AppState>();
+                    close_lesson(window.app_handle(), state.inner());
+                }
                 update_activation_policy(window.app_handle());
             }
         })
@@ -1059,10 +1526,16 @@ pub fn run() {
             prepare_audio,
             start_analysis,
             request_lesson,
-            select_lesson_segment,
+            open_lesson_composer,
+            get_lesson_open_context,
+            media_key_permission_status,
+            request_media_key_permission,
+            post_media_play_pause,
+            close_lesson_surface,
             update_languages,
             update_speaker,
             open_surface,
+            get_launcher_mode,
             hide_surface,
             cancel_session,
             start_live_capture,
@@ -1100,7 +1573,41 @@ mod tests {
     #[test]
     fn secondary_surfaces_use_the_root_app_route() {
         assert_eq!(surface_path("overlay"), "?surface=overlay");
+        assert_eq!(surface_path("launcher"), "?surface=launcher");
         assert!(!surface_path("lesson").contains("index.html"));
+    }
+
+    #[test]
+    fn compact_surface_specs_are_transparent_and_accessory_safe() {
+        for surface in ["overlay", "lesson", "launcher"] {
+            let spec = window_spec(surface).unwrap();
+            assert!(spec.transparent);
+            assert!(!spec.shadow);
+            assert!(!requires_regular_activation([spec.label]));
+        }
+        assert_eq!(window_spec("launcher").unwrap().width, 420.0);
+        assert_eq!(window_spec("lesson").unwrap().height, 210.0);
+    }
+
+    #[test]
+    fn only_settings_and_viewer_require_a_dock_icon() {
+        assert!(requires_regular_activation(["main"]));
+        assert!(requires_regular_activation(["overlay", "viewer"]));
+        assert!(!requires_regular_activation([
+            "overlay", "lesson", "launcher"
+        ]));
+    }
+
+    #[test]
+    fn composer_placement_prefers_above_and_clamps_to_monitor() {
+        assert_eq!(
+            composer_position((100, 50, 1600, 900), (720, 210), (900, 500), 18),
+            (540, 272)
+        );
+        assert_eq!(
+            composer_position((100, 50, 800, 500), (720, 210), (110, 55), 18),
+            (118, 73)
+        );
     }
 
     #[test]
