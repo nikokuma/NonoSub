@@ -10,6 +10,7 @@ import {
   restoreTailRestPose,
   solveCcdChain,
   tailChainReach,
+  tipUnderlineProgress,
   type TailPresentation,
 } from "./tailPresentation";
 
@@ -45,7 +46,7 @@ describe("tail presentation geometry", () => {
     expect(afterDistance).toBeLessThan(beforeDistance);
     expect(chain[0].quaternion.equals(new THREE.Quaternion())).toBe(true);
     expect(chain[1].quaternion.equals(new THREE.Quaternion())).toBe(true);
-    expect(chain[2].quaternion.equals(new THREE.Quaternion())).toBe(true);
+    expect(chain[2].quaternion.equals(new THREE.Quaternion())).toBe(false);
   });
 
   it("extends only distal tail segments and caps total reach at 130%", () => {
@@ -61,8 +62,18 @@ describe("tail presentation geometry", () => {
     expect(extendedReach).toBeCloseTo(authoredReach * 1.3, 5);
     expect(chain[1].position.equals(pose.positions[1])).toBe(true);
     expect(chain[2].position.equals(pose.positions[2])).toBe(true);
-    expect(chain[3].position.equals(pose.positions[3])).toBe(true);
+    expect(chain[3].position.length()).toBeGreaterThan(pose.positions[3].length());
     expect(chain.at(-1)!.position.length()).toBeGreaterThan(1);
+  });
+
+  it("derives monotonic underline progress from the projected tip", () => {
+    const rect = { left: 100, top: 40, width: 200, height: 30 };
+    expect(tipUnderlineProgress(rect, 150, false, 0)).toBe(0.25);
+    expect(tipUnderlineProgress(rect, 150, true, 0)).toBe(0.75);
+    expect(tipUnderlineProgress(rect, 50, false, 0)).toBe(0);
+    expect(tipUnderlineProgress(rect, 350, false, 0)).toBe(1);
+    expect(tipUnderlineProgress(rect, 140, false, 0.8)).toBe(0.8);
+    expect(tipUnderlineProgress({ ...rect, width: 0 }, 200, false, 0.6)).toBe(0.6);
   });
 
   it("restores tail positions and rotations without accumulating stretch", () => {

@@ -55,6 +55,12 @@ export function cueScreenPoint(rect: RectLike, kind: "point" | "underline", prog
   };
 }
 
+export function tipUnderlineProgress(rect: RectLike, tipX: number, rtl: boolean, previous: number): number {
+  if (rect.width <= 0) return clamp01(previous);
+  const fraction = clamp01((tipX - rect.left) / rect.width);
+  return Math.max(clamp01(previous), rtl ? 1 - fraction : fraction);
+}
+
 export function chooseNearestTail(leftTip: ScreenPoint, rightTip: ScreenPoint, target: ScreenPoint): "left" | "right" {
   const distance = (point: ScreenPoint) => Math.hypot(point.x - target.x, point.y - target.y);
   return distance(leftTip) <= distance(rightTip) ? "left" : "right";
@@ -68,7 +74,7 @@ export function presentationStrength(presentation: TailPresentation): number {
   return 1;
 }
 
-export function solveCcdChain(chain: THREE.Bone[], target: THREE.Vector3, blend = 1, iterations = 4, protectedJoints = 3): number {
+export function solveCcdChain(chain: THREE.Bone[], target: THREE.Vector3, blend = 1, iterations = 4, protectedJoints = 2): number {
   if (chain.length < 3 || blend <= 0) return Number.POSITIVE_INFINITY;
   const effector = chain.at(-1)!;
   const jointPosition = new THREE.Vector3();
@@ -98,7 +104,7 @@ export function solveCcdChain(chain: THREE.Bone[], target: THREE.Vector3, blend 
 
       const angle = 2 * Math.acos(Math.min(1, Math.abs(delta.w)));
       const chainProgress = index / (chain.length - 1);
-      const maximumStep = THREE.MathUtils.lerp(0.055, 0.28, chainProgress);
+      const maximumStep = THREE.MathUtils.lerp(0.02, 0.30, chainProgress);
       limitedDelta.copy(delta);
       if (angle > maximumStep) limitedDelta.copy(identity).slerp(delta, maximumStep / angle);
 
@@ -142,13 +148,13 @@ export function requiredTailStretch(targetDistance: number, authoredReach: numbe
 
 /**
  * Extends only distal child offsets. Moving joint origins instead of scaling the
- * bones keeps the cable cross-section and the three plug-side segments stable.
+ * bones keeps the cable cross-section and the two plug-side segments stable.
  */
 export function applyTailExtension(
   chain: THREE.Bone[],
   restPositions: readonly THREE.Vector3[],
   stretch: number,
-  protectedSegments = 3,
+  protectedSegments = 2,
   maximum = 1.3,
 ): number {
   const count = Math.min(chain.length, restPositions.length);
@@ -181,6 +187,10 @@ function easeInOut(value: number): number {
 }
 
 function smoothStep(value: number): number {
-  const clamped = Math.max(0, Math.min(1, value));
+  const clamped = clamp01(value);
   return clamped * clamped * (3 - 2 * clamped);
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
 }

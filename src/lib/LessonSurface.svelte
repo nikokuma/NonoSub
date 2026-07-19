@@ -16,7 +16,7 @@
   import ChalkStepNumber from "./ChalkStepNumber.svelte";
   import NonoScene from "./NonoScene.svelte";
   import LessonQuestionComposer from "./LessonQuestionComposer.svelte";
-  import { IDLE_TAIL_PRESENTATION, type TailPresentation, type TailPresentationPhase } from "./tailPresentation";
+  import { IDLE_TAIL_PRESENTATION, tipUnderlineProgress, type TailPresentation, type TailPresentationPhase } from "./tailPresentation";
 
   type BoardPhase = "idle" | "erasing" | "thinking" | "writing";
 
@@ -48,6 +48,8 @@
   let tailPresentation = $state<TailPresentation>({ ...IDLE_TAIL_PRESENTATION });
   let tailRigAvailable = $state(false);
   let cueGeneration = 0;
+  let underlineElementGeneration = -1;
+  let activeUnderlineElement: HTMLElement | undefined;
   let underlineProgress = $state<Record<string, number>>({});
   let mode = $state<LessonSurfaceMode>("compose");
   let followupOpen = $state(false);
@@ -319,8 +321,30 @@
     return underlineProgress[cueId] ?? 0;
   }
 
+  function handleTailTip(report: { cueId: string; x: number; y: number }) {
+    if (
+      !tailRigAvailable
+      || underlineElementGeneration !== cueGeneration
+      || tailPresentation.sequenceId !== cueGeneration
+      || (tailPresentation.phase !== "underline" && tailPresentation.phase !== "retract")
+      || tailPresentation.underlineCueId !== report.cueId
+    ) return;
+    if (activeUnderlineElement?.dataset.cueId !== report.cueId) {
+      activeUnderlineElement = boardElement?.querySelector<HTMLElement>(`[data-cue-id="${report.cueId}"]`) ?? undefined;
+    }
+    if (!activeUnderlineElement) return;
+    const rect = activeUnderlineElement.getBoundingClientRect();
+    const rtl = getComputedStyle(activeUnderlineElement).direction === "rtl";
+    underlineProgress = {
+      ...underlineProgress,
+      [report.cueId]: tipUnderlineProgress(rect, report.x, rtl, underlineProgress[report.cueId] ?? 0),
+    };
+  }
+
   function cancelCueSequence() {
     cueGeneration += 1;
+    underlineElementGeneration = -1;
+    activeUnderlineElement = undefined;
     underlineProgress = {};
     tailPresentation = { ...IDLE_TAIL_PRESENTATION, sequenceId: cueGeneration };
   }
@@ -338,6 +362,8 @@
     const underlineCueId = underline?.dataset.cueId;
     const underlineColor = underline?.dataset.chalkColor as TailPresentation["underlineColor"];
     if (!pointCueId && !underlineCueId) return;
+    underlineElementGeneration = generation;
+    activeUnderlineElement = underline ?? undefined;
 
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
       if (underlineCueId) underlineProgress = { [underlineCueId]: 1 };
@@ -352,10 +378,12 @@
       await animatePresentation(generation, "hold", 400, { pointCueId, underlineCueId, underlineColor });
       if (generation !== cueGeneration) return;
       await animatePresentation(generation, "underline", 550, { pointCueId, underlineCueId, underlineColor }, (progress) => {
-        underlineProgress = { ...underlineProgress, [underlineCueId]: progress };
+        if (!tailRigAvailable) underlineProgress = { ...underlineProgress, [underlineCueId]: progress };
       });
+      if (generation !== cueGeneration) return;
+      await sleep(320);
+      if (generation !== cueGeneration) return;
       underlineProgress = { ...underlineProgress, [underlineCueId]: 1 };
-      await sleep(220);
     } else {
       tailPresentation = { sequenceId: generation, phase: "hold", progress: 1, pointCueId };
       await sleep(700);
@@ -404,7 +432,7 @@
 <div class="lesson-shell">
   <section class="stage">
       <button class="floating-close" aria-label="Close Nono lesson" onclick={closeLesson}>×</button>
-      <NonoScene presentation={tailPresentation} mood={nonoMood} onRigStatus={(available) => tailRigAvailable = available} />
+      <NonoScene presentation={tailPresentation} mood={nonoMood} onRigStatus={(available) => tailRigAvailable = available} onTailTip={handleTailTip} />
       <svg class="chalk-filter" width="0" height="0" aria-hidden="true">
         <filter id="chalk-roughen" x="-4%" y="-8%" width="108%" height="116%" color-interpolation-filters="sRGB">
           <feTurbulence type="fractalNoise" baseFrequency="0.72" numOctaves="1" seed="17" result="noise" />

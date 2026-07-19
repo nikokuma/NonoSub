@@ -5,6 +5,15 @@
   import { applyHairMotion, resolveHairMotionRig, type HairMotionRig } from "./hairMotion";
   import { applyNonoMaterials, nonoAssetFromLocation, shaderVariantFromLocation } from "./nonoToon";
   import {
+    createTailDynamicsState,
+    resetTailDynamics,
+    seedVec3Spring,
+    stepScalarSpring,
+    stepVec3Spring,
+    TAIL_SPRING,
+    type TailDynamicsState,
+  } from "./tailDynamics";
+  import {
     applyTailExtension,
     captureTailRestPose,
     CURRENT_TAIL_BONES,
@@ -28,10 +37,12 @@
     presentation,
     mood = "idle",
     onRigStatus,
+    onTailTip,
   }: {
     presentation: TailPresentation;
     mood?: NonoMood;
     onRigStatus?: (available: boolean) => void;
+    onTailTip?: (report: { cueId: string; x: number; y: number }) => void;
   } = $props();
 
   let container: HTMLDivElement;
@@ -70,6 +81,7 @@
     let activeMood: NonoMood | undefined;
     let tailRig: TailRig | undefined;
     let tailRestPoses: Record<TailSide, TailRestPose> | undefined;
+    let tailDynamics: Record<TailSide, TailDynamicsState> | undefined;
     let hairRig: HairMotionRig | undefined;
     let assignedPointTail: TailSide | undefined;
     let assignedUnderlineTail: TailSide | undefined;
@@ -94,14 +106,24 @@
       scene.add(model);
 
       if (gltf.animations.length > 0) mixer = new THREE.AnimationMixer(model);
+      if (tailDynamics) {
+        resetTailDynamics(tailDynamics.left);
+        resetTailDynamics(tailDynamics.right);
+      }
+      tailDynamics = undefined;
       tailRig = resolveTailRig(model);
       if (tailRig) {
         tailRestPoses = {
           left: captureTailRestPose(tailRig.left),
           right: captureTailRestPose(tailRig.right),
         };
+        tailDynamics = {
+          left: createTailDynamicsState(),
+          right: createTailDynamicsState(),
+        };
         onRigStatus?.(true);
       } else {
+        tailRestPoses = undefined;
         onRigStatus?.(false);
         if (import.meta.env.DEV) console.warn("Nono tail rig unavailable: the GLB needs skinned tail geometry and both 12-bone chains.");
       }
@@ -166,16 +188,23 @@
         model.updateWorldMatrix(true, true);
         if (hairRig) applyHairMotion(hairRig, delta, timestamp, reducedMotion);
       }
-      if (model && tailRig && tailRestPoses) {
+      if (model && tailRig && tailRestPoses && tailDynamics) {
         restoreTailRestPose(tailRig.left, tailRestPoses.left);
         restoreTailRestPose(tailRig.right, tailRestPoses.right);
-        if (!reducedMotion) applyTailIdle(tailRig, timestamp);
+        if (!reducedMotion) {
+          applyTailIdle(tailRig, timestamp);
+        } else {
+          resetTailDynamics(tailDynamics.left);
+          resetTailDynamics(tailDynamics.right);
+        }
         ({ assignedPointTail, assignedUnderlineTail, assignedSequence } = applyPresentation({
           presentation,
           rig: tailRig,
           restPoses: tailRestPoses,
+          dynamics: tailDynamics,
           camera,
           canvas: renderer.domElement,
+          delta,
           assignedPointTail,
           assignedUnderlineTail,
           assignedSequence,
@@ -238,8 +267,10 @@
     presentation,
     rig,
     restPoses,
+    dynamics,
     camera,
     canvas,
+    delta,
     assignedPointTail,
     assignedUnderlineTail,
     assignedSequence,
@@ -247,8 +278,10 @@
     presentation: TailPresentation;
     rig: TailRig;
     restPoses: Record<TailSide, TailRestPose>;
+    dynamics: Record<TailSide, TailDynamicsState>;
     camera: THREE.Camera;
     canvas: HTMLCanvasElement;
+    delta: number;
     assignedPointTail?: TailSide;
     assignedUnderlineTail?: TailSide;
     assignedSequence: number;
@@ -259,8 +292,8 @@
       const primaryElement = pointElement ?? underlineElement;
       if (primaryElement) {
         const target = cueScreenPoint(primaryElement.getBoundingClientRect(), pointElement ? "point" : "underline");
-        const leftTip = projectTip(rig.left.at(-1)!, camera, canvas);
-        const rightTip = projectTip(rig.right.at(-1)!, camera, canvas);
+        const leftTip = projectTip(rig.left.at(-1)!, camera, canvas, _leftTipPoint);
+        const rightTip = projectTip(rig.right.at(-1)!, camera, canvas, _rightTipPoint);
         const nearest = chooseNearestTail(leftTip, rightTip, target);
         if (pointElement) {
           assignedPointTail = nearest;
@@ -269,74 +302,145 @@
           assignedUnderlineTail = nearest;
           assignedPointTail = undefined;
         }
+        if (assignedPointTail) seedTailForSequence(assignedPointTail, presentation.sequenceId, rig, dynamics);
+        if (assignedUnderlineTail && assignedUnderlineTail !== assignedPointTail) {
+          seedTailForSequence(assignedUnderlineTail, presentation.sequenceId, rig, dynamics);
+        }
       }
       assignedSequence = presentation.sequenceId;
     }
 
-    const strength = presentationStrength(presentation);
-    if (strength > 0 && pointElement && assignedPointTail) {
-      const point = cueScreenPoint(pointElement.getBoundingClientRect(), "point");
-      solveToward(rig[assignedPointTail], restPoses[assignedPointTail], point, camera, canvas, strength);
-    }
-    if (strength > 0 && underlineElement && assignedUnderlineTail && presentation.phase !== "point") {
-      const rtl = getComputedStyle(underlineElement).direction === "rtl";
-      const underlineProgress = presentation.phase === "underline" ? presentation.progress : presentation.phase === "retract" ? 1 : 0;
-      const point = cueScreenPoint(underlineElement.getBoundingClientRect(), "underline", underlineProgress, rtl);
-      const underlineStrength = presentation.phase === "hold" ? Math.max(0, Math.min(1, presentation.progress)) : strength;
-      solveToward(rig[assignedUnderlineTail], restPoses[assignedUnderlineTail], point, camera, canvas, underlineStrength);
+    const baseStrength = presentationStrength(presentation);
+    const targetSpring = presentation.phase === "point" || presentation.phase === "hold"
+      ? TAIL_SPRING.target.point
+      : presentation.phase === "underline"
+        ? TAIL_SPRING.target.underline
+        : TAIL_SPRING.target.retract;
+    for (const side of TAIL_SIDES) {
+      const state = dynamics[side];
+      const isPointTail = assignedPointTail === side;
+      const isUnderlineTail = assignedUnderlineTail === side;
+      const pointEngaged = isPointTail && Boolean(pointElement);
+      const underlineEngaged = isUnderlineTail && Boolean(underlineElement) && presentation.phase !== "point";
+      const phaseTarget = underlineEngaged && presentation.phase === "hold"
+        ? Math.max(0, Math.min(1, presentation.progress))
+        : pointEngaged || underlineEngaged
+          ? baseStrength
+          : 0;
+      stepScalarSpring(
+        state.strength,
+        phaseTarget,
+        delta,
+        TAIL_SPRING.strength.frequency,
+        TAIL_SPRING.strength.damping,
+      );
+
+      let screenPoint: ScreenPoint | undefined;
+      if (underlineEngaged && underlineElement) {
+        const rtl = getComputedStyle(underlineElement).direction === "rtl";
+        const underlineProgress = presentation.phase === "underline" ? presentation.progress : presentation.phase === "retract" ? 1 : 0;
+        screenPoint = cueScreenPoint(underlineElement.getBoundingClientRect(), "underline", underlineProgress, rtl);
+      } else if (pointEngaged && pointElement) {
+        screenPoint = cueScreenPoint(pointElement.getBoundingClientRect(), "point");
+      }
+      if (screenPoint) {
+        const rawTarget = screenToWorld(screenPoint, rig[side][0], camera, canvas);
+        if (rawTarget) {
+          state.lastRawTarget.copy(rawTarget);
+          state.hasRawTarget = true;
+        }
+      }
+      if (state.hasRawTarget) {
+        stepVec3Spring(state.target, state.lastRawTarget, delta, targetSpring.frequency, targetSpring.damping);
+      }
+
+      const solved = state.strength.value > 0.01 && state.hasRawTarget && solveToward(
+        rig[side],
+        restPoses[side],
+        state,
+      );
+      if (
+        solved
+        && isUnderlineTail
+        && (presentation.phase === "underline" || presentation.phase === "retract")
+        && presentation.underlineCueId
+        && onTailTip
+      ) {
+        const tip = projectTip(rig[side].at(-1)!, camera, canvas, _reportedTipPoint);
+        onTailTip({ cueId: presentation.underlineCueId, x: tip.x, y: tip.y });
+      }
+      if (state.strength.value <= 0.01 && presentation.phase === "idle") resetTailDynamics(state);
     }
     return { assignedPointTail, assignedUnderlineTail, assignedSequence };
+  }
+
+  function seedTailForSequence(
+    side: TailSide,
+    sequenceId: number,
+    rig: TailRig,
+    dynamics: Record<TailSide, TailDynamicsState>,
+  ) {
+    const state = dynamics[side];
+    if (state.lastSequenceId === sequenceId) return;
+    rig[side].at(-1)!.getWorldPosition(_tipWorldPosition);
+    seedVec3Spring(state.target, _tipWorldPosition);
+    state.lastSequenceId = sequenceId;
   }
 
   function cueElement(cueId?: string): HTMLElement | undefined {
     return cueId ? document.querySelector<HTMLElement>(`[data-cue-id="${cueId}"]`) ?? undefined : undefined;
   }
 
-  function projectTip(tip: THREE.Bone, camera: THREE.Camera, canvas: HTMLCanvasElement): ScreenPoint {
+  function projectTip(tip: THREE.Bone, camera: THREE.Camera, canvas: HTMLCanvasElement, result: ScreenPoint): ScreenPoint {
     const rect = canvas.getBoundingClientRect();
-    const point = tip.getWorldPosition(new THREE.Vector3()).project(camera);
-    return { x: rect.left + (point.x + 1) * rect.width / 2, y: rect.top + (1 - point.y) * rect.height / 2 };
+    tip.getWorldPosition(_projectedTipPosition).project(camera);
+    result.x = rect.left + (_projectedTipPosition.x + 1) * rect.width / 2;
+    result.y = rect.top + (1 - _projectedTipPosition.y) * rect.height / 2;
+    return result;
   }
 
-  function solveToward(chain: THREE.Bone[], restPose: TailRestPose, screenPoint: ScreenPoint, camera: THREE.Camera, canvas: HTMLCanvasElement, strength: number) {
-    const target = screenToWorld(screenPoint, chain[0], camera, canvas);
-    if (!target) return;
-    const root = chain[0].getWorldPosition(new THREE.Vector3());
+  function solveToward(
+    chain: THREE.Bone[],
+    restPose: TailRestPose,
+    state: TailDynamicsState,
+  ): boolean {
+    const target = _solveTarget.copy(state.target.position);
+    const root = chain[0].getWorldPosition(_solveRootPosition);
     const authoredReach = worldChainReach(chain);
     const targetDistance = target.distanceTo(root);
     const requiredStretch = requiredTailStretch(targetDistance, authoredReach);
+    const strength = state.strength.value;
     applyTailExtension(chain, restPose.positions, THREE.MathUtils.lerp(1, requiredStretch, Math.max(0, Math.min(1, strength))));
     const reach = worldChainReach(chain) * 0.97;
     if (targetDistance > reach) target.sub(root).setLength(reach).add(root);
     solveCcdChain(chain, target, Math.min(0.9, strength), 4);
+    return true;
   }
 
   function worldChainReach(chain: THREE.Bone[]): number {
     chain[0]?.updateWorldMatrix(true, true);
     let reach = 0;
-    const previous = new THREE.Vector3();
-    const current = new THREE.Vector3();
-    chain[0]?.getWorldPosition(previous);
-    for (const bone of chain.slice(1)) {
-      bone.getWorldPosition(current);
-      reach += current.distanceTo(previous);
-      previous.copy(current);
+    chain[0]?.getWorldPosition(_chainPreviousPosition);
+    for (let index = 1; index < chain.length; index += 1) {
+      const bone = chain[index];
+      bone.getWorldPosition(_chainCurrentPosition);
+      reach += _chainCurrentPosition.distanceTo(_chainPreviousPosition);
+      _chainPreviousPosition.copy(_chainCurrentPosition);
     }
     return reach;
   }
 
   function screenToWorld(point: ScreenPoint, root: THREE.Bone, camera: THREE.Camera, canvas: HTMLCanvasElement): THREE.Vector3 | undefined {
     const rect = canvas.getBoundingClientRect();
-    const ndc = new THREE.Vector2(
+    _screenNdc.set(
       ((point.x - rect.left) / rect.width) * 2 - 1,
       -((point.y - rect.top) / rect.height) * 2 + 1,
     );
-    const ray = new THREE.Raycaster();
-    ray.setFromCamera(ndc, camera);
-    const rootPosition = root.getWorldPosition(new THREE.Vector3());
-    const normal = camera.getWorldDirection(new THREE.Vector3());
-    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, rootPosition);
-    return ray.ray.intersectPlane(plane, new THREE.Vector3()) ?? undefined;
+    _screenRaycaster.setFromCamera(_screenNdc, camera);
+    root.getWorldPosition(_screenRootPosition);
+    camera.getWorldDirection(_screenPlaneNormal);
+    _screenPlane.setFromNormalAndCoplanarPoint(_screenPlaneNormal, _screenRootPosition);
+    return _screenRaycaster.ray.intersectPlane(_screenPlane, _screenWorldTarget) ?? undefined;
   }
 
   function disposeModel(model: THREE.Object3D) {
@@ -348,6 +452,23 @@
       for (const material of materials) material.dispose();
     });
   }
+
+  const TAIL_SIDES = ["left", "right"] as const;
+  const _leftTipPoint: ScreenPoint = { x: 0, y: 0 };
+  const _rightTipPoint: ScreenPoint = { x: 0, y: 0 };
+  const _reportedTipPoint: ScreenPoint = { x: 0, y: 0 };
+  const _tipWorldPosition = new THREE.Vector3();
+  const _projectedTipPosition = new THREE.Vector3();
+  const _solveTarget = new THREE.Vector3();
+  const _solveRootPosition = new THREE.Vector3();
+  const _chainPreviousPosition = new THREE.Vector3();
+  const _chainCurrentPosition = new THREE.Vector3();
+  const _screenNdc = new THREE.Vector2();
+  const _screenRaycaster = new THREE.Raycaster();
+  const _screenRootPosition = new THREE.Vector3();
+  const _screenPlaneNormal = new THREE.Vector3();
+  const _screenPlane = new THREE.Plane();
+  const _screenWorldTarget = new THREE.Vector3();
 </script>
 
 <div class="nono-scene" bind:this={container} aria-label="Nono 3D guide">
