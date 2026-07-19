@@ -65,6 +65,10 @@
   .speaker-tab span { display: block; transform: skewX(12deg); }
   .source-card, .translation-card { position: relative; display: block; width: fit-content; max-width: 100%; overflow-wrap: anywhere; word-break: auto-phrase; text-wrap: balance; }
   .live .source-card, .live .translation-card { text-wrap: wrap; }
+  .momento-card.live { max-height: 180px; overflow: visible; }
+  .live .source-card, .live .translation-card { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+  .live .source-card { line-clamp: var(--live-source-lines); -webkit-line-clamp: var(--live-source-lines); }
+  .live .translation-card { line-clamp: var(--live-translation-lines); -webkit-line-clamp: var(--live-translation-lines); }
   .source-card { z-index: 2; padding: .2em .78em .26em 1em; background: var(--source-panel); color: #05091e; border: clamp(1px, .07em, 2px) solid #05091e; box-shadow: .2em .2em 0 #05091e; font-family: "Hiragino Sans", "Noto Sans CJK JP", "Noto Sans", Inter, sans-serif; font-size: 1em; font-weight: 900; line-height: 1.18; -webkit-text-stroke: clamp(1px, .04em, 1.5px) #f4f7fb; paint-order: stroke fill; }
   .source-card::before { content: ""; position: absolute; z-index: -1; left: -.48em; top: -.04em; bottom: -.04em; width: .58em; background: var(--speaker-accent); border: clamp(1px, .07em, 2px) solid #05091e; transform: skewX(-12deg); }
   .translation-card { z-index: 1; margin-top: .16em; margin-left: .72em; padding: .24em .82em .28em; background: var(--translation-panel); color: #fff; border-bottom: clamp(2px, .1em, 4px) solid var(--speaker-accent); box-shadow: .18em .16em 0 var(--speaker-accent); font-family: "Avenir Next Condensed", Inter, sans-serif; font-size: .68em; font-weight: 800; line-height: 1.18; text-shadow: 0 1px 2px #05091e, -1px 0 1px #05091e, 1px 0 1px #05091e; }

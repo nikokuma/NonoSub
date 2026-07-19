@@ -28,6 +28,104 @@ export interface LiveCaptionDensityRequest {
   showTranslation: boolean;
 }
 
+export interface LiveCaptionEnvelopeRequest {
+  viewportWidth: number;
+  fontSizePx: number;
+  sourceText: string;
+  translationText: string;
+  showSource: boolean;
+  showTranslation: boolean;
+}
+
+export interface LiveCaptionEnvelope {
+  sourceText: string;
+  translationText: string;
+  sourceLineLimit: number;
+  translationLineLimit: number;
+  sourceGraphemeBudget: number;
+  translationGraphemeBudget: number;
+}
+
+const LIVE_CAPTION_MAX_GRAPHEMES = 180;
+const liveGraphemeSegmenter = typeof Intl !== "undefined" && typeof Intl.Segmenter === "function"
+  ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+  : undefined;
+
+function liveGraphemes(text: string): string[] {
+  if (!liveGraphemeSegmenter) return Array.from(text);
+  return Array.from(liveGraphemeSegmenter.segment(text), ({ segment }) => segment);
+}
+
+function compactLiveWhitespace(text: string): string {
+  return text.replace(/\s+/gu, " ").trim();
+}
+
+function boundedLiveTextTail(text: string, maximumGraphemes: number): string {
+  const compact = compactLiveWhitespace(text);
+  const graphemes = liveGraphemes(compact);
+  const budget = Math.max(1, Math.floor(maximumGraphemes));
+  if (graphemes.length <= budget) return compact;
+
+  let tail = graphemes.slice(-(budget - 1)).join("");
+  // Avoid beginning on a partial Latin word when a nearby boundary exists.
+  const firstSpace = tail.search(/\s/u);
+  if (firstSpace >= 0 && firstSpace <= Math.max(8, Math.floor(tail.length * 0.2))) {
+    tail = tail.slice(firstSpace + 1).trimStart();
+  }
+  return `…${tail}`;
+}
+
+function liveRowBudget(
+  text: string,
+  viewportWidth: number,
+  fontSizePx: number,
+  rowScale: number,
+  lineLimit: number,
+): number {
+  if (lineLimit === 0) return 0;
+  const graphemes = liveGraphemes(compactLiveWhitespace(text));
+  const cjkCount = graphemes.filter((grapheme) => /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(grapheme)).length;
+  const averageGlyphWidth = graphemes.length > 0 && cjkCount / graphemes.length >= 0.2 ? 0.96 : 0.58;
+  const cardWidth = Math.min(900, Math.max(280, viewportWidth * 0.92));
+  // Fallout has the widest horizontal frame. Using its inset keeps the text
+  // budget safe for every preset without measuring on each realtime fragment.
+  const usableWidth = Math.max(180, cardWidth - Math.max(64, fontSizePx * 5));
+  const glyphWidth = Math.max(6, fontSizePx * rowScale * averageGlyphWidth);
+  // Leave enough slack for Wired's timestamp gutter, Momento's angled cutout,
+  // font fallback differences, and WebKit's final word wrapping. The CSS clamp
+  // is a last-resort barrier, not the normal way the newest words are hidden.
+  const estimated = Math.floor((usableWidth / glyphWidth) * lineLimit * 0.74);
+  return Math.max(12, Math.min(LIVE_CAPTION_MAX_GRAPHEMES, estimated));
+}
+
+/**
+ * Create a watching-only live caption. The canonical segment remains complete
+ * for transcript history and Nono lessons; the overlay receives only the
+ * newest text that can plausibly fit inside its fixed visual envelope.
+ */
+export function calculateLiveCaptionEnvelope({
+  viewportWidth,
+  fontSizePx,
+  sourceText,
+  translationText,
+  showSource,
+  showTranslation,
+}: LiveCaptionEnvelopeRequest): LiveCaptionEnvelope {
+  const sourceLineLimit = showSource ? (showTranslation ? 2 : 3) : 0;
+  const translationLineLimit = showTranslation ? (showSource ? 2 : 3) : 0;
+  const sourceGraphemeBudget = liveRowBudget(sourceText, viewportWidth, fontSizePx, 1, sourceLineLimit);
+  const translationGraphemeBudget = liveRowBudget(translationText, viewportWidth, fontSizePx, 0.68, translationLineLimit);
+
+  return {
+    sourceText: showSource ? boundedLiveTextTail(sourceText, sourceGraphemeBudget) : sourceText,
+    translationText: showTranslation ? boundedLiveTextTail(translationText, translationGraphemeBudget) : translationText,
+    sourceLineLimit,
+    translationLineLimit,
+    sourceGraphemeBudget,
+    translationGraphemeBudget,
+  };
+}
+
 export function liveOverlaySegment(
   segment: SubtitleSegment,
   liveMode: LiveSyncMode,

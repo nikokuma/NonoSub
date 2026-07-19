@@ -70,6 +70,10 @@
   .caption-stack { display: grid; justify-items: center; gap: .08em; width: fit-content; max-width: 100%; min-width: 0; padding: .2em .62em .24em; background: var(--broadcast-panel); }
   .caption { display: block; width: fit-content; max-width: 100%; overflow-wrap: anywhere; word-break: auto-phrase; text-wrap: balance; }
   .live .caption { text-wrap: wrap; }
+  .broadcast-card.live { max-height: 180px; overflow: visible; }
+  .live .caption { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+  .live .source { line-clamp: var(--live-source-lines); -webkit-line-clamp: var(--live-source-lines); }
+  .live .translation { line-clamp: var(--live-translation-lines); -webkit-line-clamp: var(--live-translation-lines); }
   .source { font-size: 1em; font-weight: 700; line-height: 1.16; }
   .translation { font-size: .7em; font-weight: 700; line-height: 1.18; }
   .speaker, .live-signal { font-size: max(9px, .38em); font-weight: 700; letter-spacing: .1em; line-height: 1.05; text-transform: uppercase; }

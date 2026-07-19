@@ -102,6 +102,10 @@
   .caption-stack, .metadata { position: relative; z-index: 1; }
   .caption-stack { display: grid; gap: .08em; min-width: 0; }
   .caption { display: block; max-width: 100%; overflow-wrap: anywhere; word-break: auto-phrase; }
+  .arcade-card.live { max-height: 180px; overflow: visible; }
+  .live .caption { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+  .live .source { line-clamp: var(--live-source-lines); -webkit-line-clamp: var(--live-source-lines); }
+  .live .translation { line-clamp: var(--live-translation-lines); -webkit-line-clamp: var(--live-translation-lines); }
   .source, .translation, .metadata {
     font-family: inherit;
     font-weight: 400;

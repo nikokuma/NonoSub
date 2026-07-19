@@ -39,6 +39,30 @@ export const LONG_LIVE_FIXTURE_EVENTS: SessionEvent[] = [
   { type: "live_sync_changed", sync: { targetDelayMs: 2_800, observedLagMs: 2_200, status: "steady", visibleSegmentId: "live-long" } },
 ];
 
+// Deliberately exceeds every backend clause limit. R2 uses this to prove the
+// watching surface remains safe even if a provider or future regression sends
+// a pathological segment; transcript state intentionally keeps the full text.
+export const PATHOLOGICAL_LIVE_FIXTURE_EVENTS: SessionEvent[] = [
+  { type: "session_reset", mode: "live", languages: { source: "auto", target: "en", explanation: "en" }, processingMode: "translated" },
+  { type: "phase_changed", phase: "ready" },
+  {
+    type: "transcript_finalized",
+    segment: {
+      id: "live-pathological",
+      origin: "live",
+      startMs: 120_000,
+      endMs: 180_000,
+      sourceText: `${"これは表示してはいけない古い字幕履歴です。".repeat(160)}ここが現在聞こえている最後の日本語です。`,
+      translationText: `${"This is old caption history that must never cover the screen. ".repeat(160)}This is the newest translated sentence.`,
+      speakerId: "live-audio",
+      isProvisional: false,
+      transcriptionStatus: "complete",
+      translationStatus: "complete",
+    },
+  },
+  { type: "live_sync_changed", sync: { targetDelayMs: 6_000, observedLagMs: 5_400, status: "degraded", visibleSegmentId: "live-pathological" } },
+];
+
 export const ORIGINAL_ONLY_FIXTURE_EVENTS: SessionEvent[] = [
   { type: "session_reset", mode: "live", languages: { source: "ja", target: "en", explanation: "en" }, processingMode: "original_only" },
   { type: "phase_changed", phase: "ready" },

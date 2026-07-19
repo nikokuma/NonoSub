@@ -17,7 +17,7 @@ Keep continuous realtime source and translation output bounded, correctly paired
 - A source-only fallback reserves one target group. Late translation may fill it once, while a finalized target never reopens.
 - Close both active tracks at reconnect and align the new epoch from the current transmitted-audio clock.
 - Keep one rolling lag sample per `(epoch, elapsed_ms)` and update it with the latest fragment receipt.
-- Clear the watching caption after four seconds of silence and immediately when capture finishes.
+- Hold the last released watching caption until its replacement satisfies the active release rules; clear it immediately when capture finishes.
 - Keep partial target text available to canonical transcript state, but hide it from a Coordinated watching overlay until the target clause is complete.
 
 ## Non-goals

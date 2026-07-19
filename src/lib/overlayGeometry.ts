@@ -20,6 +20,7 @@ interface ResolveOverlayGeometryOptions {
   preferredLogicalWidth: number;
   contentLogicalHeight: number;
   minimumLogicalHeight?: number;
+  maximumLogicalHeight?: number;
   maximumHeightRatio?: number;
   horizontalMargin?: number;
   verticalMargin?: number;
@@ -47,10 +48,9 @@ export function resolveOverlayGeometry(
   const minimumLogicalWidth = Math.min(520, maximumLogicalWidth);
   const logicalWidth = clamp(options.preferredLogicalWidth, minimumLogicalWidth, maximumLogicalWidth);
   const minimumLogicalHeight = Math.min(options.minimumLogicalHeight ?? 130, monitorLogicalHeight * 0.9);
-  const maximumLogicalHeight = Math.max(
-    minimumLogicalHeight,
-    monitorLogicalHeight * (options.maximumHeightRatio ?? 0.82),
-  );
+  const ratioHeightLimit = monitorLogicalHeight * (options.maximumHeightRatio ?? 0.82);
+  const requestedHeightLimit = options.maximumLogicalHeight ?? ratioHeightLimit;
+  const maximumLogicalHeight = Math.max(minimumLogicalHeight, Math.min(ratioHeightLimit, requestedHeightLimit));
   const logicalHeight = clamp(
     options.contentLogicalHeight + verticalMargin * 2,
     minimumLogicalHeight,

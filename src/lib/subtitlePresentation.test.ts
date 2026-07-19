@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateLiveCaptionFontSize, calculateSubtitleFit, colorWithOpacity, liveOverlaySegment, readableAccentTextColor, subtitleFitOptionsEqual } from "./subtitlePresentation";
+import { calculateLiveCaptionEnvelope, calculateLiveCaptionFontSize, calculateSubtitleFit, colorWithOpacity, liveOverlaySegment, readableAccentTextColor, subtitleFitOptionsEqual } from "./subtitlePresentation";
 import type { SubtitleSegment } from "./contracts";
 
 describe("subtitle presentation", () => {
@@ -74,6 +74,46 @@ describe("subtitle presentation", () => {
     };
     expect(calculateLiveCaptionFontSize({ ...request, showTranslation: false })).toBe(28);
     expect(calculateLiveCaptionFontSize({ ...request, showTranslation: true })).toBeLessThan(28);
+  });
+
+  it("bounds pathological live text to the newest readable tail", () => {
+    const sourceText = `${"古い日本語の発話です。".repeat(200)}最後の日本語です。`;
+    const translationText = `${"This is old translated speech that must not cover the screen. ".repeat(200)}This is the newest translation.`;
+    const envelope = calculateLiveCaptionEnvelope({
+      fontSizePx: 17,
+      viewportWidth: 520,
+      sourceText,
+      translationText,
+      showSource: true,
+      showTranslation: true,
+    });
+
+    expect(envelope.sourceLineLimit).toBe(2);
+    expect(envelope.translationLineLimit).toBe(2);
+    expect(envelope.sourceText.startsWith("…")).toBe(true);
+    expect(envelope.sourceText.endsWith("最後の日本語です。")).toBe(true);
+    expect(envelope.translationText.startsWith("…")).toBe(true);
+    expect(envelope.translationText.endsWith("This is the newest translation.")).toBe(true);
+    expect(Array.from(envelope.sourceText).length).toBeLessThanOrEqual(envelope.sourceGraphemeBudget);
+    expect(Array.from(envelope.translationText).length).toBeLessThanOrEqual(envelope.translationGraphemeBudget);
+    expect(sourceText.length).toBeGreaterThan(envelope.sourceText.length);
+    expect(translationText.length).toBeGreaterThan(envelope.translationText.length);
+  });
+
+  it("gives a single visible language three lines without budgeting hidden text", () => {
+    const envelope = calculateLiveCaptionEnvelope({
+      fontSizePx: 25,
+      viewportWidth: 900,
+      sourceText: "今日は字幕の表示領域について説明しています。".repeat(20),
+      translationText: "This hidden translation must remain irrelevant to source-only layout. ".repeat(30),
+      showSource: true,
+      showTranslation: false,
+    });
+
+    expect(envelope.sourceLineLimit).toBe(3);
+    expect(envelope.translationLineLimit).toBe(0);
+    expect(envelope.translationText).toContain("This hidden translation");
+    expect(envelope.sourceText.startsWith("…")).toBe(true);
   });
 
   it("chooses readable text for light and dark speaker colors", () => {

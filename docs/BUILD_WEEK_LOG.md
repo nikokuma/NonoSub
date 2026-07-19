@@ -134,7 +134,15 @@
 - Added immutable closure at punctuation/quiet, idle, aligned-time, capture-age, and grapheme boundaries; incoming deltas honor an already-reached quiet boundary even if the scheduler has not ticked yet.
 - Paired utterance groups monotonically by realtime epoch and aligned-time compatibility. Hard-split continuations remain attached to their original source and cannot shift the next translation.
 - Kept one lag observation per epoch/alignment frame, updating it with the latest fragment receipt rather than weighting token fragmentation.
-- Added reconnect isolation, one-time late translation fill, coordinated partial-translation hiding, four-second silence clearing, and immediate clearing on stop.
+- Added reconnect isolation, one-time late translation fill, coordinated partial-translation hiding, replacement-ready caption holding, and immediate clearing on stop.
 - Added focused adversarial regressions for shared timestamps, missing timing, elapsed resets, target-first output, source/target split-count mismatches, 441-grapheme streams, late translation, reconnects, and stop behavior.
 - Added `unicode-segmentation` for real grapheme boundaries and recorded its required third-party attribution.
 - Nico accepted the repaired sustained-live behavior after native playback testing; R2 now owns independent visual containment for every subtitle style.
+
+## July 18 — Live subtitle safety envelope
+
+- Added a frontend-only grapheme envelope so pathological live payloads render the newest readable tail while transcript history and Nono lesson context retain the complete canonical segment.
+- Added independent two-line bilingual and three-line single-language clamps to Clean, Classic Outline, Yellow Drop, Fallout, Momento, and Wired.
+- Capped visible caption content at 180 logical points and the transparent native overlay at 240 logical points, including 30-point top/bottom bleed for preset borders and shadows.
+- Added deterministic light/dark, display-mode, long-caption, waiting-state, and pathological browser fixtures. All six presets stay contained at 900×240 and the 520×240 minimum width with no renderer warnings.
+- Full verification passes with zero Svelte warnings, 74 frontend tests, a successful production build, 57 Rust tests, and warning-free clippy. Native sustained-live acceptance remains before the R2 checkpoint.

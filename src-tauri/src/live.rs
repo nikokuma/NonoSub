@@ -47,7 +47,6 @@ const MAX_CAPTURE_CLAUSE_MS: u64 = 10_000;
 const MAX_CLAUSE_GRAPHEMES: usize = 220;
 const CLAUSE_PAIR_TOLERANCE_MS: u64 = 1_000;
 const SOURCE_FALLBACK_MS: u64 = 6_000;
-const VISIBLE_SILENCE_MS: u64 = 4_000;
 type RealtimeSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 type RealtimeWriter = SplitSink<RealtimeSocket, Message>;
 type RealtimeReader = SplitStream<RealtimeSocket>;
@@ -183,10 +182,6 @@ impl CaptionDraft {
         }
     }
 
-    fn latest_activity_ms(&self) -> u64 {
-        self.last_source_at_ms.max(self.last_translation_at_ms)
-    }
-
     fn segment(&self) -> SubtitleSegment {
         SubtitleSegment {
             id: self.id.clone(),
@@ -313,8 +308,6 @@ struct CaptionCoordinator {
     lag: LagEstimator,
     display_cursor_ms: u64,
     visible_segment_id: Option<String>,
-    visible_since_ms: Option<u64>,
-    retired_visible_ids: HashSet<String>,
     last_emitted_sync: Option<LiveSyncState>,
 }
 
@@ -340,8 +333,6 @@ impl CaptionCoordinator {
             lag: LagEstimator::default(),
             display_cursor_ms: 0,
             visible_segment_id: None,
-            visible_since_ms: None,
-            retired_visible_ids: HashSet::new(),
             last_emitted_sync: None,
         }
     }
@@ -618,17 +609,6 @@ impl CaptionCoordinator {
         draft.translation_closed = clause.closed;
     }
 
-    fn revive_clause_unit(&mut self, source: bool, clause_index: usize) {
-        let unit_index = if source {
-            self.source_clauses[clause_index].unit_index
-        } else {
-            self.translation_clauses[clause_index].unit_index
-        };
-        if let Some(unit_index) = unit_index {
-            self.retired_visible_ids.remove(&self.drafts[unit_index].id);
-        }
-    }
-
     fn upsert_for_clause(&self, source: bool, clause_index: usize) -> Option<SessionEvent> {
         let unit_index = if source {
             self.source_clauses[clause_index].unit_index
@@ -743,7 +723,6 @@ impl CaptionCoordinator {
                 clause.last_at_ms = capture_clock_ms;
             }
             self.sync_source_unit(clause_index);
-            self.revive_clause_unit(true, clause_index);
             if let Some(event) = self.upsert_for_clause(true, clause_index) {
                 events.push(event);
             }
@@ -812,7 +791,6 @@ impl CaptionCoordinator {
                 clause.last_at_ms = capture_clock_ms;
             }
             self.sync_translation_unit(clause_index);
-            self.revive_clause_unit(false, clause_index);
             if let Some(event) = self.upsert_for_clause(false, clause_index) {
                 events.push(event);
             }
@@ -880,28 +858,12 @@ impl CaptionCoordinator {
                 })
                 .map(|draft| draft.id.clone()),
         };
-        let next_visible = candidate.and_then(|id| {
-            if self.retired_visible_ids.contains(&id) {
-                return None;
-            }
-            if self.visible_segment_id.as_deref() == Some(id.as_str()) {
-                let activity_ms = self
-                    .drafts
-                    .iter()
-                    .find(|draft| draft.id == id)
-                    .map(CaptionDraft::latest_activity_ms)
-                    .unwrap_or_default();
-                let freshness_ms = activity_ms.max(self.visible_since_ms.unwrap_or_default());
-                if capture_clock_ms.saturating_sub(freshness_ms) >= VISIBLE_SILENCE_MS {
-                    self.retired_visible_ids.insert(id);
-                    return None;
-                }
-            }
-            Some(id)
-        });
+        // Hold the last released caption until a newer one satisfies the current
+        // mode's release rules. This prevents the watching overlay from flashing
+        // to a generic waiting state between otherwise continuous clauses.
+        let next_visible = candidate.or_else(|| self.visible_segment_id.clone());
         if next_visible != self.visible_segment_id {
             self.visible_segment_id = next_visible;
-            self.visible_since_ms = self.visible_segment_id.as_ref().map(|_| capture_clock_ms);
         }
         let fallback_visible = self
             .visible_segment_id
@@ -953,10 +915,17 @@ impl CaptionCoordinator {
         if let Some(index) = self.active_translation_clause {
             self.close_translation_clause(index, capture_clock_ms, &mut events);
         }
-        if let Some(id) = self.visible_segment_id.clone() {
-            self.retired_visible_ids.insert(id);
+        self.visible_segment_id = None;
+        let sync = LiveSyncState {
+            target_delay_ms: self.lag.target_delay_ms,
+            observed_lag_ms: self.lag.observed_lag_ms,
+            status: self.lag.status.clone(),
+            visible_segment_id: None,
+        };
+        if self.last_emitted_sync.as_ref() != Some(&sync) {
+            self.last_emitted_sync = Some(sync.clone());
+            events.push(SessionEvent::LiveSyncChanged { sync });
         }
-        events.extend(self.advance(capture_clock_ms));
         events
     }
 }
@@ -1805,6 +1774,24 @@ mod tests {
     }
 
     #[test]
+    fn coordinated_mode_holds_previous_caption_while_replacement_is_preparing() {
+        let mut coordinator = CaptionCoordinator::new(LiveSyncMode::Coordinated);
+        coordinator.on_source(timed("s1", "最初です。", Some(200)), 1_000);
+        coordinator.tick(2_300);
+        coordinator.on_translation(timed("t1", "This is first.", Some(200)), 2_400);
+        coordinator.tick(3_700);
+        assert_eq!(coordinator.visible_segment_id.as_deref(), Some("live-1"));
+
+        coordinator.on_source(timed("s2", "次です。", Some(5_000)), 5_000);
+        coordinator.tick(6_300);
+        assert_eq!(coordinator.visible_segment_id.as_deref(), Some("live-1"));
+
+        coordinator.on_translation(timed("t2", "This is next.", Some(5_000)), 6_400);
+        coordinator.tick(7_800);
+        assert_eq!(coordinator.visible_segment_id.as_deref(), Some("live-2"));
+    }
+
+    #[test]
     fn coordinated_mode_falls_back_to_source_after_six_seconds() {
         let mut coordinator = CaptionCoordinator::new(LiveSyncMode::Coordinated);
         coordinator.on_source(timed("s1", "長い話です。", Some(200)), 1_000);
@@ -2044,15 +2031,15 @@ mod tests {
     }
 
     #[test]
-    fn visible_caption_clears_after_four_seconds_of_silence() {
+    fn visible_caption_holds_until_replacement_and_clears_on_stop() {
         let mut coordinator = CaptionCoordinator::new(LiveSyncMode::FastSource);
         coordinator.on_source(timed("s1", "brief caption", Some(0)), 1_000);
         assert_eq!(coordinator.visible_segment_id.as_deref(), Some("live-1"));
-        coordinator.tick(4_999);
+        coordinator.tick(20_000);
         assert_eq!(coordinator.visible_segment_id.as_deref(), Some("live-1"));
-        coordinator.tick(5_000);
-        assert_eq!(coordinator.visible_segment_id, None);
-        coordinator.finish(5_100);
+        coordinator.on_source(timed("s2", "replacement caption", Some(20_000)), 21_000);
+        assert_eq!(coordinator.visible_segment_id.as_deref(), Some("live-2"));
+        coordinator.finish(21_100);
         assert_eq!(coordinator.visible_segment_id, None);
         assert_eq!(
             coordinator

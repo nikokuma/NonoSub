@@ -94,7 +94,7 @@ Acceptance:
 
 Focused implementation plan: `docs/plans/INVISIBLE_PRODUCT_SHELL.md`.
 
-Implementation verification: 980×620 collapsed and 980×720 expanded lesson fixtures, 420×190 launcher, 1180×720 viewer, and 900×220 overlay were visually inspected. The complete TypeScript, Svelte, Rust, build, and clippy suites must remain green before acceptance. Native cross-application placement and right-click-menu acceptance remain for the final Mac pass.
+Implementation verification: 980×620 collapsed and 980×720 expanded lesson fixtures, 420×190 launcher, 1180×720 viewer, and 900×240 overlay were visually inspected. The complete TypeScript, Svelte, Rust, build, and clippy suites must remain green before acceptance. Native cross-application placement and right-click-menu acceptance remain for the final Mac pass.
 
 ### C2 — Menu-bar, context-menu, and file-entry workflow
 
@@ -507,13 +507,13 @@ For every creation deliverable:
 
 ## Audit repair checkpoints
 
-Status: **R1 ACCEPTED — checkpoint pending**
+Status: **R2 IMPLEMENTED — native acceptance and checkpoint pending**
 
 The July 18 independent review found release-blocking correctness and containment issues. Repairs are performed one at a time; each receives focused tests, the full verification suite, visible acceptance when applicable, and its own GitHub checkpoint before the next repair begins.
 
 - [x] R0 — Preserve and push the current invisible-shell baseline.
-- [ ] R1 — Rebuild live source/translation clause lifecycle so finalized captions cannot reopen. Implementation, automated verification, and native sustained-live acceptance complete; checkpoint pending.
-- [ ] R2 — Bound every live subtitle style independently of backend text size.
+- [x] R1 — Rebuild live source/translation clause lifecycle so finalized captions cannot reopen. Accepted and checkpointed in `dc37d09`.
+- [ ] R2 — Bound every live subtitle style independently of backend text size. Automated and six-preset fixture verification complete; native sustained-live acceptance and checkpoint pending.
 - [ ] R3 — Add session generations, per-run cancellation, and stale-event rejection.
 - [ ] R4 — Preserve stable IDs during file chunk-boundary reconciliation.
 - [ ] R5 — Validate exact structured translation output and continue source-only after terminal failure.

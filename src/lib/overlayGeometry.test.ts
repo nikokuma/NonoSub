@@ -48,4 +48,37 @@ describe("resolveOverlayGeometry", () => {
     expect(geometry.physicalY).toBeGreaterThanOrEqual(12);
     expect(geometry.physicalY + geometry.physicalHeight).toBeLessThanOrEqual(1068);
   });
+
+  it("honors the compact live-overlay height cap independently of content", () => {
+    const geometry = resolveOverlayGeometry(
+      { x: 0, y: 0, width: 3024, height: 1964, scaleFactor: 2 },
+      {
+        normalizedPosition: { x: 0.5, y: 0.78 },
+        preferredLogicalWidth: 900,
+        contentLogicalHeight: 20_000,
+        maximumLogicalHeight: 220,
+      },
+    );
+
+    expect(geometry.logicalHeight).toBe(220);
+    expect(geometry.physicalHeight).toBe(440);
+    expect(geometry.physicalY).toBeGreaterThanOrEqual(24);
+    expect(geometry.physicalY + geometry.physicalHeight).toBeLessThanOrEqual(1_940);
+  });
+
+  it("reserves transparent vertical bleed for decorative subtitle frames", () => {
+    const geometry = resolveOverlayGeometry(
+      { x: 0, y: 0, width: 3024, height: 1964, scaleFactor: 2 },
+      {
+        normalizedPosition: { x: 0.5, y: 0.78 },
+        preferredLogicalWidth: 900,
+        contentLogicalHeight: 180,
+        maximumLogicalHeight: 240,
+        verticalMargin: 30,
+      },
+    );
+
+    expect(geometry.logicalHeight).toBe(240);
+    expect(geometry.physicalHeight).toBe(480);
+  });
 });

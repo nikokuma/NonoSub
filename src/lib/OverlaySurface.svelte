@@ -3,7 +3,7 @@
   import { invoke, isTauri } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { LogicalSize, PhysicalPosition, currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
-  import type { SessionState, SubtitlePreset, SubtitleSegment } from "./contracts";
+  import type { SessionState, StyleSettings, SubtitleDisplayMode, SubtitlePreset, SubtitleSegment } from "./contracts";
   import { EMPTY_SESSION } from "./contracts";
   import { FIXTURE_EVENTS } from "./fixtures";
   import { reduceSession, visibleLiveSegments } from "./session";
@@ -25,10 +25,23 @@
   const fixturePreset = typeof window !== "undefined" && !isTauri()
     ? parseFixturePreset(new URLSearchParams(window.location.search).get("preset"))
     : undefined;
-  const captions = $derived(session.mode === "live" ? visibleLiveSegments(session.segments, session.liveSync) : session.segments.slice(-1));
+  const fixtureBackdrop = typeof window !== "undefined" && !isTauri()
+    && new URLSearchParams(window.location.search).get("backdrop") === "split";
+  const fixtureDisplayMode = typeof window !== "undefined" && !isTauri()
+    ? parseFixtureDisplayMode(new URLSearchParams(window.location.search).get("display"))
+    : undefined;
+  const fixtureWaiting = typeof window !== "undefined" && !isTauri()
+    && new URLSearchParams(window.location.search).get("state") === "waiting";
+  const captions = $derived(fixtureWaiting
+    ? []
+    : session.mode === "live"
+      ? visibleLiveSegments(session.segments, session.liveSync)
+      : session.segments.slice(-1));
+  const sessionStyle = $derived(effectiveStyle(preferences.style, session.processingMode));
   const activeStyle = $derived({
-    ...effectiveStyle(preferences.style, session.processingMode),
-    preset: fixturePreset ?? effectiveStyle(preferences.style, session.processingMode).preset,
+    ...sessionStyle,
+    preset: fixturePreset ?? sessionStyle.preset,
+    displayMode: fixtureDisplayMode ?? sessionStyle.displayMode,
   });
   const waitingLabel = $derived(session.phase === "reconnecting"
     ? "Reconnecting to Nono…"
@@ -37,10 +50,34 @@
     : session.mode === "live" && session.segments.length > 0
       ? "Nono is coordinating subtitles…"
       : "Listening for speech…");
+  const waitingStyle = $derived<StyleSettings>({
+    ...activeStyle,
+    displayMode: activeStyle.displayMode === "translation" ? "translation" : "source",
+    showSpeakerNames: false,
+  });
+  const waitingSegment = $derived<SubtitleSegment>({
+    id: "__live-waiting__",
+    origin: "live",
+    startMs: 0,
+    endMs: 0,
+    sourceText: activeStyle.displayMode === "translation" ? "" : waitingLabel,
+    translationText: activeStyle.displayMode === "translation" ? waitingLabel : undefined,
+    isProvisional: true,
+    transcriptionStatus: "pending",
+    translationStatus: activeStyle.displayMode === "translation" ? "complete" : "pending",
+  });
+  const displayedSegment = $derived(captions[0] ?? waitingSegment);
+  const displayedStyle = $derived(captions.length > 0 ? activeStyle : waitingStyle);
 
   function parseFixturePreset(value: string | null): SubtitlePreset | undefined {
     return value && ["clean", "classic-outline", "yellow-drop", "fallout", "momento", "wired"].includes(value)
       ? value as SubtitlePreset
+      : undefined;
+  }
+
+  function parseFixtureDisplayMode(value: string | null): SubtitleDisplayMode | undefined {
+    return value && ["source", "translation", "both"].includes(value)
+      ? value as SubtitleDisplayMode
       : undefined;
   }
 
@@ -194,6 +231,8 @@
       normalizedPosition: preferences.style.overlayPosition,
       preferredLogicalWidth: preferences.style.overlayWidth,
       contentLogicalHeight: contentHeight,
+      maximumLogicalHeight: 240,
+      verticalMargin: 30,
     });
   }
 
@@ -217,6 +256,7 @@
   class:hidden={!visible}
   class:arranging
   class:dragging
+  class:fixture-backdrop={fixtureBackdrop}
   use:suppressLookup
   oncontextmenu={openComposer}
   onpointerdown={beginDragging}
@@ -228,11 +268,11 @@
 >
   {#if arranging}<div class="grip" aria-hidden="true">⠿ DRAG NONOSUB</div>{/if}
   <div class="caption-host" bind:this={captionHost}>
-    {#if captions.length > 0}<LiveSubtitleStack segment={captions[0]} speaker={captions[0].speakerId ? session.speakers[captions[0].speakerId] : undefined} style={activeStyle} sync={session.liveSync} liveMode={preferences.sync.liveMode} processingMode={session.processingMode} onselect={selectLine} />{:else}<div class="waiting"><i></i>{waitingLabel}</div>{/if}
+    <LiveSubtitleStack segment={displayedSegment} speaker={displayedSegment.speakerId ? session.speakers[displayedSegment.speakerId] : undefined} style={displayedStyle} sync={session.liveSync} liveMode={preferences.sync.liveMode} processingMode={session.processingMode} onselect={selectLine} />
     {#if session.fatalError}<div class="error">{session.fatalError}</div>{/if}
   </div>
 </div>
 
 <style>
-  .overlay-shell{position:fixed;inset:0;display:grid;place-content:center;background:transparent;padding:20px;cursor:grab;touch-action:none}.caption-host{width:100%;min-width:0;display:grid;place-items:center}.overlay-shell.dragging{cursor:grabbing}.overlay-shell.hidden{opacity:0;pointer-events:none}.overlay-shell.arranging{border:1px dashed #71e7df88;background:#0710161f}.grip{position:absolute;left:50%;top:4px;transform:translateX(-50%);border:1px solid #6de8df66;background:#08121bd9;color:#77e8df;border-radius:10px;padding:4px 10px;font-size:8px;letter-spacing:.14em;pointer-events:none}.waiting{display:flex;align-items:center;gap:9px;padding:8px 12px;border:1px solid #ffffff20;background:#080b11d9;border-radius:8px;color:#aeb5c0;font-size:10px}.waiting i{width:6px;height:6px;border-radius:50%;background:#70e7c6;box-shadow:0 0 10px #70e7c6}.error{margin-top:6px;background:#280e18e8;color:#ffafd1;padding:5px 10px;border-radius:5px;font-size:8px}
+  .overlay-shell{position:fixed;inset:0;display:grid;place-content:center;background:transparent;padding:30px 20px;cursor:grab;touch-action:none}.caption-host{width:100%;min-width:0;max-height:180px;overflow:visible;display:grid;place-items:center}.overlay-shell.dragging{cursor:grabbing}.overlay-shell.hidden{opacity:0;pointer-events:none}.overlay-shell.arranging{border:1px dashed #71e7df88;background:#0710161f}.overlay-shell.fixture-backdrop{background:linear-gradient(105deg,#d9e8ec 0 48%,#263b4b 48% 52%,#101421 52%)}.grip{position:absolute;left:50%;top:4px;transform:translateX(-50%);border:1px solid #6de8df66;background:#08121bd9;color:#77e8df;border-radius:10px;padding:4px 10px;font-size:8px;letter-spacing:.14em;pointer-events:none}.error{margin-top:6px;background:#280e18e8;color:#ffafd1;padding:5px 10px;border-radius:5px;font-size:8px}
 </style>

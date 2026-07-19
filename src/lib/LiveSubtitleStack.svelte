@@ -4,7 +4,7 @@
   import BroadcastSubtitleCard from "./BroadcastSubtitleCard.svelte";
   import ArcadeSubtitleCard from "./ArcadeSubtitleCard.svelte";
   import type { CaptionProcessingMode, LiveSyncMode, LiveSyncState, SpeakerProfile, StyleSettings, SubtitleSegment } from "./contracts";
-  import { calculateLiveCaptionFontSize, liveOverlaySegment } from "./subtitlePresentation";
+  import { calculateLiveCaptionEnvelope, calculateLiveCaptionFontSize, liveOverlaySegment } from "./subtitlePresentation";
 
   let {
     segment,
@@ -25,19 +25,34 @@
   } = $props();
 
   let viewportWidth = $state(900);
-  const renderedSegment = $derived(liveOverlaySegment(segment, liveMode));
-  const source = $derived(renderedSegment.sourceText.trim());
-  const translation = $derived(renderedSegment.translationText?.trim() ?? "");
+  const coordinatedSegment = $derived(liveOverlaySegment(segment, liveMode));
+  const rawSource = $derived(coordinatedSegment.sourceText.trim());
+  const rawTranslation = $derived(coordinatedSegment.translationText?.trim() ?? "");
   const showSource = $derived(style.displayMode !== "translation");
   const showTranslation = $derived(style.displayMode !== "source");
   const liveFontSize = $derived(calculateLiveCaptionFontSize({
     basePx: style.fontSize,
     viewportWidth,
-    sourceText: source,
-    translationText: translation,
+    sourceText: rawSource,
+    translationText: rawTranslation,
     showSource,
     showTranslation,
   }));
+  const envelope = $derived(calculateLiveCaptionEnvelope({
+    viewportWidth,
+    fontSizePx: liveFontSize,
+    sourceText: rawSource,
+    translationText: rawTranslation,
+    showSource,
+    showTranslation,
+  }));
+  const renderedSegment = $derived({
+    ...coordinatedSegment,
+    sourceText: envelope.sourceText,
+    translationText: coordinatedSegment.translationText === undefined ? undefined : envelope.translationText,
+  });
+  const source = $derived(renderedSegment.sourceText.trim());
+  const translation = $derived(renderedSegment.translationText?.trim() ?? "");
   const delayLabel = $derived(processingMode === "original_only"
     ? "LIVE · ORIGINAL"
     : sync ? `LIVE · ${(sync.targetDelayMs / 1_000).toFixed(1)}s BEHIND` : "LIVE");
@@ -49,7 +64,7 @@
   class="live-subtitles preset-{style.preset} effect-{style.effect}"
   data-segment-id={segment.id}
   class:provisional={segment.isProvisional}
-  style={`font-size:${liveFontSize}px;font-family:${style.fontFamily};--sub-bg:${style.backgroundOpacity}`}
+  style={`font-size:${liveFontSize}px;font-family:${style.fontFamily};--sub-bg:${style.backgroundOpacity};--live-source-lines:${envelope.sourceLineLimit};--live-translation-lines:${envelope.translationLineLimit}`}
 >
   {#if style.preset === "momento"}
     <MomentoSubtitleCard segment={renderedSegment} {speaker} {style} liveLabel={delayLabel} degraded={sync?.status === "degraded"} {onselect} />
@@ -78,5 +93,5 @@
 </div>
 
 <style>
-  .live-subtitles{width:min(92vw,900px);min-width:0;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}.live-subtitles>button{width:100%;border:0;background:transparent;padding:0;color:white;text-align:center;display:grid;justify-items:center;gap:3px}.signal{font-size:8px;font-weight:850;letter-spacing:.14em;color:#79e9cb;text-shadow:0 1px 8px #000}.signal.degraded{color:#ff9cc5}.speaker{display:flex;align-items:center;gap:5px;font-size:9px;text-transform:uppercase;font-weight:900;letter-spacing:.14em;margin-bottom:1px}.speaker i{width:4px;height:4px;border-radius:50%;background:currentColor;box-shadow:0 0 7px currentColor}.caption{width:fit-content;max-width:100%;padding:3px 12px;background:rgba(0,0,0,var(--sub-bg));overflow-wrap:anywhere;text-wrap:wrap}.source{min-height:1.25em;font-weight:850;line-height:1.2}.translation{min-height:1.55em;font-size:.62em;line-height:1.28;color:#faf8ff}.waiting{color:#d4d2d9;font-style:italic;opacity:.7}.provisional{opacity:.9}.effect-outline .caption{text-shadow:-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000,0 3px 12px #000}.effect-shadow .caption{text-shadow:0 3px 10px #000}
+  .live-subtitles{width:min(92vw,900px);min-width:0;max-height:180px;overflow:visible;contain:layout;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}.live-subtitles>button{width:100%;max-height:180px;overflow:visible;border:0;background:transparent;padding:0;color:white;text-align:center;display:grid;justify-items:center;gap:3px}.signal{font-size:8px;font-weight:850;letter-spacing:.14em;color:#79e9cb;text-shadow:0 1px 8px #000}.signal.degraded{color:#ff9cc5}.speaker{display:flex;align-items:center;gap:5px;font-size:9px;text-transform:uppercase;font-weight:900;letter-spacing:.14em;margin-bottom:1px}.speaker i{width:4px;height:4px;border-radius:50%;background:currentColor;box-shadow:0 0 7px currentColor}.caption{width:fit-content;max-width:100%;padding:3px 12px;background:rgba(0,0,0,var(--sub-bg));overflow:hidden;overflow-wrap:anywhere;text-wrap:wrap;display:-webkit-box;-webkit-box-orient:vertical}.source{min-height:1.25em;font-weight:850;line-height:1.2;line-clamp:var(--live-source-lines);-webkit-line-clamp:var(--live-source-lines)}.translation{min-height:1.55em;font-size:.62em;line-height:1.28;color:#faf8ff;line-clamp:var(--live-translation-lines);-webkit-line-clamp:var(--live-translation-lines)}.waiting{color:#d4d2d9;font-style:italic;opacity:.7}.provisional{opacity:.9}.effect-outline .caption{text-shadow:-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000,0 3px 12px #000}.effect-shadow .caption{text-shadow:0 3px 10px #000}
 </style>
