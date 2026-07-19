@@ -4,7 +4,7 @@
   import BroadcastSubtitleCard from "./BroadcastSubtitleCard.svelte";
   import ArcadeSubtitleCard from "./ArcadeSubtitleCard.svelte";
   import type { SpeakerProfile, StyleSettings, SubtitleSegment } from "./contracts";
-  import { fitSubtitle } from "./subtitlePresentation";
+  import { fitSubtitle, subtitleRowVisibility } from "./subtitlePresentation";
 
   let {
     segments,
@@ -26,7 +26,7 @@
 
   let viewportHeight = $state(720);
   const contentKey = $derived(
-    segments.map((segment) => `${segment.id}:${segment.sourceText}:${segment.translationText ?? ""}:${segment.speakerId ? speakers[segment.speakerId]?.displayName ?? "" : ""}`).join("|")
+    segments.map((segment) => `${segment.id}:${segment.sourceText}:${segment.translationText ?? ""}:${segment.translationStatus}:${segment.speakerId ? speakers[segment.speakerId]?.displayName ?? "" : ""}`).join("|")
       + `:${style.displayMode}:${style.preset}:${style.fontFamily}:${style.showSpeakerNames}`,
   );
   const maximumHeight = $derived(preview ? 158 : Math.min(260, Math.max(150, viewportHeight * 0.36)));
@@ -48,6 +48,7 @@
 >
   {#each segments as segment (segment.id)}
     {@const speaker = segment.speakerId ? speakers[segment.speakerId] : undefined}
+    {@const visibility = subtitleRowVisibility(segment, style.displayMode)}
     <div class="segment-wrap" data-segment-id={segment.id}>
     {#if style.preset === "momento"}
       <MomentoSubtitleCard {segment} {speaker} {style} {onselect} />
@@ -68,8 +69,8 @@
         {#if style.showSpeakerNames && (speaker || segment.origin === "live")}
           <span class="speaker" style={`color:${speaker?.color ?? "#79e9cb"}`}>{speaker?.displayName ?? "Live Audio"}</span>
         {/if}
-        {#if style.displayMode !== "translation"}<span class="source">{segment.sourceText}</span>{/if}
-        {#if style.displayMode !== "source"}<span class="translation">{segment.translationText ?? "Nono is translating…"}</span>{/if}
+        {#if visibility.showSource}<span class="source">{segment.sourceText}</span>{/if}
+        {#if visibility.showTranslation}<span class="translation">{segment.translationText ?? "Nono is translating…"}</span>{/if}
       </button>
     {/if}
     </div>

@@ -11,8 +11,8 @@ mod pipeline;
 
 use contracts::{
     CaptionProcessingMode, LanguageSettings, LearnerLevel, LessonCard, LiveSyncMode, LiveSyncState,
-    PreparedMediaInfo, RecoverableError, SequencedSessionEvent, SessionEvent, SessionMode,
-    SessionSnapshot, SpeakerProfile, SubtitleSegment, TutorMessage,
+    PreparedMediaInfo, RecoverableError, SegmentStatus, SequencedSessionEvent, SessionEvent,
+    SessionMode, SessionSnapshot, SpeakerProfile, SubtitleSegment, TutorMessage,
 };
 use serde::Serialize;
 use std::{
@@ -550,6 +550,116 @@ async fn start_analysis(
         sink,
     )
     .await
+}
+
+#[tauri::command]
+async fn retry_translation(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    segment_id: String,
+) -> Result<(), openai::ApiError> {
+    let generation = {
+        let active = state
+            .runs
+            .active
+            .lock()
+            .map_err(|_| service_error("Session generation state is unavailable."))?;
+        active
+            .as_ref()
+            .filter(|run| !run.is_cancelled())
+            .map(|run| run.generation)
+            .ok_or_else(cancelled_error)?
+    };
+    let (languages, context, batch, mut pending_segment) = {
+        let snapshot = state
+            .canonical
+            .lock()
+            .map_err(|_| service_error("Session state is unavailable."))?;
+        if snapshot.mode != Some(SessionMode::File)
+            || snapshot.processing_mode != CaptionProcessingMode::Translated
+        {
+            return Err(service_error(
+                "Translation retry is available for translated file sessions.",
+            ));
+        }
+        let index = snapshot
+            .segments
+            .iter()
+            .position(|segment| segment.id == segment_id)
+            .ok_or_else(|| service_error("That subtitle is no longer in the active session."))?;
+        let selected = snapshot.segments[index].clone();
+        if selected.translation_status != SegmentStatus::Failed {
+            return Err(service_error(
+                "That subtitle does not need a translation retry.",
+            ));
+        }
+        let to_input = |segment: &SubtitleSegment| openai::TranslationInput {
+            segment_id: segment.id.clone(),
+            speaker: segment
+                .speaker_id
+                .clone()
+                .unwrap_or_else(|| "speaker-unknown".into()),
+            source_text: segment.source_text.clone(),
+        };
+        let context_start = index.saturating_sub(80);
+        let context = snapshot.segments[context_start..index]
+            .iter()
+            .map(to_input)
+            .collect::<Vec<_>>();
+        let batch = vec![to_input(&selected)];
+        let mut pending = selected;
+        pending.translation_text = None;
+        pending.ambiguity_note = None;
+        pending.translation_status = SegmentStatus::Pending;
+        (snapshot.languages.clone(), context, batch, pending)
+    };
+
+    let client = openai::OpenAiClient::new(api_key()?)?;
+    record_event_for_generation(
+        &app,
+        generation,
+        SessionEvent::TranscriptFinalized {
+            segment: pending_segment.clone(),
+        },
+    )?;
+    match pipeline::translate_batch_with_retry(&client, &context, &batch, &languages).await {
+        Ok(mut translations) => {
+            let translation = translations
+                .pop()
+                .ok_or_else(|| service_error("Translation retry returned no subtitle."))?;
+            record_event_for_generation(
+                &app,
+                generation,
+                SessionEvent::TranslationFinalized {
+                    segment_id: translation.segment_id,
+                    translation_text: translation.translation,
+                    ambiguity_note: translation.ambiguity_note,
+                },
+            )
+        }
+        Err(error) => {
+            pending_segment.translation_status = SegmentStatus::Failed;
+            record_event_for_generation(
+                &app,
+                generation,
+                SessionEvent::TranscriptFinalized {
+                    segment: pending_segment,
+                },
+            )?;
+            record_event_for_generation(
+                &app,
+                generation,
+                SessionEvent::RecoverableError {
+                    error: RecoverableError {
+                        code: "translation_failed".into(),
+                        message: error.message.clone(),
+                        segment_id: Some(segment_id),
+                    },
+                },
+            )?;
+            Err(error)
+        }
+    }
 }
 
 #[tauri::command]
@@ -1716,6 +1826,7 @@ pub fn run() {
             prepare_media,
             prepare_audio,
             start_analysis,
+            retry_translation,
             request_lesson,
             open_lesson_composer,
             get_lesson_open_context,

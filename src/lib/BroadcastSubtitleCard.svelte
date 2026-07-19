@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { SpeakerProfile, StyleSettings, SubtitleSegment } from "./contracts";
+  import { subtitleRowVisibility } from "./subtitlePresentation";
 
   let {
     segment,
@@ -21,8 +22,9 @@
 
   const source = $derived(segment.sourceText.trim());
   const translation = $derived(segment.translationText?.trim() ?? "");
-  const showSource = $derived(style.displayMode !== "translation");
-  const showTranslation = $derived(style.displayMode !== "source");
+  const visibility = $derived(subtitleRowVisibility(segment, style.displayMode));
+  const showSource = $derived(visibility.showSource);
+  const showTranslation = $derived(visibility.showTranslation);
 </script>
 
 <button

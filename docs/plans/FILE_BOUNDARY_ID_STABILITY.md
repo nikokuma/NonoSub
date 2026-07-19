@@ -13,7 +13,7 @@ Keep a finalized file subtitle's public ID stable when a later overlapping trans
 - A boundary duplicate requires both substantial timestamp overlap and normalized textual containment, preserving the existing distinction between repeated/overlapping speech with different text.
 - Matching is one-to-one within a reconciliation pass. Two incoming fragments cannot inherit the same existing ID.
 - When a more complete duplicate replaces source text or timing, it inherits the existing ID and becomes a new content revision of that same subtitle.
-- A source-text revision clears any old translation and ambiguity note and returns translation to pending/failed state so GPT translates the revised source.
+- A source-text revision clears any old translation and ambiguity note and returns translation to pending state so GPT translates the revised source.
 - An exact-text duplicate retains the existing canonical segment, including its completed translation and timing, instead of causing needless retranscription or retranslation events.
 - A shorter or equal duplicate cannot downgrade a more complete canonical line.
 - Distinct overlapping utterances remain separate so the existing two-line overlap presentation continues to work.

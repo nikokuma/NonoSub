@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { SpeakerProfile, StyleSettings, SubtitleSegment } from "./contracts";
-  import { colorWithOpacity, readableAccentTextColor } from "./subtitlePresentation";
+  import { colorWithOpacity, readableAccentTextColor, subtitleRowVisibility } from "./subtitlePresentation";
 
   let {
     segment,
@@ -22,8 +22,9 @@
   const accentText = $derived(readableAccentTextColor(accent));
   const source = $derived(segment.sourceText.trim());
   const translation = $derived(segment.translationText?.trim() ?? "");
-  const showSource = $derived(style.displayMode !== "translation");
-  const showTranslation = $derived(style.displayMode !== "source");
+  const visibility = $derived(subtitleRowVisibility(segment, style.displayMode));
+  const showSource = $derived(visibility.showSource);
+  const showTranslation = $derived(visibility.showTranslation);
   const sourcePanel = $derived(colorWithOpacity("#f4f7fb", style.backgroundOpacity));
   const translationPanel = $derived(colorWithOpacity("#05091e", style.backgroundOpacity));
 </script>

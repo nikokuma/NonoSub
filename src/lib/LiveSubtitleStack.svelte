@@ -4,7 +4,7 @@
   import BroadcastSubtitleCard from "./BroadcastSubtitleCard.svelte";
   import ArcadeSubtitleCard from "./ArcadeSubtitleCard.svelte";
   import type { CaptionProcessingMode, LiveSyncMode, LiveSyncState, SpeakerProfile, StyleSettings, SubtitleSegment } from "./contracts";
-  import { calculateLiveCaptionEnvelope, calculateLiveCaptionFontSize, liveOverlaySegment } from "./subtitlePresentation";
+  import { calculateLiveCaptionEnvelope, calculateLiveCaptionFontSize, liveOverlaySegment, subtitleRowVisibility } from "./subtitlePresentation";
 
   let {
     segment,
@@ -28,8 +28,9 @@
   const coordinatedSegment = $derived(liveOverlaySegment(segment, liveMode));
   const rawSource = $derived(coordinatedSegment.sourceText.trim());
   const rawTranslation = $derived(coordinatedSegment.translationText?.trim() ?? "");
-  const showSource = $derived(style.displayMode !== "translation");
-  const showTranslation = $derived(style.displayMode !== "source");
+  const visibility = $derived(subtitleRowVisibility(coordinatedSegment, style.displayMode));
+  const showSource = $derived(visibility.showSource);
+  const showTranslation = $derived(visibility.showTranslation);
   const liveFontSize = $derived(calculateLiveCaptionFontSize({
     basePx: style.fontSize,
     viewportWidth,
@@ -82,10 +83,10 @@
     >
       <span class="signal" class:degraded={sync?.status === "degraded"}>{delayLabel}</span>
       {#if style.showSpeakerNames}<span class="speaker" style={`color:${speaker?.color ?? "#79e9cb"}`}><i></i>{speaker?.displayName ?? "Live Audio"}</span>{/if}
-      {#if style.displayMode !== "translation"}
+      {#if showSource}
         <span class="caption source" class:waiting={!source}>{source || "Listening…"}</span>
       {/if}
-      {#if style.displayMode !== "source"}
+      {#if showTranslation}
         <span class="caption translation" class:waiting={!translation}>{translation || "Translation catching up…"}</span>
       {/if}
     </button>

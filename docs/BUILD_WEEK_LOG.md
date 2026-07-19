@@ -164,3 +164,11 @@
 - Stable source revisions emit once per text version, so the canonical transcript updates without duplicate IDs or repeated event churn. A selected subtitle continues resolving through the revision.
 - Added adversarial coverage for longer boundary replacements, shorter-before-fuller arrival order, exact duplicates, repeated simultaneous phrases, cross-speaker overlap, same-chunk overlaps, split long-sentence parts, translation invalidation, and frontend selection retention.
 - Full verification passes with zero Svelte warnings, 76 frontend tests, a successful production build, 68 Rust tests, and warning-free clippy.
+
+## July 19 — Translation failure containment
+
+- Tightened GPT‑5.6 subtitle Structured Outputs to the exact requested batch length and segment-ID enum, then added local all-or-nothing validation for missing, duplicate, unknown, blank, incomplete, refused, and out-of-order output.
+- Preserved one bounded retry for malformed and transient responses. Authentication and inaccessible-model errors remain session-fatal; every other terminal batch failure marks only that batch failed and continues translating later chunks.
+- Separated pending from failed translation state. Pending is now the only status that blocks coverage; failed lines advance with their original timestamps, display source text in every display mode and preset, and remain clickable for Nono lessons.
+- Added an explicit per-line Retry translation action in Settings & Transcript. It captures the active session generation, reuses up to 80 preceding lines without retranscription, and safely restores source fallback if the retry fails again.
+- Full verification passes with zero Svelte errors or warnings, 80 frontend tests, a successful production build, 73 Rust tests, and warning-free clippy.

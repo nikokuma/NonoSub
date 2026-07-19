@@ -2,7 +2,7 @@ use futures_util::StreamExt;
 use reqwest::{multipart, Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use crate::contracts::{
     ChalkColor, ChalkMark, ChalkPhrase, LanguageSettings, LessonCard, TailCue, TeachingMoment,
@@ -20,6 +20,7 @@ pub enum ApiErrorKind {
     RateLimited,
     Network,
     MalformedResponse,
+    Refused,
     Cancelled,
     Service,
 }
@@ -204,6 +205,18 @@ impl OpenAiClient {
                 retryable: false,
             });
         }
+        let requested_ids = segments
+            .iter()
+            .map(|segment| segment.segment_id.clone())
+            .collect::<Vec<_>>();
+        if requested_ids.iter().collect::<HashSet<_>>().len() != requested_ids.len() {
+            return Err(ApiError {
+                kind: ApiErrorKind::Service,
+                message: "Translation batch segment IDs must be unique.".into(),
+                retryable: false,
+            });
+        }
+        let batch_size = segments.len();
         let request = json!({
             "model": LANGUAGE_MODEL,
             "reasoning": { "effort": "low" },
@@ -220,10 +233,12 @@ impl OpenAiClient {
                     "type": "object",
                     "properties": { "translations": {
                         "type": "array",
+                        "minItems": batch_size,
+                        "maxItems": batch_size,
                         "items": {
                             "type": "object",
                             "properties": {
-                                "segment_id": { "type": "string" },
+                                "segment_id": { "type": "string", "enum": requested_ids },
                                 "translation": { "type": "string" },
                                 "ambiguity_note": { "type": ["string", "null"] }
                             },
@@ -252,18 +267,7 @@ impl OpenAiClient {
             message: format!("GPT-5.6 returned unreadable translation output: {error}"),
             retryable: true,
         })?;
-        let output_text = extract_response_text(&value).ok_or_else(|| ApiError {
-            kind: ApiErrorKind::MalformedResponse,
-            message: "GPT-5.6 returned no structured translation text.".into(),
-            retryable: true,
-        })?;
-        let envelope: TranslationEnvelope =
-            serde_json::from_str(output_text).map_err(|error| ApiError {
-                kind: ApiErrorKind::MalformedResponse,
-                message: format!("GPT-5.6 returned malformed structured translations: {error}"),
-                retryable: true,
-            })?;
-        Ok(envelope.translations)
+        parse_translation_response(&value, segments)
     }
 
     pub async fn lesson(&self, lesson_context: &Value) -> Result<LessonCard, ApiError> {
@@ -614,6 +618,124 @@ pub fn extract_response_text(value: &Value) -> Option<&str> {
         .find_map(|content| content.get("text").and_then(Value::as_str))
 }
 
+fn extract_response_refusal(value: &Value) -> Option<&str> {
+    value
+        .get("output")?
+        .as_array()?
+        .iter()
+        .flat_map(|item| {
+            item.get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .find_map(|content| {
+            (content.get("type").and_then(Value::as_str) == Some("refusal"))
+                .then(|| content.get("refusal").and_then(Value::as_str))
+                .flatten()
+        })
+}
+
+fn malformed_translation(message: impl Into<String>) -> ApiError {
+    ApiError {
+        kind: ApiErrorKind::MalformedResponse,
+        message: message.into(),
+        retryable: true,
+    }
+}
+
+fn parse_translation_response(
+    value: &Value,
+    requested: &[TranslationInput],
+) -> Result<Vec<TranslationOutput>, ApiError> {
+    match value.get("status").and_then(Value::as_str) {
+        Some("incomplete") => {
+            return Err(malformed_translation(
+                "GPT-5.6 returned an incomplete structured translation.",
+            ));
+        }
+        Some("failed") => {
+            return Err(ApiError {
+                kind: ApiErrorKind::Service,
+                message: "GPT-5.6 could not complete this translation batch.".into(),
+                retryable: true,
+            });
+        }
+        _ => {}
+    }
+    if extract_response_refusal(value).is_some() {
+        return Err(ApiError {
+            kind: ApiErrorKind::Refused,
+            message: "GPT-5.6 declined this translation batch.".into(),
+            retryable: false,
+        });
+    }
+    let output_text = extract_response_text(value)
+        .ok_or_else(|| malformed_translation("GPT-5.6 returned no structured translation text."))?;
+    let envelope: TranslationEnvelope = serde_json::from_str(output_text).map_err(|error| {
+        malformed_translation(format!(
+            "GPT-5.6 returned malformed structured translations: {error}"
+        ))
+    })?;
+    validate_translation_outputs(requested, envelope.translations)
+}
+
+fn validate_translation_outputs(
+    requested: &[TranslationInput],
+    outputs: Vec<TranslationOutput>,
+) -> Result<Vec<TranslationOutput>, ApiError> {
+    let requested_ids = requested
+        .iter()
+        .map(|input| input.segment_id.as_str())
+        .collect::<HashSet<_>>();
+    if requested_ids.len() != requested.len() {
+        return Err(ApiError {
+            kind: ApiErrorKind::Service,
+            message: "Translation batch segment IDs must be unique.".into(),
+            retryable: false,
+        });
+    }
+
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::with_capacity(outputs.len());
+    for mut output in outputs {
+        if !requested_ids.contains(output.segment_id.as_str()) {
+            return Err(malformed_translation(
+                "GPT-5.6 returned a translation for an unknown segment.",
+            ));
+        }
+        if !seen.insert(output.segment_id.clone()) {
+            return Err(malformed_translation(
+                "GPT-5.6 returned more than one translation for a segment.",
+            ));
+        }
+        output.translation = output.translation.trim().to_owned();
+        if output.translation.is_empty() {
+            return Err(malformed_translation(
+                "GPT-5.6 returned a blank subtitle translation.",
+            ));
+        }
+        output.ambiguity_note = output
+            .ambiguity_note
+            .map(|note| note.trim().to_owned())
+            .filter(|note| !note.is_empty());
+        normalized.push(output);
+    }
+    if normalized.len() != requested.len() || seen.len() != requested.len() {
+        return Err(malformed_translation(
+            "GPT-5.6 omitted one or more requested translations.",
+        ));
+    }
+
+    normalized.sort_by_key(|output| {
+        requested
+            .iter()
+            .position(|input| input.segment_id == output.segment_id)
+            .unwrap_or(usize::MAX)
+    });
+    Ok(normalized)
+}
+
 #[cfg(test)]
 pub fn parse_response_delta(event: &str) -> Result<Option<String>, ApiError> {
     let data = event
@@ -753,6 +875,89 @@ mod tests {
         let value =
             json!({"output":[{"content":[{"type":"output_text","text":"{\"translations\":[]}"}]}]});
         assert_eq!(extract_response_text(&value), Some("{\"translations\":[]}"));
+    }
+
+    fn translation_input(id: &str) -> TranslationInput {
+        TranslationInput {
+            segment_id: id.into(),
+            speaker: "speaker-1".into(),
+            source_text: "source".into(),
+        }
+    }
+
+    fn translation_response(outputs: Value) -> Value {
+        json!({
+            "status": "completed",
+            "output": [{
+                "content": [{
+                    "type": "output_text",
+                    "text": json!({ "translations": outputs }).to_string()
+                }]
+            }]
+        })
+    }
+
+    #[test]
+    fn validates_exact_translation_set_and_restores_request_order() {
+        let requested = [translation_input("a"), translation_input("b")];
+        let value = translation_response(json!([
+            { "segment_id": "b", "translation": "  Second  ", "ambiguity_note": "  " },
+            { "segment_id": "a", "translation": " First ", "ambiguity_note": " maybe " }
+        ]));
+        let outputs = parse_translation_response(&value, &requested).unwrap();
+        assert_eq!(outputs[0].segment_id, "a");
+        assert_eq!(outputs[0].translation, "First");
+        assert_eq!(outputs[0].ambiguity_note.as_deref(), Some("maybe"));
+        assert_eq!(outputs[1].segment_id, "b");
+        assert_eq!(outputs[1].ambiguity_note, None);
+    }
+
+    #[test]
+    fn rejects_missing_duplicate_unknown_and_blank_translations() {
+        let requested = [translation_input("a"), translation_input("b")];
+        for outputs in [
+            json!([{ "segment_id": "a", "translation": "First", "ambiguity_note": null }]),
+            json!([
+                { "segment_id": "a", "translation": "First", "ambiguity_note": null },
+                { "segment_id": "a", "translation": "Again", "ambiguity_note": null }
+            ]),
+            json!([
+                { "segment_id": "a", "translation": "First", "ambiguity_note": null },
+                { "segment_id": "unknown", "translation": "Other", "ambiguity_note": null }
+            ]),
+            json!([
+                { "segment_id": "a", "translation": "First", "ambiguity_note": null },
+                { "segment_id": "b", "translation": "   ", "ambiguity_note": null }
+            ]),
+        ] {
+            let error =
+                parse_translation_response(&translation_response(outputs), &requested).unwrap_err();
+            assert_eq!(error.kind, ApiErrorKind::MalformedResponse);
+            assert!(error.retryable);
+        }
+    }
+
+    #[test]
+    fn classifies_incomplete_output_as_retryable_and_refusal_as_terminal() {
+        let requested = [translation_input("a")];
+        let incomplete = parse_translation_response(
+            &json!({ "status": "incomplete", "incomplete_details": { "reason": "max_output_tokens" } }),
+            &requested,
+        )
+        .unwrap_err();
+        assert_eq!(incomplete.kind, ApiErrorKind::MalformedResponse);
+        assert!(incomplete.retryable);
+
+        let refusal = parse_translation_response(
+            &json!({
+                "status": "completed",
+                "output": [{ "content": [{ "type": "refusal", "refusal": "No." }] }]
+            }),
+            &requested,
+        )
+        .unwrap_err();
+        assert_eq!(refusal.kind, ApiErrorKind::Refused);
+        assert!(!refusal.retryable);
     }
 
     #[test]

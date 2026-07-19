@@ -130,7 +130,7 @@ async fn run_inner(
         merge_boundary_segments(&mut all_segments, incoming);
         if processing_mode == CaptionProcessingMode::OriginalOnly {
             for segment in &mut all_segments {
-                if segment.translation_status == SegmentStatus::Failed {
+                if segment.translation_status == SegmentStatus::Pending {
                     segment.translation_status = SegmentStatus::Skipped;
                 }
             }
@@ -218,7 +218,7 @@ async fn translate_pending(
     let pending_indices = segments
         .iter()
         .enumerate()
-        .filter(|(_, segment)| segment.translation_status == SegmentStatus::Failed)
+        .filter(|(_, segment)| segment.translation_status == SegmentStatus::Pending)
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     for indices in pending_indices.chunks(6) {
@@ -233,76 +233,108 @@ async fn translate_pending(
             .iter()
             .map(|index| translation_input(&segments[*index]))
             .collect::<Vec<_>>();
-        let translations = match client.translate(&context, &batch, languages).await {
-            Ok(output) => output,
-            Err(first) if first.retryable => {
-                match client.translate(&context, &batch, languages).await {
-                    Ok(output) => output,
-                    Err(error)
-                        if matches!(
-                            error.kind,
-                            ApiErrorKind::Authentication | ApiErrorKind::ModelUnavailable
-                        ) =>
-                    {
-                        return Err(error)
-                    }
-                    Err(error) => {
-                        for index in indices {
-                            send(
-                                events,
-                                SessionEvent::RecoverableError {
-                                    error: RecoverableError {
-                                        code: "translation_failed".into(),
-                                        message: error.message.clone(),
-                                        segment_id: Some(segments[*index].id.clone()),
-                                    },
-                                },
-                            )?;
-                        }
-                        continue;
-                    }
+        let translations =
+            match translate_batch_with_retry(client, &context, &batch, languages).await {
+                Ok(output) => output,
+                Err(error) if translation_error_is_session_fatal(&error) => return Err(error),
+                Err(error) => {
+                    mark_translation_batch_failed(segments, indices, &error, events)?;
+                    publish_translation_coverage(segments, events)?;
+                    continue;
                 }
-            }
-            Err(error) => return Err(error),
-        };
-        for translation in translations {
-            if let Some(segment) = segments
-                .iter_mut()
-                .find(|segment| segment.id == translation.segment_id)
-            {
-                segment.translation_text = Some(translation.translation.clone());
-                segment.ambiguity_note = translation.ambiguity_note.clone();
-                segment.translation_status = SegmentStatus::Complete;
-                send(
-                    events,
-                    SessionEvent::TranslationFinalized {
-                        segment_id: segment.id.clone(),
-                        translation_text: translation.translation,
-                        ambiguity_note: translation.ambiguity_note,
-                    },
-                )?;
-            }
-        }
-        let ready_through_ms = segments
-            .iter()
-            .take_while(|segment| segment.translation_status == SegmentStatus::Complete)
-            .map(|segment| segment.end_ms)
-            .max()
-            .unwrap_or(0);
-        send(
-            events,
-            SessionEvent::CoverageChanged {
-                ready_through_ms,
-            },
-        )?;
-        if ready_through_ms >= 15_000 {
+            };
+        for (index, translation) in indices.iter().zip(translations) {
+            debug_assert_eq!(segments[*index].id, translation.segment_id);
+            let segment = &mut segments[*index];
+            segment.translation_text = Some(translation.translation.clone());
+            segment.ambiguity_note = translation.ambiguity_note.clone();
+            segment.translation_status = SegmentStatus::Complete;
             send(
                 events,
-                SessionEvent::PhaseChanged {
-                    phase: "ready".into(),
+                SessionEvent::TranslationFinalized {
+                    segment_id: segment.id.clone(),
+                    translation_text: translation.translation,
+                    ambiguity_note: translation.ambiguity_note,
                 },
             )?;
         }
+        publish_translation_coverage(segments, events)?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn translate_batch_with_retry(
+    client: &OpenAiClient,
+    context: &[TranslationInput],
+    batch: &[TranslationInput],
+    languages: &LanguageSettings,
+) -> Result<Vec<crate::openai::TranslationOutput>, ApiError> {
+    match client.translate(context, batch, languages).await {
+        Err(error) if error.retryable => client.translate(context, batch, languages).await,
+        result => result,
+    }
+}
+
+pub(crate) fn translation_error_is_session_fatal(error: &ApiError) -> bool {
+    matches!(
+        error.kind,
+        ApiErrorKind::Authentication | ApiErrorKind::ModelUnavailable | ApiErrorKind::Cancelled
+    )
+}
+
+fn mark_translation_batch_failed(
+    segments: &mut [SubtitleSegment],
+    indices: &[usize],
+    error: &ApiError,
+    events: &EventSink,
+) -> Result<(), ApiError> {
+    for index in indices {
+        let segment = &mut segments[*index];
+        segment.translation_text = None;
+        segment.ambiguity_note = None;
+        segment.translation_status = SegmentStatus::Failed;
+        send(
+            events,
+            SessionEvent::TranscriptFinalized {
+                segment: segment.clone(),
+            },
+        )?;
+        send(
+            events,
+            SessionEvent::RecoverableError {
+                error: RecoverableError {
+                    code: "translation_failed".into(),
+                    message: error.message.clone(),
+                    segment_id: Some(segment.id.clone()),
+                },
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn translation_ready_through_ms(segments: &[SubtitleSegment]) -> u64 {
+    segments
+        .iter()
+        .take_while(|segment| segment.translation_status != SegmentStatus::Pending)
+        .map(|segment| segment.end_ms)
+        .max()
+        .unwrap_or(0)
+}
+
+fn publish_translation_coverage(
+    segments: &[SubtitleSegment],
+    events: &EventSink,
+) -> Result<(), ApiError> {
+    let ready_through_ms = translation_ready_through_ms(segments);
+    send(events, SessionEvent::CoverageChanged { ready_through_ms })?;
+    if ready_through_ms >= 15_000 {
+        send(
+            events,
+            SessionEvent::PhaseChanged {
+                phase: "ready".into(),
+            },
+        )?;
     }
     Ok(())
 }
@@ -369,7 +401,7 @@ fn to_pipeline_segment(
         speaker_id,
         is_provisional: false,
         transcription_status: SegmentStatus::Complete,
-        translation_status: SegmentStatus::Failed,
+        translation_status: SegmentStatus::Pending,
     }
 }
 
@@ -518,7 +550,7 @@ pub fn merge_boundary_segments(
                 }
                 candidate.translation_text = None;
                 candidate.ambiguity_note = None;
-                candidate.translation_status = SegmentStatus::Failed;
+                candidate.translation_status = SegmentStatus::Pending;
                 existing[index] = candidate;
             }
         } else if !duplicates_consumed_match {
@@ -685,7 +717,7 @@ mod tests {
             speaker_id: Some("speaker-1".into()),
             is_provisional: false,
             transcription_status: SegmentStatus::Complete,
-            translation_status: SegmentStatus::Failed,
+            translation_status: SegmentStatus::Pending,
         }
     }
 
@@ -718,7 +750,64 @@ mod tests {
         assert_eq!(existing[0].source_text, "今日はちょっと");
         assert_eq!(existing[0].translation_text, None);
         assert_eq!(existing[0].ambiguity_note, None);
-        assert_eq!(existing[0].translation_status, SegmentStatus::Failed);
+        assert_eq!(existing[0].translation_status, SegmentStatus::Pending);
+    }
+
+    #[test]
+    fn failed_translation_is_display_ready_but_pending_translation_still_blocks_coverage() {
+        let mut first = segment("first", 0, 5_000, "一");
+        first.translation_status = SegmentStatus::Complete;
+        let mut failed = segment("failed", 5_000, 10_000, "二");
+        failed.translation_status = SegmentStatus::Failed;
+        let pending = segment("pending", 10_000, 15_000, "三");
+        let mut later = segment("later", 15_000, 20_000, "四");
+        later.translation_status = SegmentStatus::Complete;
+
+        assert_eq!(
+            translation_ready_through_ms(&[first, failed, pending, later]),
+            10_000
+        );
+    }
+
+    #[test]
+    fn terminal_batch_failure_marks_every_line_and_emits_addressable_errors() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::<SessionEvent>::new()));
+        let sink_events = Arc::clone(&captured);
+        let sink: EventSink = Arc::new(move |event| {
+            sink_events.lock().unwrap().push(event);
+            Ok(())
+        });
+        let mut segments = vec![
+            segment("first", 0, 2_000, "一"),
+            segment("second", 2_000, 4_000, "二"),
+        ];
+        let error = ApiError {
+            kind: ApiErrorKind::Refused,
+            message: "Translation unavailable.".into(),
+            retryable: false,
+        };
+
+        mark_translation_batch_failed(&mut segments, &[0, 1], &error, &sink).unwrap();
+
+        assert!(segments
+            .iter()
+            .all(|segment| segment.translation_status == SegmentStatus::Failed));
+        let events = captured.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, SessionEvent::TranscriptFinalized { .. }))
+                .count(),
+            2
+        );
+        let error_ids = events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::RecoverableError { error } => error.segment_id.as_deref(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(error_ids, vec!["first", "second"]);
     }
 
     #[test]

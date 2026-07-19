@@ -1,4 +1,28 @@
-import type { LiveSyncMode, SubtitleSegment } from "./contracts";
+import type { LiveSyncMode, SubtitleDisplayMode, SubtitleSegment } from "./contracts";
+
+export interface SubtitleRowVisibility {
+  showSource: boolean;
+  showTranslation: boolean;
+  sourceFallback: boolean;
+}
+
+/**
+ * A terminal translation failure must remain useful. In translation-only mode
+ * the source row temporarily wins rather than leaving an empty or permanent
+ * "translating" card. Failed captions remain the same clickable segment.
+ */
+export function subtitleRowVisibility(
+  segment: SubtitleSegment,
+  displayMode: SubtitleDisplayMode,
+): SubtitleRowVisibility {
+  const sourceFallback = segment.translationStatus === "failed"
+    && !segment.translationText?.trim();
+  return {
+    showSource: displayMode !== "translation" || sourceFallback,
+    showTranslation: displayMode !== "source" && !sourceFallback,
+    sourceFallback,
+  };
+}
 
 export interface SubtitleFitRequest {
   basePx: number;

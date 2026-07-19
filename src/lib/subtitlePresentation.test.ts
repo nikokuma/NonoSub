@@ -1,8 +1,46 @@
 import { describe, expect, it } from "vitest";
-import { calculateLiveCaptionEnvelope, calculateLiveCaptionFontSize, calculateSubtitleFit, colorWithOpacity, liveOverlaySegment, readableAccentTextColor, subtitleFitOptionsEqual } from "./subtitlePresentation";
+import { calculateLiveCaptionEnvelope, calculateLiveCaptionFontSize, calculateSubtitleFit, colorWithOpacity, liveOverlaySegment, readableAccentTextColor, subtitleFitOptionsEqual, subtitleRowVisibility } from "./subtitlePresentation";
 import type { SubtitleSegment } from "./contracts";
 
 describe("subtitle presentation", () => {
+  it.each(["source", "both", "translation"] as const)(
+    "shows source fallback for a terminal translation failure in %s mode",
+    (displayMode) => {
+      const segment: SubtitleSegment = {
+        id: "failed-1",
+        origin: "file",
+        startMs: 0,
+        endMs: 1_000,
+        sourceText: "今日はちょっと。",
+        isProvisional: false,
+        transcriptionStatus: "complete",
+        translationStatus: "failed",
+      };
+      const visibility = subtitleRowVisibility(segment, displayMode);
+      expect(visibility.showSource).toBe(true);
+      expect(visibility.showTranslation).toBe(false);
+      expect(visibility.sourceFallback).toBe(true);
+    },
+  );
+
+  it("keeps the translation row visible while a translation is still pending", () => {
+    const segment: SubtitleSegment = {
+      id: "pending-1",
+      origin: "file",
+      startMs: 0,
+      endMs: 1_000,
+      sourceText: "今日はちょっと。",
+      isProvisional: false,
+      transcriptionStatus: "complete",
+      translationStatus: "pending",
+    };
+    expect(subtitleRowVisibility(segment, "translation")).toEqual({
+      showSource: false,
+      showTranslation: true,
+      sourceFallback: false,
+    });
+  });
+
   it("keeps partial translation in the transcript but hides it from coordinated overlays", () => {
     const segment: SubtitleSegment = {
       id: "live-1",
