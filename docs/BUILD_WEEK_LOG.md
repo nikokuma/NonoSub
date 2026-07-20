@@ -6,6 +6,7 @@
 - Added searchable, refreshable capture-source enumeration and explicit source selection before a paid realtime session starts.
 - Kept ScreenCaptureKit as the capture backend and excluded NonoSub's own process audio.
 - Added a debug-only launcher entry point for deterministic native acceptance without changing release startup behavior.
+- Added a short-lived, permission-checked unattended-QA key workflow so changing unsigned debug binaries do not repeatedly trigger Keychain; release builds still use the credential vault.
 - Defined an autonomous acceptance campaign covering lesson-model quality, board layout, subtitle clause integrity, native capture, file mode, and failure/endurance cases.
 - Added GPT-5.5 `none`, `low`, and `medium` to the lesson bakeoff alongside the current GPT-5.6 deployment.
 

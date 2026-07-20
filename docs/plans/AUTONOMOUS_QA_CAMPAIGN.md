@@ -10,7 +10,9 @@ The tester may operate the development Mac and the already-open Safari stream. I
 
 - Test the exact commit recorded at the start of the run.
 - Use an Apple Silicon macOS 14+ debug or release build.
-- For unattended debug runs, provide `OPENAI_API_KEY` to the Rust process through the environment. Debug builds read it before Keychain, so the key never enters a webview and a rebuilt unsigned binary does not repeatedly trigger a Keychain password prompt.
+- Before Nico leaves, run `scripts/save_qa_api_key.sh` and approve the one Keychain read. It copies the existing value directly into a permission-`600` file outside the repository without printing it.
+- Launch debug runs through `scripts/run_unattended_qa.sh`. The wrapper provides `OPENAI_API_KEY` only to that process tree. Debug builds read it before Keychain, so the key never enters a webview and a rebuilt unsigned binary does not repeatedly trigger a password prompt.
+- Remove `~/Library/Application Support/com.nono.nonosub/qa-openai-api-key` immediately after the unattended campaign.
 - Use the NonoSub source chooser to select Safari, a specific Safari window, and a display in separate trials.
 - Never record API keys, request bodies, captured PCM, personal transcripts, or lesson prompts in logs.
 - Store only synthetic fixture outputs and sanitized measurements in QA artifacts. Do not commit screenshots or transcripts from a third-party livestream.

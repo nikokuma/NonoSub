@@ -72,6 +72,20 @@ unset OPENAI_API_KEY
 
 Release builds ignore this environment fallback and use the operating-system credential vault.
 
+For a short unattended QA run, Nico can copy the existing Keychain value once into a private local file outside the repository. The setup command never prints the key:
+
+```bash
+scripts/save_qa_api_key.sh
+```
+
+After the one macOS approval, an agent can launch debug NonoSub without another password prompt:
+
+```bash
+scripts/run_unattended_qa.sh
+```
+
+The wrapper requires file permissions of `600` or `400`, exports the key only to the launched debug-process tree, and relies on the same Rust-only `OPENAI_API_KEY` path. Delete `~/Library/Application Support/com.nono.nonosub/qa-openai-api-key` when unattended testing ends. This is intentionally a short-lived QA convenience, not release credential storage.
+
 Build the unsigned macOS artifact with:
 
 ```bash
