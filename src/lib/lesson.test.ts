@@ -14,6 +14,7 @@ function phrases(moment: TeachingMoment): ChalkPhrase[] {
 describe("progressive chalkboard lessons", () => {
   it("keeps every teaching moment focused and bounded", () => {
     expect(FIXTURE_LESSON.moments).toHaveLength(3);
+    const fixtureCues: Array<"point" | "underline"> = [];
     for (const moment of FIXTURE_LESSON.moments) {
       expect(moment.title.trim()).not.toBe("");
       expect(moment.speechBubble.trim()).not.toBe("");
@@ -26,9 +27,12 @@ describe("progressive chalkboard lessons", () => {
         ...phrases(moment).map((phrase) => phrase.tailCue),
         ...moment.demonstration.items.map((item) => item.tailCue),
       ];
-      expect(allCues.filter((cue) => cue === "point")).toHaveLength(1);
-      expect(allCues.filter((cue) => cue === "underline")).toHaveLength(1);
+      const activeCues = allCues.filter((cue) => cue !== "none");
+      expect(activeCues).toHaveLength(1);
+      fixtureCues.push(activeCues[0]);
     }
+    expect(fixtureCues).toContain("point");
+    expect(fixtureCues).toContain("underline");
   });
 
   it("uses deterministic demonstration primitives instead of model layout", () => {

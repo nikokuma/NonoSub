@@ -299,7 +299,7 @@ impl OpenAiClient {
             "reasoning": { "effort": "low" },
             "store": false,
             "input": [
-                { "role": "system", "content": [{ "type": "input_text", "text": "You are Nono, an accurate language tutor and chalkboard director. Teach the source utterance in the requested explanation language at the learner's level. The selected line may intentionally lack a translation; translate it when useful. Use nearby dialogue for cultural and pragmatic meaning. Preserve source quotations exactly. Mark ambiguity instead of inventing certainty. Accuracy comes first; use at most one light cute, playful, slightly bratty aside. Return one focused teaching moment when enough, or two to three ordered moments only for genuinely distinct concepts. Every moment must fit on one non-scrolling board. A demonstration allows at most one section with three short lines; without a demonstration, use at most two sections with three short lines each. Use at most four demo items. Choose sentence_breakdown for phrase pieces, omitted_meaning for an understood blank, literal_to_natural for a meaning transformation, tone_scale for direct-to-soft comparisons, mini_dialogue for context, or none. Direct the approved chalk presentation: white for neutral context; baby_blue for source forms and grammar; yellow for meanings and takeaways; pink for omission, contrast, correction, exception, or uncertainty. You may deviate only when it makes the lesson clearer. Use box or bracket as structural cues. Use strike only for definitely incorrect or unnatural language, always in pink, never for ambiguity. Each moment must contain at least one tailCue and at most one point plus one underline. Attach cues only to the exact phrase or item Nono should indicate. Prefer point for the active concept and underline for a memorable takeaway. Do not output coordinates, selectors, CSS, SVG, bone names, durations, or animation code. sourceFocus controls the already-displayed selected utterance. A tail-drawn underline remains after the gesture. Return three useful follow-up prompts for the complete lesson." }] },
+                { "role": "system", "content": [{ "type": "input_text", "text": "You are Nono, an accurate language tutor and chalkboard director. Teach the source utterance in the requested explanation language at the learner's level. The selected line may intentionally lack a translation; translate it when useful. Use nearby dialogue for cultural and pragmatic meaning. Preserve source quotations exactly. Mark ambiguity instead of inventing certainty. Accuracy comes first; use at most one light cute, playful, slightly bratty aside. Return one focused teaching moment when enough, or two to three ordered moments only for genuinely distinct concepts. Every moment must fit on one non-scrolling board. A demonstration allows at most one section with three short lines; without a demonstration, use at most two sections with three short lines each. Use at most four demo items. Choose sentence_breakdown for phrase pieces, omitted_meaning for an understood blank, literal_to_natural for a meaning transformation, tone_scale for direct-to-soft comparisons, mini_dialogue for context, or none. Direct the approved chalk presentation: white for neutral context; baby_blue for source forms and grammar; yellow for meanings and takeaways; pink for omission, contrast, correction, exception, or uncertainty. You may deviate only when it makes the lesson clearer. Use box or bracket as structural cues. Use strike only for definitely incorrect or unnatural language, always in pink, never for ambiguity. Each moment must contain exactly one tailCue: either one point or one underline, never both. Attach the cue to the exact phrase or item Nono should indicate. Choose point when Nono should hold attention on the moment's active concept, or underline for one memorable takeaway. Do not output coordinates, selectors, CSS, SVG, bone names, durations, or animation code. sourceFocus controls the already-displayed selected utterance. A tail-drawn underline remains after the gesture. Return three useful follow-up prompts for the complete lesson." }] },
                 { "role": "user", "content": [{ "type": "input_text", "text": serde_json::to_string(lesson_context).unwrap_or_default() }] }
             ],
             "text": { "format": {
@@ -442,9 +442,7 @@ fn validate_lesson_card(card: LessonCard) -> Result<LessonCard, ApiError> {
                 || too_long(&moment.title, 48)
                 || moment.speech_bubble.trim().is_empty()
                 || too_long(&moment.speech_bubble, 180)
-                || point_count + underline_count == 0
-                || point_count > 1
-                || underline_count > 1
+                || point_count + underline_count != 1
                 || moment.board_sections.len() > 2
                 || moment.board_sections.iter().any(|section| {
                     section.heading.trim().is_empty()
@@ -500,7 +498,8 @@ fn validate_lesson_card(card: LessonCard) -> Result<LessonCard, ApiError> {
     if invalid {
         Err(ApiError {
             kind: ApiErrorKind::MalformedResponse,
-            message: "GPT-5.6 returned an incomplete lesson card.".into(),
+            message: "GPT-5.6 returned an incomplete lesson card: expected exactly one tail cue per moment."
+                .into(),
             retryable: true,
         })
     } else {
@@ -824,6 +823,47 @@ mod tests {
         }
     }
 
+    fn focused_lesson_moment(
+        line_tail_cue: TailCue,
+        result_tail_cue: TailCue,
+    ) -> TeachingMoment {
+        TeachingMoment {
+            title: "The missing ending".into(),
+            speech_bubble: "The listener fills in the refusal.".into(),
+            source_focus: SourceFocus {
+                color: ChalkColor::White,
+                tail_cue: TailCue::None,
+            },
+            board_sections: vec![BoardSection {
+                heading: "Spoken".into(),
+                lines: vec![phrase(
+                    "今日はちょっと……",
+                    ChalkColor::BabyBlue,
+                    ChalkMark::None,
+                    line_tail_cue,
+                )],
+            }],
+            demonstration: BoardDemo {
+                kind: BoardDemoKind::OmittedMeaning,
+                caption: Some("The ending stays unspoken.".into()),
+                items: vec![BoardDemoItem {
+                    label: "[行けない]".into(),
+                    detail: "[I cannot go]".into(),
+                    color: ChalkColor::Pink,
+                    mark: ChalkMark::Bracket,
+                    tail_cue: TailCue::None,
+                }],
+                result: Some(phrase(
+                    "Today does not work for me.",
+                    ChalkColor::Yellow,
+                    ChalkMark::None,
+                    result_tail_cue,
+                )),
+            },
+            ambiguity_note: None,
+        }
+    }
+
     #[test]
     fn parses_finalized_diarized_segment_event() {
         let event = "event: transcript.text.segment\ndata: {\"type\":\"transcript.text.segment\",\"id\":\"seg_1\",\"start\":1.25,\"end\":2.5,\"speaker\":\"A\",\"text\":\"何ですか？\"}\n";
@@ -1005,48 +1045,40 @@ mod tests {
 
     #[test]
     fn accepts_a_focused_multi_moment_lesson_deck() {
-        let moment = TeachingMoment {
-            title: "The missing ending".into(),
-            speech_bubble: "The listener fills in the refusal.".into(),
-            source_focus: SourceFocus {
-                color: ChalkColor::White,
-                tail_cue: TailCue::None,
-            },
-            board_sections: vec![BoardSection {
-                heading: "Spoken".into(),
-                lines: vec![phrase(
-                    "今日はちょっと……",
-                    ChalkColor::BabyBlue,
-                    ChalkMark::None,
-                    TailCue::Point,
-                )],
-            }],
-            demonstration: BoardDemo {
-                kind: BoardDemoKind::OmittedMeaning,
-                caption: Some("The ending stays unspoken.".into()),
-                items: vec![BoardDemoItem {
-                    label: "[行けない]".into(),
-                    detail: "[I cannot go]".into(),
-                    color: ChalkColor::Pink,
-                    mark: ChalkMark::Bracket,
-                    tail_cue: TailCue::None,
-                }],
-                result: Some(phrase(
-                    "Today does not work for me.",
-                    ChalkColor::Yellow,
-                    ChalkMark::None,
-                    TailCue::Underline,
-                )),
-            },
-            ambiguity_note: None,
-        };
+        let point_moment = focused_lesson_moment(TailCue::Point, TailCue::None);
+        let underline_moment = focused_lesson_moment(TailCue::None, TailCue::Underline);
         let card = LessonCard {
             schema_version: 2,
             selected_segment_id: "seg-4".into(),
-            moments: vec![moment.clone(), moment],
+            moments: vec![point_moment, underline_moment],
             suggested_follow_ups: vec!["One?".into(), "Two?".into(), "Three?".into()],
         };
         assert!(validate_lesson_card(card).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_moment_with_both_point_and_underline() {
+        let card = LessonCard {
+            schema_version: 2,
+            selected_segment_id: "seg-4".into(),
+            moments: vec![focused_lesson_moment(
+                TailCue::Point,
+                TailCue::Underline,
+            )],
+            suggested_follow_ups: vec!["One?".into(), "Two?".into(), "Three?".into()],
+        };
+        assert!(validate_lesson_card(card).is_err());
+    }
+
+    #[test]
+    fn rejects_a_moment_with_no_tail_cue() {
+        let card = LessonCard {
+            schema_version: 2,
+            selected_segment_id: "seg-4".into(),
+            moments: vec![focused_lesson_moment(TailCue::None, TailCue::None)],
+            suggested_follow_ups: vec!["One?".into(), "Two?".into(), "Three?".into()],
+        };
+        assert!(validate_lesson_card(card).is_err());
     }
 
     #[test]

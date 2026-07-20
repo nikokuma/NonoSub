@@ -144,7 +144,7 @@ export const FIXTURE_LESSON: LessonCard = {
           { label: "ちょっと……", detail: "a little…", color: "baby_blue", mark: "none", tailCue: "none" },
           { label: "[行けない]", detail: "[I can't go]", color: "pink", mark: "bracket", tailCue: "none" },
         ],
-        result: { text: "Today doesn't work for me.", color: "yellow", mark: "none", tailCue: "underline" },
+        result: { text: "Today doesn't work for me.", color: "yellow", mark: "none", tailCue: "none" },
       },
       ambiguityNote: { text: "The exact missing ending is uncertain; 行けない and 難しい are plausible readings.", color: "pink", mark: "bracket", tailCue: "none" },
     },
@@ -160,7 +160,7 @@ export const FIXTURE_LESSON: LessonCard = {
           { label: "Literal", detail: "As for today, a little…", color: "white", mark: "none", tailCue: "none" },
           { label: "Natural", detail: "Today doesn't work for me.", color: "yellow", mark: "none", tailCue: "none" },
         ],
-        result: { text: "A soft, indirect no", color: "yellow", mark: "none", tailCue: "underline" },
+        result: { text: "A soft, indirect no", color: "yellow", mark: "none", tailCue: "none" },
       },
     },
     {
@@ -180,7 +180,7 @@ export const FIXTURE_LESSON: LessonCard = {
         items: [
           { label: "行きません", detail: "direct refusal", color: "pink", mark: "none", tailCue: "none" },
           { label: "今日は難しいです", detail: "soft explanation", color: "white", mark: "none", tailCue: "none" },
-          { label: "今日はちょっと……", detail: "indirect and gentle", color: "baby_blue", mark: "none", tailCue: "point" },
+          { label: "今日はちょっと……", detail: "indirect and gentle", color: "baby_blue", mark: "none", tailCue: "none" },
         ],
         result: { text: "More room for the listener to save face", color: "yellow", mark: "none", tailCue: "underline" },
       },
