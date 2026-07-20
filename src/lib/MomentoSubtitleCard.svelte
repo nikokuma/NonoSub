@@ -8,14 +8,12 @@
     style,
     liveLabel,
     degraded = false,
-    onselect,
   }: {
     segment: SubtitleSegment;
     speaker?: SpeakerProfile;
     style: StyleSettings;
     liveLabel?: string;
     degraded?: boolean;
-    onselect: (segment: SubtitleSegment) => void;
   } = $props();
 
   const accent = $derived(speaker?.color ?? "#35c7e8");
@@ -29,15 +27,13 @@
   const translationPanel = $derived(colorWithOpacity("#05091e", style.backgroundOpacity));
 </script>
 
-<button
+<div
   class="momento-card"
   class:provisional={segment.isProvisional}
   class:degraded
   class:live={Boolean(liveLabel)}
   class:single-row={!showSource || !showTranslation}
   style={`--speaker-accent:${accent};--speaker-accent-text:${accentText};--source-panel:${sourcePanel};--translation-panel:${translationPanel}`}
-  onclick={(event) => event.detail === 0 && !segment.isProvisional && onselect(segment)}
-  disabled={segment.isProvisional}
   aria-label={segment.isProvisional ? "Caption in progress" : "Right-click this caption to ask Nono"}
 >
   {#if liveLabel}<span class="live-signal">{liveLabel}</span>{/if}
@@ -54,7 +50,7 @@
       </span>
     {/if}
   </span>
-</button>
+</div>
 
 <style>
   .momento-card { width: 100%; min-width: 0; display: grid; justify-items: center; gap: .18em; border: 0; background: transparent; padding: .32em .62em .45em; color: white; text-align: center; cursor: pointer; }

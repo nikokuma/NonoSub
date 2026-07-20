@@ -3,12 +3,13 @@
   import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import type { LessonOpenContext, SessionState, SubtitleSegment } from "./contracts";
+  import type { LessonClosedContext, LessonOpenContext, SessionState } from "./contracts";
   import { EMPTY_SESSION } from "./contracts";
   import { FIXTURE_EVENTS } from "./fixtures";
   import { activeSegments, canResumeForCoverage, formatTime, reduceSession, shouldPauseForCoverage, subtitleTimelineTime } from "./session";
   import { effectiveStyle } from "./preferences";
   import { loadPreferences, savePreferencePatch, subscribePreferences, subscribeSession } from "./runtime";
+  import { closeIdentifiesPlaybackLease, createPlaybackPauseLease, shouldResumePlayback, type PlaybackPauseLease } from "./playbackOwnership";
   import SubtitleStack from "./SubtitleStack.svelte";
 
   let session = $state<SessionState>(FIXTURE_EVENTS.reduce(reduceSession, structuredClone(EMPTY_SESSION)));
@@ -28,7 +29,8 @@
   let dragCandidate: { pointerId: number; startX: number; startY: number; target: HTMLElement } | null = null;
   let suppressSelection = false;
   let hideTimer: ReturnType<typeof setTimeout> | undefined;
-  let wasPlayingBeforeLesson = false;
+  let playbackRevision = 0;
+  let pauseLease: PlaybackPauseLease | undefined;
   let manualSubtitleOffsetMs = $state(0);
   let offsetHudVisible = $state(false);
   let offsetHudTimer: ReturnType<typeof setTimeout> | undefined;
@@ -52,13 +54,11 @@
         if (payload === "subtitle_later") adjustSubtitleOffset(100);
         if (payload === "subtitle_reset") setSubtitleOffset(0);
       }).then((unlisten) => cleanup.push(unlisten));
-      void listen("lesson-closed", () => {
-        if (wasPlayingBeforeLesson && video?.paused) void video.play();
-        wasPlayingBeforeLesson = false;
+      void listen<LessonClosedContext>("lesson-closed", ({ payload }) => {
+        closeLessonPause(payload);
       }).then((unlisten) => cleanup.push(unlisten));
       void listen<LessonOpenContext>("lesson-composer-opened", ({ payload }) => {
-        if (session.mode !== "file" || payload.sourceSurface !== "viewer") return;
-        pauseForLesson();
+        openLessonPause(payload);
       }).then((unlisten) => cleanup.push(unlisten));
     }
     activity();
@@ -66,22 +66,26 @@
       cleanup.forEach((stop) => stop());
       if (hideTimer) clearTimeout(hideTimer);
       if (offsetHudTimer) clearTimeout(offsetHudTimer);
+      playbackRevision += 1;
+      pauseLease = undefined;
     };
   });
 
   $effect(() => {
     if (session.mode !== "file" || session.sessionId === offsetSessionId) return;
+    playbackRevision += 1;
+    pauseLease = undefined;
     offsetSessionId = session.sessionId;
     manualSubtitleOffsetMs = 0;
   });
 
   $effect(() => {
-    if ((session.phase === "ready" || session.phase === "complete") && video?.paused && currentMs === 0 && !catchingUp) void video.play();
+    if ((session.phase === "ready" || session.phase === "complete") && video?.paused && currentMs === 0 && !catchingUp && !pauseLease) void video.play();
   });
 
   $effect(() => {
     const readyThroughMs = session.readyThroughMs;
-    if (!catchingUp || !video?.paused) return;
+    if (!catchingUp || !video?.paused || pauseLease) return;
     if (session.phase === "complete" || canResumeForCoverage(currentMs, readyThroughMs)) {
       catchingUp = false;
       void video.play();
@@ -96,15 +100,34 @@
 
   function togglePlayback() {
     if (!video) return;
+    playbackRevision += 1;
     if (video.paused) void video.play(); else video.pause();
   }
 
-  function pauseForLesson() {
-    if (!video || session.mode !== "file") return;
-    if (!video.paused) {
-      wasPlayingBeforeLesson = true;
-      video.pause();
-    }
+  function openLessonPause(context: LessonOpenContext) {
+    if (!video || session.mode !== "file" || context.sessionId !== session.sessionId) return;
+    const mediaInstanceId = session.media?.path ?? "";
+    const lease = createPlaybackPauseLease(context, mediaInstanceId, !video.paused, playbackRevision);
+    if (!lease) return;
+    pauseLease = lease;
+    if (!video.paused) video.pause();
+  }
+
+  function closeLessonPause(closed: LessonClosedContext) {
+    const lease = pauseLease;
+    if (!lease || !closeIdentifiesPlaybackLease(lease, closed)) return;
+    const coverageReady = session.phase === "complete"
+      || !shouldPauseForCoverage(currentMs, session.readyThroughMs);
+    const resume = Boolean(video) && shouldResumePlayback(lease, closed, {
+      sessionId: session.sessionId,
+      mediaInstanceId: session.media?.path ?? "",
+      playbackRevision,
+      paused: video?.paused ?? true,
+      coverageReady,
+    });
+    pauseLease = undefined;
+    if (resume) void video?.play();
+    else if (lease.wasPlaying && closed.reason === "closed" && !coverageReady) catchingUp = true;
   }
 
   function setSubtitleOffset(value: number) {
@@ -139,6 +162,7 @@
     if (!video) return;
     currentMs = video.currentTime * 1000;
     if (session.phase !== "complete" && !video.paused && shouldPauseForCoverage(currentMs, session.readyThroughMs)) {
+      playbackRevision += 1;
       video.pause();
       catchingUp = true;
     }
@@ -152,40 +176,19 @@
     durationMs = video?.duration && Number.isFinite(video.duration) ? video.duration * 1000 : 0;
   }
 
-  async function selectLine(segment: SubtitleSegment) {
-    if (suppressSelection) {
-      suppressSelection = false;
-      return;
-    }
-    pauseForLesson();
-    if (isTauri()) await invoke("open_lesson_composer", {
-      segmentId: segment.id,
-      sourceSurface: "viewer",
-      cursorX: window.innerWidth / 2,
-      cursorY: window.innerHeight / 2,
-      experimentalExternalPause: false,
-    });
-  }
-
   async function openComposer(event: MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
     const segmentId = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-segment-id]")?.dataset.segmentId;
     const segment = session.segments.find((candidate) => candidate.id === segmentId);
     if (!isTauri() || !segment || segment.isProvisional) return;
-    pauseForLesson();
-    try {
-      await invoke("open_lesson_composer", {
-        segmentId: segment.id,
-        sourceSurface: "viewer",
-        cursorX: event.clientX,
-        cursorY: event.clientY,
-        experimentalExternalPause: false,
-      });
-    } catch {
-      if (wasPlayingBeforeLesson && video?.paused) await video.play();
-      wasPlayingBeforeLesson = false;
-    }
+    await invoke("open_lesson_composer", {
+      segmentId: segment.id,
+      sourceSurface: "viewer",
+      cursorX: event.clientX,
+      cursorY: event.clientY,
+      experimentalExternalPause: false,
+    });
   }
 
   function suppressLookup(node: HTMLElement) {
@@ -250,14 +253,14 @@
   {:else}<div class="fixture-backdrop"><span>駅前</span><small>NONOSUB VIEWER FIXTURE</small></div>{/if}
 
   {#if subtitlesVisible}<div role="group" aria-label="Movable subtitle overlay. Drag to reposition; right-click to ask Nono." class="subtitle-position" class:dragging style={`left:${preferences.style.position.x * 100}%;top:${preferences.style.position.y * 100}%`} use:suppressLookup oncontextmenu={openComposer} onpointerdown={beginDrag} onpointermove={moveDrag} onpointerup={finishDrag} onpointercancel={finishDrag}>
-    <SubtitleStack segments={active} speakers={session.speakers} style={activeStyle} movable onselect={selectLine} />
+    <SubtitleStack segments={active} speakers={session.speakers} style={activeStyle} movable />
   </div>{/if}
 
   {#if catchingUp}<div class="catching"><i>の</i>Nono is catching up…</div>{/if}
   {#if offsetHudVisible}<div class="offset-hud">Subtitles {formattedOffset()}</div>{/if}
   <div class="chrome" class:visible={controlsVisible}>
     <div class="topbar" data-tauri-drag-region><b>{session.media?.fileName ?? "Video"}</b></div>
-    <div class="controls"><button class="play" onclick={togglePlayback}>{playing ? "❚❚" : "▶"}</button><time>{formatTime(currentMs)}</time><input type="range" min="0" max={durationMs || 33_000} value={currentMs} oninput={(event) => { currentMs = Number(event.currentTarget.value); if (video) video.currentTime = currentMs / 1000; }} /><time>{formatTime(durationMs)}</time><div class="sync-controls"><button title="Show subtitles 100 ms earlier" onclick={() => adjustSubtitleOffset(-100)}>−</button><button title="Reset subtitle timing" onclick={() => setSubtitleOffset(0)}>{formattedOffset()}</button><button title="Show subtitles 100 ms later" onclick={() => adjustSubtitleOffset(100)}>+</button></div><button onclick={toggleFullscreen}>⛶</button></div>
+    <div class="controls"><button class="play" onclick={togglePlayback}>{playing ? "❚❚" : "▶"}</button><time>{formatTime(currentMs)}</time><input type="range" min="0" max={durationMs || 33_000} value={currentMs} oninput={(event) => { playbackRevision += 1; currentMs = Number(event.currentTarget.value); if (video) video.currentTime = currentMs / 1000; }} /><time>{formatTime(durationMs)}</time><div class="sync-controls"><button title="Show subtitles 100 ms earlier" onclick={() => adjustSubtitleOffset(-100)}>−</button><button title="Reset subtitle timing" onclick={() => setSubtitleOffset(0)}>{formattedOffset()}</button><button title="Show subtitles 100 ms later" onclick={() => adjustSubtitleOffset(100)}>+</button></div><button onclick={toggleFullscreen}>⛶</button></div>
   </div>
 </div>
 

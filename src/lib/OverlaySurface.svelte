@@ -119,20 +119,6 @@
     return () => cleanup.forEach((stop) => stop());
   });
 
-  async function selectLine(segment: SubtitleSegment) {
-    if (suppressSelection) {
-      suppressSelection = false;
-      return;
-    }
-    if (isTauri()) await invoke("open_lesson_composer", {
-      segmentId: segment.id,
-      sourceSurface: "overlay",
-      cursorX: window.innerWidth / 2,
-      cursorY: window.innerHeight / 2,
-      experimentalExternalPause: preferences.experimentalExternalPause,
-    });
-  }
-
   async function openComposer(event: MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
@@ -272,7 +258,7 @@
 >
   {#if arranging}<div class="grip" aria-hidden="true">⠿ DRAG NONOSUB</div>{/if}
   <div class="caption-host" bind:this={captionHost}>
-    <LiveSubtitleStack segment={displayedSegment} speaker={displayedSegment.speakerId ? session.speakers[displayedSegment.speakerId] : undefined} style={displayedStyle} sync={session.liveSync} liveMode={preferences.sync.liveMode} processingMode={session.processingMode} onselect={selectLine} />
+    <LiveSubtitleStack segment={displayedSegment} speaker={displayedSegment.speakerId ? session.speakers[displayedSegment.speakerId] : undefined} style={displayedStyle} sync={session.liveSync} liveMode={preferences.sync.liveMode} processingMode={session.processingMode} />
     {#if session.fatalError}<div class="error">{session.fatalError}</div>{/if}
   </div>
 </div>

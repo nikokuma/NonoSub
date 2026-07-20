@@ -208,3 +208,11 @@
 - Separated ephemeral cursor-relative composer placement from persistent per-monitor board placement. The complete chalkboard now restores its saved position; only manual movement in lesson mode writes it.
 - A failed follow-up restores the existing full board and surfaces the error in Nono's bubble instead of shrinking into the composer.
 - Full verification passes with zero Svelte errors or warnings, 92 frontend tests, a successful production build, 92 Rust tests, and warning-free clippy.
+
+## July 20 — Explicit playback ownership
+
+- Replaced the viewer's loose lesson-pause boolean with a lease bound to the exact session, media instance, subtitle selection, segment, and playback revision.
+- File lessons resume only after an explicit matching close while the same lesson-owned pause and translation coverage remain valid. User playback changes, buffering ownership, replacement, and invalidation suppress stale resume behavior.
+- Reserved left pointer input for subtitle dragging and made right-click the only overlay path into Ask Nono, while retaining macOS Look Up suppression.
+- Removed the blind external-media close toggle. A successful experimental pause now exposes an explicit Resume External Media action and never guesses the external player's state on close.
+- Full verification passes with zero Svelte errors or warnings, 123 frontend tests, a successful production build, 95 Rust tests, and warning-free clippy.

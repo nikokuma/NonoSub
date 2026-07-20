@@ -49,7 +49,7 @@ struct AppState {
     launcher_mode: Mutex<String>,
     lesson_open_context: Mutex<Option<LessonOpenContext>>,
     subtitles_visible: AtomicBool,
-    external_media_paused_for_lesson: AtomicBool,
+    external_media_pause_outstanding: AtomicBool,
     #[cfg(target_os = "macos")]
     live: live::LiveState,
 }
@@ -70,7 +70,7 @@ impl Default for AppState {
             launcher_mode: Mutex::new("file".into()),
             lesson_open_context: Mutex::new(None),
             subtitles_visible: AtomicBool::new(true),
-            external_media_paused_for_lesson: AtomicBool::new(false),
+            external_media_pause_outstanding: AtomicBool::new(false),
             #[cfg(target_os = "macos")]
             live: live::LiveState::default(),
         }
@@ -320,6 +320,35 @@ struct LessonOpenContext {
     cursor_x: f64,
     cursor_y: f64,
     external_media_control: ExternalMediaControlResult,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum LessonCloseReason {
+    Closed,
+    Invalidated,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct LessonClosedContext {
+    selection_id: u64,
+    session_id: String,
+    source_surface: String,
+    segment_id: String,
+    reason: LessonCloseReason,
+}
+
+impl LessonClosedContext {
+    fn from_open(open: LessonOpenContext, reason: LessonCloseReason) -> Self {
+        Self {
+            selection_id: open.selection_id,
+            session_id: open.session_id,
+            source_surface: open.source_surface,
+            segment_id: open.segment_id,
+            reason,
+        }
+    }
 }
 
 struct LessonRequestMaterial {
@@ -1138,7 +1167,7 @@ fn open_lesson_composer(
         } else if !media_keys::permission_status() {
             ExternalMediaControlResult::PermissionRequired
         } else if state
-            .external_media_paused_for_lesson
+            .external_media_pause_outstanding
             .load(Ordering::Relaxed)
         {
             ExternalMediaControlResult::Paused
@@ -1146,7 +1175,7 @@ fn open_lesson_composer(
             match media_keys::post_play_pause() {
                 Ok(()) => {
                     state
-                        .external_media_paused_for_lesson
+                        .external_media_pause_outstanding
                         .store(true, Ordering::Relaxed);
                     ExternalMediaControlResult::Paused
                 }
@@ -1250,9 +1279,14 @@ fn request_media_key_permission() -> bool {
 }
 
 #[tauri::command]
-fn post_media_play_pause() -> ExternalMediaControlResult {
+fn post_media_play_pause(state: State<'_, AppState>) -> ExternalMediaControlResult {
     match media_keys::post_play_pause() {
-        Ok(()) => ExternalMediaControlResult::Paused,
+        Ok(()) => {
+            state
+                .external_media_pause_outstanding
+                .store(false, Ordering::Relaxed);
+            ExternalMediaControlResult::Paused
+        }
         Err(message) if message == "permission_required" => {
             ExternalMediaControlResult::PermissionRequired
         }
@@ -2202,30 +2236,32 @@ fn close_lesson(app: &tauri::AppHandle, state: &AppState) {
     if let Some(window) = app.get_webview_window("lesson") {
         let _ = window.hide();
     }
-    if state
-        .external_media_paused_for_lesson
-        .swap(false, Ordering::Relaxed)
-    {
-        let _ = media_keys::post_play_pause();
+    let context = state
+        .lesson_open_context
+        .lock()
+        .ok()
+        .and_then(|mut context| context.take());
+    if let Some(context) = context {
+        let _ = app.emit(
+            "lesson-closed",
+            LessonClosedContext::from_open(context, LessonCloseReason::Closed),
+        );
     }
-    if let Ok(mut context) = state.lesson_open_context.lock() {
-        *context = None;
-    }
-    let _ = app.emit("lesson-closed", ());
     update_activation_policy(app);
 }
 
 fn invalidate_lesson_context(app: &tauri::AppHandle, state: &AppState) -> bool {
-    let had_context = state
+    let context = state
         .lesson_open_context
         .lock()
-        .map(|mut context| context.take().is_some())
-        .unwrap_or(false);
-    if !had_context {
-        return false;
+        .ok()
+        .and_then(|mut context| context.take());
+    if let Some(context) = context {
+        finish_lesson_invalidation(app, context);
+        true
+    } else {
+        false
     }
-    finish_lesson_invalidation(app);
-    true
 }
 
 fn invalidate_lesson_for_source_revision(
@@ -2237,22 +2273,25 @@ fn invalidate_lesson_for_source_revision(
     let invalidated = state
         .lesson_open_context
         .lock()
-        .map(|mut context| {
+        .ok()
+        .and_then(|mut context| {
             let should_invalidate = context
                 .as_ref()
                 .is_some_and(|open| {
                     open.session_id == session_id && lesson_event_revises_context(open, event)
                 });
             if should_invalidate {
-                context.take();
+                context.take()
+            } else {
+                None
             }
-            should_invalidate
-        })
-        .unwrap_or(false);
-    if invalidated {
-        finish_lesson_invalidation(app);
+        });
+    if let Some(context) = invalidated {
+        finish_lesson_invalidation(app, context);
+        true
+    } else {
+        false
     }
-    invalidated
 }
 
 fn lesson_event_revises_context(open: &LessonOpenContext, event: &SessionEvent) -> bool {
@@ -2266,12 +2305,15 @@ fn lesson_event_revises_context(open: &LessonOpenContext, event: &SessionEvent) 
     }
 }
 
-fn finish_lesson_invalidation(app: &tauri::AppHandle) {
+fn finish_lesson_invalidation(app: &tauri::AppHandle, context: LessonOpenContext) {
     if let Some(window) = app.get_webview_window("lesson") {
         let _ = window.hide();
     }
     let _ = app.emit("lesson-selection-invalidated", ());
-    let _ = app.emit("lesson-closed", ());
+    let _ = app.emit(
+        "lesson-closed",
+        LessonClosedContext::from_open(context, LessonCloseReason::Invalidated),
+    );
     update_activation_policy(app);
 }
 
@@ -2680,6 +2722,30 @@ mod tests {
         let value = serde_json::to_value(segment).expect("segment should serialize");
         assert_eq!(value["startMs"], 1200);
         assert_eq!(value["translationText"], "What is it?");
+    }
+
+    #[test]
+    fn lesson_close_contract_keeps_pause_ownership_identity() {
+        let state = completed_file_state();
+        let (open, _) = pin_lesson_open_context(
+            &state,
+            "segment-1".into(),
+            "viewer".into(),
+            12.0,
+            24.0,
+            ExternalMediaControlResult::NotRequested,
+        )
+        .unwrap();
+        let value = serde_json::to_value(LessonClosedContext::from_open(
+            open,
+            LessonCloseReason::Invalidated,
+        ))
+        .unwrap();
+        assert_eq!(value["selectionId"], 1);
+        assert_eq!(value["sessionId"], "session-1");
+        assert_eq!(value["sourceSurface"], "viewer");
+        assert_eq!(value["segmentId"], "segment-1");
+        assert_eq!(value["reason"], "invalidated");
     }
 
     #[test]

@@ -1,5 +1,4 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { emit } from "@tauri-apps/api/event";
 import type { Preferences } from "./preferences";
 
 export interface FileLaunchResult {
@@ -31,7 +30,6 @@ export async function cancelAndReplaceSession(): Promise<void> {
     invoke("hide_surface", { surface: "overlay" }),
     invoke("hide_surface", { surface: "lesson" }),
   ]);
-  await emit("lesson-closed");
 }
 
 export async function startFileSession(

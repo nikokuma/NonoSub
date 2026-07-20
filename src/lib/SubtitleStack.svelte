@@ -12,7 +12,6 @@
     style,
     movable = false,
     preview = false,
-    onselect,
     onmove,
   }: {
     segments: SubtitleSegment[];
@@ -20,7 +19,6 @@
     style: StyleSettings;
     movable?: boolean;
     preview?: boolean;
-    onselect: (segment: SubtitleSegment) => void;
     onmove?: (event: PointerEvent) => void;
   } = $props();
 
@@ -51,18 +49,17 @@
     {@const visibility = subtitleRowVisibility(segment, style.displayMode)}
     <div class="segment-wrap" data-segment-id={segment.id}>
     {#if style.preset === "momento"}
-      <MomentoSubtitleCard {segment} {speaker} {style} {onselect} />
+      <MomentoSubtitleCard {segment} {speaker} {style} />
     {:else if style.preset === "wired"}
-      <CyberiaSubtitleCard {segment} {speaker} {style} {onselect} />
+      <CyberiaSubtitleCard {segment} {speaker} {style} />
     {:else if style.preset === "classic-outline" || style.preset === "yellow-drop"}
-      <BroadcastSubtitleCard {segment} {speaker} {style} variant={style.preset} {onselect} />
+      <BroadcastSubtitleCard {segment} {speaker} {style} variant={style.preset} />
     {:else if style.preset === "fallout"}
-      <ArcadeSubtitleCard {segment} {speaker} {style} {onselect} />
+      <ArcadeSubtitleCard {segment} {speaker} {style} />
     {:else}
       <button
         class="subtitle-line effect-{style.effect}"
         class:provisional={segment.isProvisional}
-        onclick={(event) => event.detail === 0 && !segment.isProvisional && onselect(segment)}
         disabled={segment.isProvisional}
         aria-label={segment.isProvisional ? "Caption in progress" : "Right-click this caption to ask Nono"}
       >

@@ -13,7 +13,6 @@
     sync,
     liveMode = "coordinated",
     processingMode = "translated",
-    onselect,
   }: {
     segment: SubtitleSegment;
     speaker?: SpeakerProfile;
@@ -21,7 +20,6 @@
     sync?: LiveSyncState;
     liveMode?: LiveSyncMode;
     processingMode?: CaptionProcessingMode;
-    onselect: (segment: SubtitleSegment) => void;
   } = $props();
 
   let viewportWidth = $state(900);
@@ -68,16 +66,15 @@
   style={`font-size:${liveFontSize}px;font-family:${style.fontFamily};--sub-bg:${style.backgroundOpacity};--live-source-lines:${envelope.sourceLineLimit};--live-translation-lines:${envelope.translationLineLimit}`}
 >
   {#if style.preset === "momento"}
-    <MomentoSubtitleCard segment={renderedSegment} {speaker} {style} liveLabel={delayLabel} degraded={sync?.status === "degraded"} {onselect} />
+    <MomentoSubtitleCard segment={renderedSegment} {speaker} {style} liveLabel={delayLabel} degraded={sync?.status === "degraded"} />
   {:else if style.preset === "wired"}
-    <CyberiaSubtitleCard segment={renderedSegment} {speaker} {style} liveLabel={delayLabel} degraded={sync?.status === "degraded"} {onselect} />
+    <CyberiaSubtitleCard segment={renderedSegment} {speaker} {style} liveLabel={delayLabel} degraded={sync?.status === "degraded"} />
   {:else if style.preset === "classic-outline" || style.preset === "yellow-drop"}
-    <BroadcastSubtitleCard segment={renderedSegment} {speaker} {style} variant={style.preset} liveLabel={delayLabel} degraded={sync?.status === "degraded"} {onselect} />
+    <BroadcastSubtitleCard segment={renderedSegment} {speaker} {style} variant={style.preset} liveLabel={delayLabel} degraded={sync?.status === "degraded"} />
   {:else if style.preset === "fallout"}
-    <ArcadeSubtitleCard segment={renderedSegment} {speaker} {style} liveLabel={delayLabel} degraded={sync?.status === "degraded"} {onselect} />
+    <ArcadeSubtitleCard segment={renderedSegment} {speaker} {style} liveLabel={delayLabel} degraded={sync?.status === "degraded"} />
   {:else}
     <button
-      onclick={(event) => event.detail === 0 && !renderedSegment.isProvisional && onselect(renderedSegment)}
       disabled={segment.isProvisional}
       aria-label={segment.isProvisional ? "Live caption in progress" : "Right-click this caption to ask Nono"}
     >

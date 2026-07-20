@@ -9,7 +9,6 @@
     variant,
     liveLabel,
     degraded = false,
-    onselect,
   }: {
     segment: SubtitleSegment;
     speaker?: SpeakerProfile;
@@ -17,7 +16,6 @@
     variant: "classic-outline" | "yellow-drop";
     liveLabel?: string;
     degraded?: boolean;
-    onselect: (segment: SubtitleSegment) => void;
   } = $props();
 
   const source = $derived(segment.sourceText.trim());
@@ -27,14 +25,12 @@
   const showTranslation = $derived(visibility.showTranslation);
 </script>
 
-<button
+<div
   class="broadcast-card variant-{variant}"
   class:provisional={segment.isProvisional}
   class:degraded
   class:live={Boolean(liveLabel)}
   style={`--broadcast-panel:rgba(0,0,0,${style.backgroundOpacity})`}
-  onclick={(event) => event.detail === 0 && !segment.isProvisional && onselect(segment)}
-  disabled={segment.isProvisional}
   aria-label={segment.isProvisional ? "Caption in progress" : "Right-click this caption to ask Nono"}
 >
   {#if liveLabel}<span class="live-signal">{liveLabel}</span>{/if}
@@ -49,7 +45,7 @@
       <span class="caption translation" class:waiting={!translation}>{translation || "Translation catching up…"}</span>
     {/if}
   </span>
-</button>
+</div>
 
 <style>
   .broadcast-card {

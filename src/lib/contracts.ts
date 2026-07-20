@@ -46,6 +46,14 @@ export interface LessonOpenContext {
   externalMediaControl: ExternalMediaControlResult;
 }
 
+export interface LessonClosedContext {
+  selectionId: number;
+  sessionId: string;
+  sourceSurface: "viewer" | "overlay" | "workbench";
+  segmentId: string;
+  reason: "closed" | "invalidated";
+}
+
 export type ExternalMediaControlResult = "not_requested" | "paused" | "permission_required" | "failed" | "unsupported";
 
 export interface LanguageSettings {

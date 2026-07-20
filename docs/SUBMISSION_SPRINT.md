@@ -521,7 +521,7 @@ The July 18 independent review found release-blocking correctness and containmen
 - [x] R7 — Make file target-language retranslation atomic and generation-scoped. Focused plan: `docs/plans/ATOMIC_FILE_RETRANSLATION.md`.
 - [x] R8 — Repair multi-window snapshot ordering and preference patching. Focused plan: `docs/plans/MULTI_WINDOW_STATE_CONVERGENCE.md`.
 - [x] R9 — Pin lesson identity and correct cache/placement behavior. Focused plan: `docs/plans/PINNED_LESSON_IDENTITY.md`.
-- [ ] R10 — Introduce explicit file and external-media playback ownership.
+- [x] R10 — Introduce explicit file and external-media playback ownership.
 - [ ] R11 — Bound long-session coordinator, event, error, and transcript-rendering costs.
 - [ ] R12 — Preserve file/live media timing across decode and send failures.
 - [ ] R13 — Complete audit cleanup, bundle smoke testing, and final acceptance.
@@ -540,6 +540,8 @@ R7 verification: `pnpm verify` passed with zero Svelte errors or warnings, 81 fr
 R8 verification: `pnpm verify` passed with zero Svelte errors or warnings, 89 frontend tests, a successful production build, 88 Rust tests, and warning-free clippy.
 
 R9 verification: `pnpm verify` passed with zero Svelte errors or warnings, 92 frontend tests, a successful production build, 92 Rust tests, and warning-free clippy.
+
+R10 verification: `pnpm verify` passed with zero Svelte errors or warnings, 123 frontend tests, a successful production build, 95 Rust tests, and warning-free clippy. File playback now uses a session/media/selection/revision-bound pause lease; subtitle lesson activation is right-click-only; stale or invalidated closes cannot resume playback; experimental external pause never posts a blind close toggle and instead offers an explicit resume action.
 
 ## Checkpoints and decisions
 

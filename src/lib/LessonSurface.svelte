@@ -227,6 +227,15 @@
     }
   }
 
+  async function resumeExternalMedia() {
+    if (!isTauri() || openContext.externalMediaControl !== "paused") return;
+    const result = await invoke<LessonOpenContext["externalMediaControl"]>("post_media_play_pause");
+    openContext = {
+      ...openContext,
+      externalMediaControl: result === "paused" ? "not_requested" : result,
+    };
+  }
+
   async function startWindowDrag(event: PointerEvent) {
     if (!isTauri() || event.button !== 0) return;
     event.preventDefault();
@@ -431,6 +440,7 @@
       onsubmit={(question) => void ask(question)}
       oncancel={closeLesson}
       ondrag={startWindowDrag}
+      onresumeexternal={() => void resumeExternalMedia()}
     />
   </div>
 {:else}

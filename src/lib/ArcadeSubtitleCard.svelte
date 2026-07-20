@@ -8,14 +8,12 @@
     style,
     liveLabel,
     degraded = false,
-    onselect,
   }: {
     segment: SubtitleSegment;
     speaker?: SpeakerProfile;
     style: StyleSettings;
     liveLabel?: string;
     degraded?: boolean;
-    onselect: (segment: SubtitleSegment) => void;
   } = $props();
 
   const source = $derived(segment.sourceText.trim());
@@ -26,14 +24,12 @@
   const panel = $derived(colorWithOpacity(style.falloutColors.panel, style.backgroundOpacity));
 </script>
 
-<button
+<div
   class="arcade-card"
   class:provisional={segment.isProvisional}
   class:degraded
   class:live={Boolean(liveLabel)}
   style={`--arcade-text:${style.falloutColors.text};--arcade-panel:${panel}`}
-  onclick={(event) => event.detail === 0 && !segment.isProvisional && onselect(segment)}
-  disabled={segment.isProvisional}
   aria-label={segment.isProvisional ? "Caption in progress" : "Right-click this caption to ask Nono"}
 >
   <span class="dialogue-strip">
@@ -52,7 +48,7 @@
       {/if}
     </span>
   </span>
-</button>
+</div>
 
 <style>
   .arcade-card {

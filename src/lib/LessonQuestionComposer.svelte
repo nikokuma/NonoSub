@@ -11,6 +11,7 @@
     onsubmit,
     oncancel,
     ondrag,
+    onresumeexternal,
   }: {
     segment: SubtitleSegment;
     style: StyleSettings;
@@ -21,6 +22,7 @@
     onsubmit: (question: string) => void;
     oncancel?: () => void;
     ondrag?: (event: PointerEvent) => void;
+    onresumeexternal?: () => void;
   } = $props();
 
   const prompts = ["Break it down", "Translate this", "Cultural context"];
@@ -64,6 +66,8 @@
   {/if}
   {#if externalMediaControl === "permission_required" || externalMediaControl === "failed" || externalMediaControl === "unsupported"}
     <p class="media-notice">External media kept playing.</p>
+  {:else if externalMediaControl === "paused" && onresumeexternal}
+    <button class="resume-media" type="button" onclick={onresumeexternal}>Resume External Media</button>
   {/if}
 </section>
 
@@ -74,7 +78,7 @@
   .momento{border-radius:4px 17px 5px 15px;background:#f5efe6;color:#18171b;border:3px solid #19171a;box-shadow:7px 7px 0 #19171a}.momento::after{content:"";position:absolute;z-index:-1;right:-18px;top:-25px;width:90px;height:65px;background:var(--ask-accent);transform:rotate(17deg)}.momento header b,.momento .selected-line small{color:#3a34388c}.momento .selected-line{background:#fff;border:2px solid #1a1719;border-left-width:7px;clip-path:polygon(0 0,98% 0,100% 82%,96% 100%,0 100%)}.momento .prompt-row button{border-color:#241f2288;background:#fff;color:#201b1e}.momento input{background:#fff;color:#18171b;border:2px solid #1b181a;border-radius:3px}.momento .close{background:#19171a}.momento .send{color:#fff}.momento header,.momento .selected-line,.momento form{font-family:"Avenir Next Condensed",Avenir,sans-serif}
   .wired{border-radius:2px;background:var(--wired-panel);border:1px solid var(--ask-accent);box-shadow:0 0 28px color-mix(in srgb,var(--ask-accent) 25%,transparent);font-family:"JetBrains Mono",monospace}.wired::after{content:"";position:absolute;inset:31px 8px 8px;z-index:-1;background:var(--wired-wash);opacity:.72}.wired header{border-bottom:1px solid var(--ask-accent);padding-bottom:5px}.wired .selected-line{background:#0003}.wired input{font-family:"JetBrains Mono",monospace}.wired .selected-line p{font-family:"DotGothic16",monospace;font-weight:400}
   .fallout{border-radius:1px;background:linear-gradient(90deg,transparent,var(--fallout-panel) 7%,var(--fallout-panel) 93%,transparent);border:0;color:var(--fallout-text);text-shadow:0 0 5px color-mix(in srgb,var(--fallout-text) 65%,transparent);font-family:"Share Tech Mono",monospace}.fallout::before{background:repeating-linear-gradient(0deg,transparent 0 3px,#fff 4px 4px);opacity:.025}.fallout header b,.fallout .selected-line small{color:color-mix(in srgb,var(--fallout-text) 65%,transparent)}.fallout .selected-line{border-color:var(--fallout-text);background:#0005}.fallout .prompt-row button,.fallout input{font-family:"Share Tech Mono",monospace;border-color:color-mix(in srgb,var(--fallout-text) 55%,transparent);color:var(--fallout-text)}.fallout .send{background:var(--fallout-text);color:#111}
-  .compact{height:44px;display:block;padding:4px 34px 4px 5px;border-radius:10px;box-shadow:none}.compact header,.compact .prompt-row{display:none}.compact form{height:100%}.compact .thinking-state{height:100%}.compact .close{right:5px;top:7px;width:26px;height:26px}
+  .resume-media{position:absolute;left:14px;bottom:2px;border:0;background:transparent;color:var(--ask-accent);font-size:7px;font-weight:800;text-decoration:underline}.compact{height:44px;display:block;padding:4px 34px 4px 5px;border-radius:10px;box-shadow:none}.compact header,.compact .prompt-row{display:none}.compact form{height:100%}.compact .thinking-state{height:100%}.compact .close{right:5px;top:7px;width:26px;height:26px}
   @keyframes pulse{0%,100%{opacity:.25;transform:translateY(0)}50%{opacity:1;transform:translateY(-3px)}}
   @media(prefers-reduced-motion:reduce){.thinking-state i{animation:none;opacity:.8}}
 </style>

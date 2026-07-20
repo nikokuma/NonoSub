@@ -32,7 +32,6 @@
       speakers={{ [speaker.id]: speaker }}
       style={previewStyle}
       preview
-      onselect={() => undefined}
     />
   </div>
   <span class="badge">LIVE PREVIEW · {processingMode === "original_only" ? "ORIGINAL ONLY" : "TRANSLATED"}</span>
