@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as THREE from "three";
-import { createNonoToonMaterial, inferNonoMaterialRole, nonoAssetFromLocation, shaderVariantFromLocation } from "./nonoToon";
+import { createNonoToonMaterial, inferNonoMaterialRole, nonoAssetFromLocation, nonoMoodFromLocation, shaderVariantFromLocation } from "./nonoToon";
 
 describe("Nono toon materials", () => {
   it("maps stable semantic and legacy names to material roles", () => {
@@ -17,6 +17,14 @@ describe("Nono toon materials", () => {
     expect(shaderVariantFromLocation("?nonoShader=nontoon", false)).toBe("toon");
     expect(nonoAssetFromLocation("?nonoAsset=candidate", true)).toBe("/assets/NonoCandidate.glb");
     expect(nonoAssetFromLocation("?nonoAsset=candidate", false)).toBe("/assets/Nono.glb");
+  });
+
+  it("only honors the mood override for known moods in development", () => {
+    expect(nonoMoodFromLocation("?nonoMood=thumbs_up", true)).toBe("thumbs_up");
+    expect(nonoMoodFromLocation("?nonoMood=cheer", true)).toBe("cheer");
+    expect(nonoMoodFromLocation("?nonoMood=moonwalk", true)).toBeUndefined();
+    expect(nonoMoodFromLocation("", true)).toBeUndefined();
+    expect(nonoMoodFromLocation("?nonoMood=thumbs_up", false)).toBeUndefined();
   });
 
   it("creates a skinned-compatible toon material while preserving texture and alpha settings", () => {

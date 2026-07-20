@@ -70,14 +70,24 @@ else {
   }
 }
 
+const REQUIRED_CLIPS = ["idle", "think", "neutral", "thumbs_up"];
+const OPTIONAL_CLIPS = ["point_user", "point_self", "cheer", "hand_over_mouth", "surprised"];
 const animationNames = new Set(animations.map((animation) => animation.name?.toLowerCase()).filter(Boolean));
-for (const clip of ["idle", "think", "present"]) {
+for (const clip of REQUIRED_CLIPS) {
   if (!animationNames.has(clip) && !allowMissingAnimations) {
-    errors.push(`Missing ${clip[0].toUpperCase()}${clip.slice(1)} animation clip.`);
+    errors.push(`Missing ${clip} animation clip.`);
+  }
+}
+for (const clip of OPTIONAL_CLIPS) {
+  if (!animationNames.has(clip)) warnings.push(`Optional gesture clip ${clip} not shipped; app falls back.`);
+}
+for (const name of animationNames) {
+  if (!REQUIRED_CLIPS.includes(name) && !OPTIONAL_CLIPS.includes(name)) {
+    warnings.push(`Animation clip "${name}" is outside the known mood set and will never play.`);
   }
 }
 if (allowMissingAnimations && animations.length === 0) {
-  warnings.push("Idle/Think/Present are intentionally pending Nico's suit-animation capture.");
+  warnings.push("Idle/Think/Neutral/Thumbs_Up are intentionally pending Nico's suit-animation capture.");
 }
 
 const childrenByNode = nodes.map((node) => node.children ?? []);
@@ -106,7 +116,6 @@ for (const root of dynamicHairRoots) {
   if (index !== undefined) for (const descendant of descendants(index)) proceduralNodes.add(descendant);
 }
 for (const animation of animations) {
-  if (!["idle", "think", "present"].includes(animation.name?.toLowerCase())) continue;
   const forbidden = (animation.channels ?? []).map((channel) => channel.target?.node).filter((index) => proceduralNodes.has(index));
   if (forbidden.length > 0) {
     const names = [...new Set(forbidden.map((index) => nodes[index]?.name ?? `node ${index}`))];

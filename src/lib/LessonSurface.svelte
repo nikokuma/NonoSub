@@ -15,6 +15,7 @@
   import ChalkPhrase from "./ChalkPhrase.svelte";
   import ChalkStepNumber from "./ChalkStepNumber.svelte";
   import NonoScene from "./NonoScene.svelte";
+  import type { NonoMood } from "./nonoToon";
   import LessonQuestionComposer from "./LessonQuestionComposer.svelte";
   import { IDLE_TAIL_PRESENTATION, tipUnderlineProgress, type TailPresentation, type TailPresentationPhase } from "./tailPresentation";
 
@@ -49,6 +50,7 @@
   let boardElement = $state<HTMLDivElement>();
   let tailPresentation = $state<TailPresentation>({ ...IDLE_TAIL_PRESENTATION });
   let tailRigAvailable = $state(false);
+  let nonoGesture = $state<NonoMood | undefined>();
   let cueGeneration = 0;
   let underlineElementGeneration = -1;
   let activeUnderlineElement: HTMLElement | undefined;
@@ -79,7 +81,13 @@
           : currentMoment?.speechBubble ?? "Pick what you want me to explain. I brought chalk."
   );
   const activePointCueId = $derived(tailPresentation.phase === "idle" ? undefined : tailPresentation.pointCueId);
-  const nonoMood = $derived(boardPhase === "thinking" ? "think" : boardPhase === "writing" ? "present" : "idle");
+  const nonoMood = $derived<NonoMood>(
+    nonoGesture ?? (boardPhase === "thinking" ? "think" : boardPhase === "writing" ? "neutral" : "idle"),
+  );
+
+  $effect(() => {
+    if (boardPhase !== "idle") nonoGesture = undefined;
+  });
 
   onMount(() => {
     document.documentElement.dataset.surface = "lesson";
@@ -138,6 +146,7 @@
     skippedCardKey = undefined;
     followupOpen = false;
     requestGeneration += 1;
+    nonoGesture = undefined;
     cancelCueSequence();
   });
 
@@ -186,12 +195,14 @@
       await sleep(720);
       if (requestId === requestGeneration) {
         boardPhase = "idle";
+        if (!hasMoreMoments) nonoGesture = "thumbs_up";
         void playCueSequence();
       }
     } catch (requestError) {
       if (requestId !== requestGeneration) return;
       error = errorMessage(requestError);
       boardPhase = "idle";
+      nonoGesture = "surprised";
       mode = eraseExistingBoard ? "lesson" : "error";
       await resizeLessonWindow(eraseExistingBoard ? "lesson" : "compose");
     } finally {
@@ -208,6 +219,7 @@
     boardPhase = "writing";
     await sleep(620);
     boardPhase = "idle";
+    if (!hasMoreMoments) nonoGesture = "thumbs_up";
     void playCueSequence();
   }
 
@@ -218,6 +230,7 @@
     await sleep(440);
     skippedCardKey = latestCardKey;
     boardPhase = "idle";
+    nonoGesture = "hand_over_mouth";
   }
 
   async function closeLesson() {

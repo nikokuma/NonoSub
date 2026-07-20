@@ -3,7 +3,13 @@
   import * as THREE from "three";
   import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
   import { applyHairMotion, resolveHairMotionRig, type HairMotionRig } from "./hairMotion";
-  import { applyNonoMaterials, nonoAssetFromLocation, shaderVariantFromLocation } from "./nonoToon";
+  import {
+    applyNonoMaterials,
+    nonoAssetFromLocation,
+    nonoMoodFromLocation,
+    shaderVariantFromLocation,
+    type NonoMood,
+  } from "./nonoToon";
   import {
     aimChainTip,
     applyTravelingWave,
@@ -43,8 +49,26 @@
     type TailRestPose,
   } from "./tailPresentation";
 
-  type NonoMood = "idle" | "think" | "present";
   type TailSide = "left" | "right";
+
+  const ONE_SHOT_MOODS = new Set<NonoMood>([
+    "thumbs_up",
+    "point_user",
+    "point_self",
+    "cheer",
+    "hand_over_mouth",
+    "surprised",
+  ]);
+  // Missing clips degrade along this chain so older GLBs keep working.
+  const MOOD_FALLBACK: Partial<Record<NonoMood, NonoMood>> = {
+    neutral: "idle",
+    thumbs_up: "neutral",
+    point_user: "neutral",
+    point_self: "neutral",
+    cheer: "thumbs_up",
+    hand_over_mouth: "neutral",
+    surprised: "think",
+  };
   type TailRig = Record<TailSide, THREE.Bone[]>;
   interface TailCableBuffers {
     restWorldJoints: THREE.Vector3[];
@@ -121,6 +145,7 @@
     motionPreference.addEventListener("change", updateMotionPreference);
     const loader = new GLTFLoader();
     const shaderVariant = shaderVariantFromLocation(window.location.search);
+    const moodOverride = nonoMoodFromLocation(window.location.search);
     const tailDebugEnabled = import.meta.env.DEV && new URLSearchParams(window.location.search).get("tailDebug") === "1";
     if (import.meta.env.DEV) container.dataset.nonoShader = shaderVariant;
 
@@ -132,10 +157,49 @@
       const center = bounds.getCenter(new THREE.Vector3());
       const scale = 1.15 / Math.max(size.y, 0.001);
       model.scale.setScalar(scale);
-      model.position.set(-1.15 - center.x * scale, 0.77 - center.y * scale, -center.z * scale);
+      model.position.set(
+        LESSON_NONO_ANCHOR.x - center.x * scale,
+        LESSON_NONO_ANCHOR.y - center.y * scale,
+        -center.z * scale,
+      );
       scene.add(model);
 
       if (gltf.animations.length > 0) mixer = new THREE.AnimationMixer(model);
+      const resolveClip = (requested: NonoMood): { clip: THREE.AnimationClip; mood: NonoMood } | undefined => {
+        let candidate: NonoMood | undefined = requested;
+        const visited = new Set<NonoMood>();
+        while (candidate && !visited.has(candidate)) {
+          visited.add(candidate);
+          const clip = gltf.animations.find((animation) => animation.name.toLowerCase() === candidate);
+          if (clip) return { clip, mood: candidate };
+          candidate = MOOD_FALLBACK[candidate] ?? (candidate === "idle" ? undefined : "idle");
+        }
+        return gltf.animations.length > 0 ? { clip: gltf.animations[0], mood: "idle" } : undefined;
+      };
+      const playClip = (clip: THREE.AnimationClip, oneShot: boolean) => {
+        if (!mixer) return;
+        const nextAction = mixer.clipAction(clip);
+        nextAction.reset();
+        if (oneShot) {
+          nextAction.setLoop(THREE.LoopOnce, 1);
+          nextAction.clampWhenFinished = true;
+        } else {
+          nextAction.setLoop(THREE.LoopRepeat, Number.POSITIVE_INFINITY);
+          nextAction.clampWhenFinished = false;
+        }
+        nextAction.fadeIn(0.18).play();
+        if (activeAction && activeAction !== nextAction) activeAction.fadeOut(0.18);
+        activeAction = nextAction;
+      };
+      // One-shot gestures return to the resting loop on their own. activeMood is
+      // deliberately left untouched: it must keep matching the prop so the render
+      // loop doesn't retrigger the gesture every frame.
+      mixer?.addEventListener("finished", (event) => {
+        if (event.action !== activeAction) return;
+        if (!activeMood || !ONE_SHOT_MOODS.has(activeMood)) return;
+        const resting = resolveClip("neutral");
+        if (resting) playClip(resting.clip, false);
+      });
       if (tailDynamics) {
         resetTailDynamics(tailDynamics.left);
         resetTailDynamics(tailDynamics.right);
@@ -178,23 +242,12 @@
       function updateAnimation(nextMood: NonoMood) {
         if (!mixer || nextMood === activeMood) return;
         activeMood = nextMood;
-        const preferred = nextMood === "think" ? "think" : nextMood === "present" ? "present" : "idle";
-        const clip = gltf.animations.find((candidate) => candidate.name.toLowerCase() === preferred);
-        if (!clip) return;
-        const nextAction = mixer.clipAction(clip);
-        nextAction.reset();
-        if (nextMood === "present") {
-          nextAction.setLoop(THREE.LoopOnce, 1);
-          nextAction.clampWhenFinished = true;
-        } else {
-          nextAction.setLoop(THREE.LoopRepeat, Number.POSITIVE_INFINITY);
-          nextAction.clampWhenFinished = false;
-        }
-        nextAction.fadeIn(0.18).play();
-        activeAction?.fadeOut(0.18);
-        activeAction = nextAction;
+        const resolved = resolveClip(nextMood);
+        if (!resolved) return;
+        // A one-shot request that fell back to a resting clip must loop.
+        playClip(resolved.clip, ONE_SHOT_MOODS.has(nextMood) && resolved.mood === nextMood);
       }
-      updateAnimation(mood);
+      updateAnimation(moodOverride ?? mood);
       model.userData.updateAnimation = updateAnimation;
     }, undefined, () => {
       failed = true;
@@ -229,7 +282,7 @@
       previousTime = timestamp;
       mixer?.update(delta);
       if (model) {
-        (model.userData.updateAnimation as ((nextMood: NonoMood) => void) | undefined)?.(mood);
+        (model.userData.updateAnimation as ((nextMood: NonoMood) => void) | undefined)?.(moodOverride ?? mood);
         model.rotation.y = reducedMotion ? 0 : Math.sin(timestamp * 0.00055) * 0.018;
         model.updateWorldMatrix(true, true);
         if (hairRig) applyHairMotion(hairRig, delta, timestamp, reducedMotion);
@@ -743,6 +796,7 @@
   }
 
   const TAIL_SIDES = ["left", "right"] as const;
+  const LESSON_NONO_ANCHOR = { x: 1.15, y: -0.2 } as const;
   const TAIL_DEBUG_POINTS = 32;
   const CHALK_PROP = { lengthScale: 1.4, radiusScale: 0.15, protrusion: 0.3, color: 0xf4f0df } as const;
   const WORLD_DOWN = new THREE.Vector3(0, -1, 0);
@@ -779,5 +833,5 @@
 <style>
   .nono-scene{position:absolute;inset:0;z-index:7;overflow:hidden;pointer-events:none;background:transparent}
   .nono-scene :global(canvas){display:block;width:100%;height:100%}
-  .fallback{position:absolute;left:24px;top:24px;display:grid;place-content:center;text-align:center;gap:5px;color:#765f6b}.fallback span{width:68px;height:68px;display:grid;place-items:center;margin:auto;border-radius:50%;background:linear-gradient(135deg,#ff70b7,#8d7cff);color:white;font-size:31px}.fallback small{font-size:9px}
+  .fallback{position:absolute;right:36px;bottom:62px;display:grid;place-content:center;text-align:center;gap:5px;color:#765f6b}.fallback span{width:68px;height:68px;display:grid;place-items:center;margin:auto;border-radius:50%;background:linear-gradient(135deg,#ff70b7,#8d7cff);color:white;font-size:31px}.fallback small{font-size:9px}
 </style>

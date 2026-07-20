@@ -504,9 +504,15 @@ def main() -> None:
     args = parse_args()
     output = ensure_safe_output(args.output)
     rig = bpy.data.objects.get(CANONICAL_RIG_SOURCE)
+    if not rig or rig.type != "ARMATURE":
+        raise RuntimeError("Expected a Nono_Rig2 armature in the source file")
+    # Checkpoint files carry a single rig; the duplicate only exists in
+    # NonoSubProductionSource.blend. Treat it as optional.
     duplicate = bpy.data.objects.get(DUPLICATE_RIG_SOURCE)
-    if not rig or rig.type != "ARMATURE" or not duplicate or duplicate.type != "ARMATURE":
-        raise RuntimeError("Expected identical Nono_Rig2 and Nono_Rig2.001 armatures in the source file")
+    if duplicate is not None and duplicate.type != "ARMATURE":
+        raise RuntimeError("Nono_Rig2.001 exists but is not an armature")
+    if duplicate is None:
+        duplicate = rig
 
     export_objects = classify_export_objects(rig, duplicate)
     for obj in tuple(export_objects):

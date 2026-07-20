@@ -1,6 +1,19 @@
 import * as THREE from "three";
 
 export type NonoShaderVariant = "toon" | "nontoon" | "portable";
+
+export const NONO_MOODS = [
+  "idle",
+  "think",
+  "neutral",
+  "thumbs_up",
+  "point_user",
+  "point_self",
+  "cheer",
+  "hand_over_mouth",
+  "surprised",
+] as const;
+export type NonoMood = (typeof NONO_MOODS)[number];
 export type NonoMaterialRole = "skin" | "face" | "hair" | "tail" | "cloth" | "eye" | "metal" | "accent" | "unknown";
 
 const ROLE_COLORS: Record<Exclude<NonoMaterialRole, "unknown">, number> = {
@@ -40,6 +53,12 @@ export function nonoAssetFromLocation(search: string, development = import.meta.
   return new URLSearchParams(search).get("nonoAsset") === "candidate"
     ? "/assets/NonoCandidate.glb"
     : "/assets/Nono.glb";
+}
+
+export function nonoMoodFromLocation(search: string, development = import.meta.env.DEV): NonoMood | undefined {
+  if (!development) return undefined;
+  const requested = new URLSearchParams(search).get("nonoMood");
+  return (NONO_MOODS as readonly string[]).includes(requested ?? "") ? requested as NonoMood : undefined;
 }
 
 export function applyNonoMaterials(model: THREE.Object3D, variant: NonoShaderVariant): THREE.Material[] {

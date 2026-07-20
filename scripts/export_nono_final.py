@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Validate Nico's three authored actions and export the final Nono GLB.
+"""Validate Nico's authored actions and export the final Nono GLB.
 
-This script is intentionally strict: it exports only Idle, Think, and Present,
+This script is intentionally strict: it exports only the required actions
+(Idle, Think, Neutral, Thumbs_Up) plus any present optional gesture actions,
 samples them at 30 fps, and rejects curves that would fight the procedural
 tails, long hair, or skirt-secondary runtime.
 """
@@ -16,7 +17,15 @@ from pathlib import Path
 import bpy
 
 
-REQUIRED_ACTIONS = {"Idle": (2.0, 4.0), "Think": (2.0, 4.0), "Present": (1.0, 2.0)}
+REQUIRED_ACTIONS = {"Idle": (2.0, 4.0), "Think": (2.0, 4.0), "Neutral": (2.0, 4.0), "Thumbs_Up": (1.0, 2.5)}
+# Exported and validated only when present; the app falls back gracefully.
+OPTIONAL_ACTIONS = {
+    "Point_User": (1.0, 2.5),
+    "Point_Self": (1.0, 2.5),
+    "Cheer": (1.0, 2.5),
+    "Hand_Over_Mouth": (1.0, 2.5),
+    "Surprised": (0.5, 2.0),
+}
 TAIL_BONES = {f"spine.{index:03d}" for index in range(55, 79)}
 DYNAMIC_HAIR_ROOTS = {"spine.021", "spine.031", "spine.039", "spine.085", "spine.093"}
 BONE_PATH = re.compile(r'^pose\.bones\["([^"]+)"\]\.(.+)$')
@@ -65,6 +74,14 @@ def validate_actions(rig: bpy.types.Object) -> dict[str, bpy.types.Action]:
     missing = [name for name, action in actions.items() if action is None]
     if missing:
         raise RuntimeError(f"Missing final actions: {', '.join(missing)}")
+    limits = dict(REQUIRED_ACTIONS)
+    for name, bounds in OPTIONAL_ACTIONS.items():
+        action = bpy.data.actions.get(name)
+        if action is not None:
+            actions[name] = action
+            limits[name] = bounds
+        else:
+            print(f"NONO_OPTIONAL_ACTION_MISSING={name}")
 
     forbidden_bones = set(TAIL_BONES)
     for root in DYNAMIC_HAIR_ROOTS:
@@ -75,7 +92,7 @@ def validate_actions(rig: bpy.types.Object) -> dict[str, bpy.types.Action]:
     for name, action in actions.items():
         start, end = action.frame_range
         duration = max(0.0, (end - start) / scene_fps)
-        minimum, maximum = REQUIRED_ACTIONS[name]
+        minimum, maximum = limits[name]
         if duration < minimum - 1 / scene_fps or duration > maximum + 1 / scene_fps:
             raise RuntimeError(f"{name} is {duration:.2f}s; expected {minimum:.0f}–{maximum:.0f}s at 30 fps")
         for curve in action_curves(action):
@@ -129,6 +146,9 @@ def main() -> None:
         export_animations=True,
         export_animation_mode="ACTIONS",
         export_merge_animation="ACTION",
+        # Sampling bakes every bone into each clip, including the procedural
+        # tail/hair chains; scripts/strip_nono_glb.mjs removes those channels
+        # after export (ACTIONS mode exports nothing without sampling).
         export_force_sampling=True,
         export_frame_step=1,
         export_lights=False,
