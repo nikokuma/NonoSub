@@ -102,6 +102,7 @@
   let failed = $state(false);
 
   onMount(() => {
+    let destroyed = false;
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(32, 1, 0.1, 100);
     camera.position.set(0, 0.35, 5);
@@ -150,6 +151,10 @@
     if (import.meta.env.DEV) container.dataset.nonoShader = shaderVariant;
 
     loader.load(nonoAssetFromLocation(window.location.search), (gltf) => {
+      if (destroyed) {
+        disposeModel(gltf.scene);
+        return;
+      }
       model = gltf.scene;
       applyNonoMaterials(model, shaderVariant);
       const bounds = new THREE.Box3().setFromObject(model);
@@ -250,6 +255,7 @@
       updateAnimation(moodOverride ?? mood);
       model.userData.updateAnimation = updateAnimation;
     }, undefined, () => {
+      if (destroyed) return;
       failed = true;
       onRigStatus?.(false);
     });
@@ -319,10 +325,12 @@
     animationFrame = requestAnimationFrame(render);
 
     return () => {
+      destroyed = true;
       cancelAnimationFrame(animationFrame);
       observer.disconnect();
       motionPreference.removeEventListener("change", updateMotionPreference);
       mixer?.stopAllAction();
+      if (mixer && model) mixer.uncacheRoot(model);
       renderer.domElement.removeEventListener("webglcontextlost", handleContextLost);
       renderer.domElement.removeEventListener("webglcontextrestored", handleContextRestored);
       if (tailDebugLines) {
@@ -333,6 +341,14 @@
         }
       }
       if (model) disposeModel(model);
+      model = undefined;
+      mixer = undefined;
+      activeAction = undefined;
+      tailRig = undefined;
+      tailRestPoses = undefined;
+      tailDynamics = undefined;
+      tailCableBuffers = undefined;
+      hairRig = undefined;
       renderer.dispose();
       renderer.domElement.remove();
     };
@@ -786,13 +802,20 @@
   }
 
   function disposeModel(model: THREE.Object3D) {
+    const textures = new Set<THREE.Texture>();
     model.traverse((object) => {
       if (!("isMesh" in object) || !object.isMesh) return;
       const mesh = object as THREE.Mesh;
       mesh.geometry.dispose();
       const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      for (const material of materials) material.dispose();
+      for (const material of materials) {
+        for (const value of Object.values(material)) {
+          if (value instanceof THREE.Texture) textures.add(value);
+        }
+        material.dispose();
+      }
     });
+    for (const texture of textures) texture.dispose();
   }
 
   const TAIL_SIDES = ["left", "right"] as const;

@@ -71,6 +71,7 @@ export function applyNonoMaterials(model: THREE.Object3D, variant: NonoShaderVar
       const role = inferNonoMaterialRole(original.name, object.name);
       if (role === "unknown") return original;
       const material = createNonoToonMaterial(original, role, variant);
+      original.dispose();
       replaced.push(material);
       return material;
     });

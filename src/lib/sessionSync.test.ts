@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { EMPTY_SESSION } from "./contracts";
 import type { SequencedSessionEvent, SessionState } from "./contracts";
-import { SessionEventCoordinator, reconcileSessionEnvelope } from "./sessionSync";
+import { SessionEventCoordinator, isSnapshotAtLeastAsFresh, reconcileSessionEnvelope } from "./sessionSync";
 
 function snapshot(sessionId: string, sequence: number, phase: SessionState["phase"] = "preparing"): SessionState {
   return { ...structuredClone(EMPTY_SESSION), sessionId, sequence, phase };
@@ -83,5 +83,28 @@ describe("multi-window session synchronization", () => {
     expect(refresh).toHaveBeenCalledOnce();
     expect(published.at(-1)?.sequence).toBe(3);
     expect(published.at(-1)?.phase).toBe("ready");
+  });
+
+  it("rejects a late snapshot that would move the same session backward", () => {
+    expect(isSnapshotAtLeastAsFresh(snapshot("session-1", 8), snapshot("session-1", 7))).toBe(false);
+    expect(isSnapshotAtLeastAsFresh(snapshot("session-1", 8), snapshot("session-1", 8))).toBe(true);
+  });
+
+  it("only accepts a replacement session when it matches the triggering envelope", () => {
+    expect(isSnapshotAtLeastAsFresh(snapshot("session-1", 8), snapshot("session-2", 1), "session-2")).toBe(true);
+    expect(isSnapshotAtLeastAsFresh(snapshot("session-1", 8), snapshot("session-stale", 99), "session-2")).toBe(false);
+  });
+
+  it("keeps newer state when the final recovery snapshot is stale", async () => {
+    const refresh = vi.fn()
+      .mockResolvedValueOnce(snapshot("session-1", 4, "ready"))
+      .mockResolvedValueOnce(snapshot("session-1", 2, "transcribing"));
+    const result = await reconcileSessionEnvelope(
+      snapshot("session-1", 3, "transcribing"),
+      phaseEvent("session-1", 6, "complete"),
+      refresh,
+    );
+    expect(result.sequence).toBe(4);
+    expect(result.phase).toBe("ready");
   });
 });

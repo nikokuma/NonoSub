@@ -31,6 +31,10 @@ export function defaultPreferences(): Preferences {
   };
 }
 
+export function initialSession(): SessionState {
+  return isTauri() ? { ...structuredClone(EMPTY_SESSION), sessionId: "idle" } : fixtureSession();
+}
+
 export function loadPreferences(): Preferences {
   if (typeof localStorage === "undefined") return defaultPreferences();
   const saved = localStorage.getItem(PREFERENCES_KEY)
@@ -122,6 +126,43 @@ export async function subscribeSession(
     unlisten();
     throw error;
   }
+}
+
+export function maintainSubscription(
+  subscribe: () => Promise<UnlistenFn>,
+  onError?: (message: string) => void,
+): UnlistenFn {
+  let stopped = false;
+  let active: UnlistenFn | undefined;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let attempts = 0;
+
+  const connect = async () => {
+    try {
+      const unlisten = await subscribe();
+      if (stopped) {
+        unlisten();
+        return;
+      }
+      active = unlisten;
+      attempts = 0;
+      onError?.("");
+    } catch (error) {
+      if (stopped) return;
+      const message = error instanceof Error ? error.message : String(error);
+      onError?.(`NonoSub lost its app connection and is retrying. ${message}`);
+      const delay = Math.min(10_000, 500 * 2 ** Math.min(attempts, 4));
+      attempts += 1;
+      retryTimer = setTimeout(() => void connect(), delay);
+    }
+  };
+  void connect();
+
+  return () => {
+    stopped = true;
+    if (retryTimer) clearTimeout(retryTimer);
+    active?.();
+  };
 }
 
 function fixtureSession(): SessionState {

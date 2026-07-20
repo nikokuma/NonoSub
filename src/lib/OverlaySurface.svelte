@@ -4,15 +4,13 @@
   import { listen } from "@tauri-apps/api/event";
   import { LogicalSize, PhysicalPosition, currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
   import type { SessionState, StyleSettings, SubtitleDisplayMode, SubtitlePreset, SubtitleSegment } from "./contracts";
-  import { EMPTY_SESSION } from "./contracts";
-  import { FIXTURE_EVENTS } from "./fixtures";
-  import { reduceSession, visibleLiveSegments } from "./session";
+  import { visibleLiveSegments } from "./session";
   import { effectiveStyle } from "./preferences";
-  import { loadPreferences, savePreferencePatch, subscribePreferences, subscribeSession } from "./runtime";
+  import { initialSession, loadPreferences, maintainSubscription, savePreferencePatch, subscribePreferences, subscribeSession } from "./runtime";
   import { resolveOverlayGeometry } from "./overlayGeometry";
   import LiveSubtitleStack from "./LiveSubtitleStack.svelte";
 
-  let session = $state<SessionState>(FIXTURE_EVENTS.reduce(reduceSession, structuredClone(EMPTY_SESSION)));
+  let session = $state<SessionState>(initialSession());
   let preferences = $state(loadPreferences());
   let arranging = $state(false);
   let visible = $state(true);
@@ -22,6 +20,7 @@
   let captionHost: HTMLDivElement;
   let fitTimer: ReturnType<typeof setTimeout> | undefined;
   let suppressPlacementUntil = 0;
+  let connectionIssue = $state("");
   const fixturePreset = typeof window !== "undefined" && !isTauri()
     ? parseFixturePreset(new URLSearchParams(window.location.search).get("preset"))
     : undefined;
@@ -43,13 +42,13 @@
     preset: fixturePreset ?? sessionStyle.preset,
     displayMode: fixtureDisplayMode ?? sessionStyle.displayMode,
   });
-  const waitingLabel = $derived(session.phase === "reconnecting"
+  const waitingLabel = $derived(connectionIssue || (session.phase === "reconnecting"
     ? "Reconnecting to Nono…"
     : session.processingMode === "original_only"
       ? "Listening for original speech…"
     : session.mode === "live" && session.segments.length > 0
       ? "Nono is coordinating subtitles…"
-      : "Listening for speech…");
+      : "Listening for speech…"));
   const waitingStyle = $derived<StyleSettings>({
     ...activeStyle,
     displayMode: activeStyle.displayMode === "translation" ? "translation" : "source",
@@ -84,8 +83,8 @@
   onMount(() => {
     document.documentElement.dataset.surface = "overlay";
     const cleanup: Array<() => void> = [];
-    void subscribeSession((value) => session = value).then((unlisten) => cleanup.push(unlisten));
-    void subscribePreferences((value) => preferences = value).then((unlisten) => cleanup.push(unlisten));
+    cleanup.push(maintainSubscription(() => subscribeSession((value) => session = value), (message) => connectionIssue = message));
+    cleanup.push(maintainSubscription(() => subscribePreferences((value) => preferences = value), (message) => connectionIssue = message));
     if (isTauri()) void listen<string>("tray-action", ({ payload }) => {
       if (payload === "arrange_overlay") arranging = !arranging;
       if (payload === "show_subtitles") visible = true;

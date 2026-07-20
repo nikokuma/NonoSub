@@ -161,4 +161,36 @@ describe("local preferences and tutor context", () => {
     const updated = applyPreferenceAction(base, "display_source")!;
     expect(preferencePatchBetween(base, updated)).toEqual({ style: { displayMode: "source" } });
   });
+
+  it("sanitizes malformed numeric, enum, language, font, and color fields", () => {
+    const parsed = parsePreferences(JSON.stringify({
+      level: "beginner",
+      languages: { source: "<script>", target: "EN-us", explanation: "" },
+      style: {
+        ...DEFAULT_STYLE,
+        fontFamily: "\u0000",
+        fontSize: "huge",
+        backgroundOpacity: 99,
+        effect: "glow",
+        displayMode: "everything",
+        position: { x: "NaN", y: null },
+        wiredColors: { ...DEFAULT_STYLE.wiredColors, panel: "url(evil)" },
+      },
+    }));
+    expect(parsed?.languages).toEqual({ source: "auto", target: "en-us", explanation: "en-us" });
+    expect(parsed?.style.fontFamily).toBe(DEFAULT_STYLE.fontFamily);
+    expect(parsed?.style.fontSize).toBe(DEFAULT_STYLE.fontSize);
+    expect(parsed?.style.backgroundOpacity).toBe(0.9);
+    expect(parsed?.style.effect).toBe(DEFAULT_STYLE.effect);
+    expect(parsed?.style.displayMode).toBe(DEFAULT_STYLE.displayMode);
+    expect(parsed?.style.position).toEqual(DEFAULT_STYLE.position);
+    expect(parsed?.style.wiredColors.panel).toBe(DEFAULT_STYLE.wiredColors.panel);
+  });
+
+  it("bounds speaker labels and removes control characters", () => {
+    const speakers: Record<string, SpeakerProfile> = { a: { id: "a", displayName: "Speaker 1", color: "#fff" } };
+    const renamed = renameSpeaker(speakers, "a", `  Haru\u0000${"x".repeat(80)}  `);
+    expect(renamed.a.displayName).not.toContain("\u0000");
+    expect(renamed.a.displayName.length).toBe(48);
+  });
 });

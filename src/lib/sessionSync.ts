@@ -14,8 +14,10 @@ export class SessionEventCoordinator {
 
   async initialize(snapshot: SessionState): Promise<void> {
     if (this.stopped) return;
-    this.current = snapshot;
-    this.publish(snapshot);
+    if (!this.current || isSnapshotAtLeastAsFresh(this.current, snapshot)) {
+      this.current = snapshot;
+      this.publish(snapshot);
+    }
     await this.flush();
   }
 
@@ -66,9 +68,20 @@ export async function reconcileSessionEnvelope(
   if (next) return next;
 
   const snapshot = await refresh();
-  if (envelope.sessionId === snapshot.sessionId && envelope.sequence <= snapshot.sequence) return snapshot;
-  const afterRefresh = applySequencedEvent(snapshot, envelope);
+  const recovered = isSnapshotAtLeastAsFresh(current, snapshot, envelope.sessionId) ? snapshot : current;
+  if (envelope.sessionId === recovered.sessionId && envelope.sequence <= recovered.sequence) return recovered;
+  const afterRefresh = applySequencedEvent(recovered, envelope);
   if (afterRefresh) return afterRefresh;
 
-  return refresh();
+  const finalSnapshot = await refresh();
+  return isSnapshotAtLeastAsFresh(recovered, finalSnapshot, envelope.sessionId) ? finalSnapshot : recovered;
+}
+
+export function isSnapshotAtLeastAsFresh(
+  current: SessionState,
+  candidate: SessionState,
+  expectedReplacementSessionId?: string,
+): boolean {
+  if (candidate.sessionId === current.sessionId) return candidate.sequence >= current.sequence;
+  return Boolean(expectedReplacementSessionId && candidate.sessionId === expectedReplacementSessionId);
 }

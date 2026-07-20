@@ -11,9 +11,8 @@ mod pipeline;
 
 use contracts::{
     CaptionProcessingMode, LanguageSettings, LearnerLevel, LessonCard, LiveSyncMode, LiveSyncState,
-    PreparedMediaInfo, RecoverableError, RetranslatedSegment, SegmentStatus,
-    SequencedSessionEvent, SessionEvent, SessionMode, SessionSnapshot, SpeakerProfile,
-    SubtitleSegment, TutorMessage,
+    PreparedMediaInfo, RecoverableError, RetranslatedSegment, SegmentStatus, SequencedSessionEvent,
+    SessionEvent, SessionMode, SessionSnapshot, SpeakerProfile, SubtitleSegment, TutorMessage,
 };
 use serde::Serialize;
 use std::{
@@ -23,6 +22,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, MutexGuard,
     },
+    time::{Duration, SystemTime},
 };
 use tauri::{
     menu::{MenuBuilder, SubmenuBuilder},
@@ -36,6 +36,8 @@ const API_KEY_MARKER: &str = "api-key-configured";
 const MAX_RECOVERABLE_ERRORS: usize = 50;
 const MAX_LESSON_CACHE_ENTRIES: usize = 128;
 const MAX_LESSON_THREAD_MESSAGES: usize = 32;
+const OWNED_TEMP_PREFIXES: [&str; 2] = ["nonosub-session-", "nonosub-playback-"];
+const STALE_TEMP_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug)]
 struct BoundedLessonCache {
@@ -89,6 +91,7 @@ struct AppState {
     prepared_session: Mutex<Option<PreparedSession>>,
     runs: RunCoordinator,
     retranslations: RetranslationCoordinator,
+    event_dispatch: Mutex<()>,
     canonical: Mutex<SessionSnapshot>,
     preferences: Mutex<Option<CanonicalPreferences>>,
     lesson_cache: Mutex<BoundedLessonCache>,
@@ -110,6 +113,7 @@ impl Default for AppState {
             prepared_session: Mutex::new(None),
             runs: RunCoordinator::default(),
             retranslations: RetranslationCoordinator::default(),
+            event_dispatch: Mutex::new(()),
             canonical: Mutex::new(SessionSnapshot::default()),
             preferences: Mutex::new(None),
             lesson_cache: Mutex::new(BoundedLessonCache::default()),
@@ -301,8 +305,14 @@ struct FileSourceRevision {
 }
 
 type ScopedRetranslationEnvelope<'a> = (
+    MutexGuard<'a, ()>,
     MutexGuard<'a, Option<RunLease>>,
     MutexGuard<'a, Option<ActiveRetranslation>>,
+    SequencedSessionEvent,
+);
+type ScopedEventEnvelope<'a> = (
+    MutexGuard<'a, ()>,
+    MutexGuard<'a, Option<RunLease>>,
     SequencedSessionEvent,
 );
 
@@ -456,11 +466,11 @@ fn remove_api_key_marker(app: &tauri::AppHandle) -> Result<(), String> {
     }
 }
 
-fn api_key() -> Result<String, openai::ApiError> {
+fn api_key(app: &tauri::AppHandle) -> Result<String, openai::ApiError> {
     if let Some(key) = development_api_key() {
         return Ok(key);
     }
-    keyring_entry()
+    let result = keyring_entry()
         .map_err(|message| openai::ApiError {
             kind: openai::ApiErrorKind::Authentication,
             message,
@@ -471,7 +481,11 @@ fn api_key() -> Result<String, openai::ApiError> {
             kind: openai::ApiErrorKind::Authentication,
             message: "Save an OpenAI API key first.".into(),
             retryable: false,
-        })
+        });
+    if result.is_err() {
+        let _ = remove_api_key_marker(app);
+    }
+    result
 }
 
 #[tauri::command]
@@ -495,9 +509,14 @@ fn save_api_key(app: tauri::AppHandle, api_key: String) -> Result<ApiKeyStatus, 
 }
 
 #[tauri::command]
-async fn validate_model_access() -> Result<ModelReadiness, openai::ApiError> {
-    let client = openai::OpenAiClient::new(api_key()?)?;
-    client.validate_model_access().await?;
+async fn validate_model_access(app: tauri::AppHandle) -> Result<ModelReadiness, openai::ApiError> {
+    let client = openai::OpenAiClient::new(api_key(&app)?)?;
+    if let Err(error) = client.validate_model_access().await {
+        if error.kind == openai::ApiErrorKind::Authentication {
+            let _ = remove_api_key_marker(&app);
+        }
+        return Err(error);
+    }
     let live = client
         .model_accessible(openai::REALTIME_TRANSLATION_MODEL)
         .await;
@@ -539,13 +558,112 @@ fn merge_preference_patch(target: &mut serde_json::Value, patch: &serde_json::Va
     }
 }
 
+fn valid_language_code(value: &str, allow_auto: bool) -> bool {
+    if allow_auto && value == "auto" {
+        return true;
+    }
+    let parts = value.split('-').collect::<Vec<_>>();
+    (1..=3).contains(&parts.len())
+        && (2..=3).contains(&parts[0].len())
+        && parts.iter().all(|part| {
+            (2..=8).contains(&part.len())
+                && part
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric())
+        })
+}
+
+fn validate_languages(languages: &LanguageSettings) -> Result<(), String> {
+    if !valid_language_code(&languages.source, true)
+        || !valid_language_code(&languages.target, false)
+        || !valid_language_code(&languages.explanation, false)
+    {
+        return Err("Language settings contain an unsupported language code.".into());
+    }
+    Ok(())
+}
+
+fn valid_hex_color(value: &str) -> bool {
+    matches!(value.len(), 7 | 9)
+        && value.starts_with('#')
+        && value[1..]
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+}
+
+fn finite_number_in(value: Option<&serde_json::Value>, minimum: f64, maximum: f64) -> bool {
+    value
+        .and_then(serde_json::Value::as_f64)
+        .is_some_and(|number| number.is_finite() && (minimum..=maximum).contains(&number))
+}
+
+fn validate_preferences(preferences: &serde_json::Value) -> Result<(), String> {
+    let root = preferences
+        .as_object()
+        .ok_or("Preferences must be a JSON object.")?;
+    if !matches!(
+        root.get("level").and_then(serde_json::Value::as_str),
+        Some("beginner" | "intermediate" | "advanced")
+    ) {
+        return Err("Learner level is invalid.".into());
+    }
+    let languages: LanguageSettings = serde_json::from_value(
+        root.get("languages")
+            .cloned()
+            .ok_or("Language settings are missing.")?,
+    )
+    .map_err(|_| "Language settings are invalid.".to_string())?;
+    validate_languages(&languages)?;
+    let style = root
+        .get("style")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("Subtitle settings are missing.")?;
+    if !matches!(
+        style.get("preset").and_then(serde_json::Value::as_str),
+        Some("clean" | "classic-outline" | "yellow-drop" | "fallout" | "momento" | "wired")
+    ) || !matches!(
+        style.get("displayMode").and_then(serde_json::Value::as_str),
+        Some("source" | "translation" | "both")
+    ) || !matches!(
+        style.get("effect").and_then(serde_json::Value::as_str),
+        Some("none" | "outline" | "shadow")
+    ) || !finite_number_in(style.get("fontSize"), 14.0, 72.0)
+        || !finite_number_in(style.get("backgroundOpacity"), 0.0, 0.9)
+        || !finite_number_in(style.get("overlayWidth"), 520.0, 1200.0)
+    {
+        return Err("Subtitle settings are invalid.".into());
+    }
+    for position_key in ["position", "overlayPosition"] {
+        let position = style
+            .get(position_key)
+            .and_then(serde_json::Value::as_object)
+            .ok_or("Subtitle position is invalid.")?;
+        if !finite_number_in(position.get("x"), 0.0, 1.0)
+            || !finite_number_in(position.get("y"), 0.0, 1.0)
+        {
+            return Err("Subtitle position is invalid.".into());
+        }
+    }
+    for palette_key in ["wiredColors", "falloutColors"] {
+        let palette = style
+            .get(palette_key)
+            .and_then(serde_json::Value::as_object)
+            .ok_or("Subtitle palette is invalid.")?;
+        if palette
+            .values()
+            .any(|value| value.as_str().is_none_or(|color| !valid_hex_color(color)))
+        {
+            return Err("Subtitle palette is invalid.".into());
+        }
+    }
+    Ok(())
+}
+
 fn initialize_preference_state(
     state: &mut Option<CanonicalPreferences>,
     preferences: serde_json::Value,
 ) -> Result<PreferenceEnvelope, String> {
-    if !preferences.is_object() {
-        return Err("Preferences must be a JSON object.".into());
-    }
+    validate_preferences(&preferences)?;
     let current = state.get_or_insert(CanonicalPreferences {
         revision: 0,
         preferences,
@@ -568,9 +686,7 @@ fn apply_preference_patch(
     let rebased = base_revision != state.revision;
     let mut merged = state.preferences.clone();
     merge_preference_patch(&mut merged, &patch);
-    if !merged.is_object() {
-        return Err("The merged preferences must remain a JSON object.".into());
-    }
+    validate_preferences(&merged)?;
     if merged != state.preferences {
         state.revision = state.revision.saturating_add(1);
         state.preferences = merged;
@@ -711,9 +827,9 @@ async fn prepare_media(
         .selected_media
         .lock()
         .map_err(|_| "Media state is unavailable.")? = Some(SelectedMedia {
-            generation: run.generation,
-            path: canonical.clone(),
-        });
+        generation: run.generation,
+        path: canonical.clone(),
+    });
     *state
         .playback_media
         .lock()
@@ -778,6 +894,32 @@ fn create_macos_playback_proxy(
         });
     }
     Ok((directory, output_path))
+}
+
+fn sweep_stale_owned_temp_directories(root: &std::path::Path, now: SystemTime) -> usize {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_type()
+                .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
+                && entry.file_name().to_str().is_some_and(|name| {
+                    OWNED_TEMP_PREFIXES
+                        .iter()
+                        .any(|prefix| name.starts_with(prefix))
+                })
+                && entry
+                    .metadata()
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .and_then(|modified| now.duration_since(modified).ok())
+                    .is_some_and(|age| age >= STALE_TEMP_AGE)
+        })
+        .filter(|entry| std::fs::remove_dir_all(entry.path()).is_ok())
+        .count()
 }
 
 #[tauri::command]
@@ -846,6 +988,7 @@ async fn start_analysis(
     languages: LanguageSettings,
     processing_mode: CaptionProcessingMode,
 ) -> Result<(), openai::ApiError> {
+    validate_languages(&languages).map_err(|message| service_error(&message))?;
     let run = state.runs.lease(generation)?;
     let (audio, chunks) = {
         let guard = state
@@ -865,7 +1008,7 @@ async fn start_analysis(
         languages.clone(),
         processing_mode.clone(),
     )?;
-    let client = openai::OpenAiClient::new(api_key()?)?;
+    let client = openai::OpenAiClient::new(api_key(&app)?)?;
     let sink_app = app.clone();
     let sink: pipeline::EventSink =
         Arc::new(move |event| record_event_for_generation(&sink_app, generation, event));
@@ -943,7 +1086,7 @@ async fn retry_translation(
         (snapshot.languages.clone(), context, batch, pending)
     };
 
-    let client = openai::OpenAiClient::new(api_key()?)?;
+    let client = openai::OpenAiClient::new(api_key(&app)?)?;
     record_event_for_generation(
         &app,
         generation,
@@ -1126,6 +1269,7 @@ fn lesson_cache_key(
 
 #[tauri::command]
 async fn request_lesson(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     selection_id: u64,
     question: String,
@@ -1163,7 +1307,7 @@ async fn request_lesson(
     {
         return validate_lesson_response_selection(card, &material.selected.id);
     }
-    let client = openai::OpenAiClient::new(api_key()?)?;
+    let client = openai::OpenAiClient::new(api_key(&app)?)?;
     let lesson_context = serde_json::json!({
         "learner_level": learner_level,
         "languages": material.languages,
@@ -1391,14 +1535,13 @@ fn begin_file_retranslation(
         .active
         .lock()
         .map_err(|_| service_error("Session generation state is unavailable."))?;
-    if run_guard.as_ref().is_none_or(|run| {
-        run.generation != session_generation || run.is_cancelled()
-    }) {
+    if run_guard
+        .as_ref()
+        .is_none_or(|run| run.generation != session_generation || run.is_cancelled())
+    {
         return Err(cancelled_error());
     }
-    state
-        .retranslations
-        .begin(session_generation, languages)
+    state.retranslations.begin(session_generation, languages)
 }
 
 async fn completed_file_snapshot(
@@ -1497,14 +1640,19 @@ fn scoped_file_retranslation_success<'a>(
     source_revision: &[FileSourceRevision],
     translations: Vec<RetranslatedSegment>,
 ) -> Result<ScopedRetranslationEnvelope<'a>, openai::ApiError> {
+    let dispatch_guard = state
+        .event_dispatch
+        .lock()
+        .map_err(|_| service_error("Session event dispatcher is unavailable."))?;
     let run_guard = state
         .runs
         .active
         .lock()
         .map_err(|_| service_error("Session generation state is unavailable."))?;
-    if run_guard.as_ref().is_none_or(|run| {
-        run.generation != lease.session_generation || run.is_cancelled()
-    }) {
+    if run_guard
+        .as_ref()
+        .is_none_or(|run| run.generation != lease.session_generation || run.is_cancelled())
+    {
         return Err(cancelled_error());
     }
     let mut request_guard = state
@@ -1570,7 +1718,7 @@ fn scoped_file_retranslation_success<'a>(
     };
     *request_guard = None;
     drop(snapshot);
-    Ok((run_guard, request_guard, envelope))
+    Ok((dispatch_guard, run_guard, request_guard, envelope))
 }
 
 fn record_file_retranslation_success(
@@ -1579,12 +1727,13 @@ fn record_file_retranslation_success(
     source_revision: &[FileSourceRevision],
     translations: Vec<RetranslatedSegment>,
 ) -> Result<(), openai::ApiError> {
-    let (_run_guard, _request_guard, envelope) = scoped_file_retranslation_success(
-        app.state::<AppState>().inner(),
-        lease,
-        source_revision,
-        translations,
-    )?;
+    let (_dispatch_guard, _run_guard, _request_guard, envelope) =
+        scoped_file_retranslation_success(
+            app.state::<AppState>().inner(),
+            lease,
+            source_revision,
+            translations,
+        )?;
     app.emit("session-event", envelope)
         .map_err(|error| service_error(&format!("Could not update subtitle windows: {error}")))
 }
@@ -1594,14 +1743,19 @@ fn scoped_file_retranslation_failure<'a>(
     lease: &RetranslationLease,
     message: String,
 ) -> Result<ScopedRetranslationEnvelope<'a>, openai::ApiError> {
+    let dispatch_guard = state
+        .event_dispatch
+        .lock()
+        .map_err(|_| service_error("Session event dispatcher is unavailable."))?;
     let run_guard = state
         .runs
         .active
         .lock()
         .map_err(|_| service_error("Session generation state is unavailable."))?;
-    if run_guard.as_ref().is_none_or(|run| {
-        run.generation != lease.session_generation || run.is_cancelled()
-    }) {
+    if run_guard
+        .as_ref()
+        .is_none_or(|run| run.generation != lease.session_generation || run.is_cancelled())
+    {
         return Err(cancelled_error());
     }
     let mut request_guard = state
@@ -1631,6 +1785,9 @@ fn scoped_file_retranslation_failure<'a>(
         .canonical
         .lock()
         .map_err(|_| service_error("Session state is unavailable."))?;
+    if snapshot.session_id != format!("session-{}", lease.session_generation) {
+        return Err(cancelled_error());
+    }
     snapshot.sequence += 1;
     apply_event(&mut snapshot, &event);
     let envelope = SequencedSessionEvent {
@@ -1639,7 +1796,7 @@ fn scoped_file_retranslation_failure<'a>(
         event,
     };
     drop(snapshot);
-    Ok((run_guard, request_guard, envelope))
+    Ok((dispatch_guard, run_guard, request_guard, envelope))
 }
 
 fn record_file_retranslation_failure(
@@ -1647,11 +1804,8 @@ fn record_file_retranslation_failure(
     lease: &RetranslationLease,
     message: String,
 ) -> Result<(), openai::ApiError> {
-    let (_run_guard, _request_guard, envelope) = scoped_file_retranslation_failure(
-        app.state::<AppState>().inner(),
-        lease,
-        message,
-    )?;
+    let (_dispatch_guard, _run_guard, _request_guard, envelope) =
+        scoped_file_retranslation_failure(app.state::<AppState>().inner(), lease, message)?;
     app.emit("session-event", envelope)
         .map_err(|error| service_error(&format!("Could not update subtitle windows: {error}")))
 }
@@ -1682,7 +1836,7 @@ fn apply_language_settings(
         .filter(|run| !run.is_cancelled())
         .map(|run| run.generation);
     if let Some(generation) = generation.filter(|generation| {
-            processing_mode == CaptionProcessingMode::Translated
+        processing_mode == CaptionProcessingMode::Translated
             && mode == Some(SessionMode::File)
             && previous.target != languages.target
             && session_id == format!("session-{generation}")
@@ -1695,24 +1849,20 @@ fn apply_language_settings(
             snapshot.languages.source = languages.source.clone();
             snapshot.languages.explanation = languages.explanation.clone();
         }
-        if let Some(lease) = begin_file_retranslation(state, generation, languages)
-            .map_err(|error| error.message)?
+        if let Some(lease) =
+            begin_file_retranslation(state, generation, languages).map_err(|error| error.message)?
         {
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
                 let result = async {
-                    let key = api_key()?;
+                    let key = api_key(&app)?;
                     let client = openai::OpenAiClient::new(key)?;
                     run_file_retranslation(app.clone(), client, lease.clone()).await
                 }
                 .await;
                 if let Err(error) = result {
                     if error.kind != openai::ApiErrorKind::Cancelled {
-                        let _ = record_file_retranslation_failure(
-                            &app,
-                            &lease,
-                            error.message,
-                        );
+                        let _ = record_file_retranslation_failure(&app, &lease, error.message);
                     }
                 }
             });
@@ -1758,7 +1908,31 @@ fn apply_language_settings(
 }
 
 #[tauri::command]
-fn update_speaker(app: tauri::AppHandle, speaker: SpeakerProfile) -> Result<(), openai::ApiError> {
+fn update_speaker(
+    app: tauri::AppHandle,
+    session_id: String,
+    mut speaker: SpeakerProfile,
+) -> Result<(), openai::ApiError> {
+    let state = app.state::<AppState>();
+    let snapshot = state
+        .canonical
+        .lock()
+        .map_err(|_| service_error("Session state is unavailable."))?;
+    if snapshot.session_id != session_id || !snapshot.speakers.contains_key(&speaker.id) {
+        return Err(service_error("This speaker belongs to an older session."));
+    }
+    drop(snapshot);
+    speaker.display_name = speaker
+        .display_name
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(48)
+        .collect::<String>()
+        .trim()
+        .to_owned();
+    if speaker.display_name.is_empty() || !valid_hex_color(&speaker.color) {
+        return Err(service_error("Speaker name or color is invalid."));
+    }
     record_event(&app, SessionEvent::SpeakerDiscovered { speaker })
 }
 
@@ -1829,13 +2003,32 @@ fn cancel_session(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(
         .map_err(|_| "Lesson cache is unavailable.")?
         .clear();
     if invalidate_lesson_context(&app, state.inner()) {
-        record_event(
-            &app,
-            SessionEvent::LessonSelected { segment_id: None },
-        )
-        .map_err(|error| error.message)?;
+        record_event(&app, SessionEvent::LessonSelected { segment_id: None })
+            .map_err(|error| error.message)?;
     }
     record_event(&app, SessionEvent::Complete).map_err(|error| error.message)
+}
+
+fn cleanup_for_quit(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    let _ = state.retranslations.cancel();
+    let _ = state.runs.cancel();
+    #[cfg(target_os = "macos")]
+    live::stop(&state.live);
+    if let Ok(mut selected) = state.selected_media.lock() {
+        *selected = None;
+    }
+    if let Ok(mut media) = state.playback_media.lock() {
+        if let Some(path) = media.take() {
+            let _ = app.asset_protocol_scope().forbid_file(path);
+        }
+    }
+    if let Ok(mut directory) = state.playback_directory.lock() {
+        *directory = None;
+    }
+    if let Ok(mut prepared) = state.prepared_session.lock() {
+        *prepared = None;
+    };
 }
 
 #[cfg(target_os = "macos")]
@@ -1847,6 +2040,7 @@ async fn start_live_capture(
     sync_mode: LiveSyncMode,
     processing_mode: CaptionProcessingMode,
 ) -> Result<(), openai::ApiError> {
+    validate_languages(&languages).map_err(|message| service_error(&message))?;
     state.retranslations.cancel()?;
     let run = state.runs.replace()?;
     begin_session_for_generation(
@@ -1856,7 +2050,7 @@ async fn start_live_capture(
         languages.clone(),
         processing_mode.clone(),
     )?;
-    let key = api_key()?;
+    let key = api_key(&app)?;
     match live::start(
         app.clone(),
         &state.live,
@@ -1929,11 +2123,8 @@ fn stop_live_capture(app: tauri::AppHandle, state: State<'_, AppState>) -> Resul
     #[cfg(target_os = "macos")]
     live::stop(&state.live);
     if invalidate_lesson_context(&app, state.inner()) {
-        record_event(
-            &app,
-            SessionEvent::LessonSelected { segment_id: None },
-        )
-        .map_err(|error| error.message)?;
+        record_event(&app, SessionEvent::LessonSelected { segment_id: None })
+            .map_err(|error| error.message)?;
     }
     record_event(&app, SessionEvent::Complete).map_err(|error| error.message)?;
     Ok(())
@@ -1947,6 +2138,10 @@ fn begin_session_for_generation(
     processing_mode: CaptionProcessingMode,
 ) -> Result<(), openai::ApiError> {
     let state = app.state::<AppState>();
+    let _dispatch = state
+        .event_dispatch
+        .lock()
+        .map_err(|_| service_error("Session event dispatcher is unavailable."))?;
     let event = SessionEvent::SessionReset {
         mode: mode.clone(),
         languages: languages.clone(),
@@ -2001,7 +2196,11 @@ fn scoped_event_envelope<'a>(
     state: &'a AppState,
     generation: u64,
     event: SessionEvent,
-) -> Result<(MutexGuard<'a, Option<RunLease>>, SequencedSessionEvent), openai::ApiError> {
+) -> Result<ScopedEventEnvelope<'a>, openai::ApiError> {
+    let dispatch = state
+        .event_dispatch
+        .lock()
+        .map_err(|_| service_error("Session event dispatcher is unavailable."))?;
     let active = state
         .runs
         .active
@@ -2017,6 +2216,9 @@ fn scoped_event_envelope<'a>(
         .canonical
         .lock()
         .map_err(|_| service_error("Session state is unavailable."))?;
+    if snapshot.session_id != format!("session-{generation}") {
+        return Err(cancelled_error());
+    }
     snapshot.sequence += 1;
     apply_event(&mut snapshot, &event);
     let envelope = SequencedSessionEvent {
@@ -2025,7 +2227,7 @@ fn scoped_event_envelope<'a>(
         event,
     };
     drop(snapshot);
-    Ok((active, envelope))
+    Ok((dispatch, active, envelope))
 }
 
 pub(crate) fn record_event_for_generation(
@@ -2033,20 +2235,16 @@ pub(crate) fn record_event_for_generation(
     generation: u64,
     event: SessionEvent,
 ) -> Result<(), openai::ApiError> {
-    let (generation_guard, envelope) =
+    let (dispatch_guard, generation_guard, envelope) =
         scoped_event_envelope(app.state::<AppState>().inner(), generation, event)?;
     let lesson_session_id = envelope.session_id.clone();
     let lesson_event = envelope.event.clone();
     app.emit("session-event", envelope)
         .map_err(|error| service_error(&format!("Could not update subtitle windows: {error}")))?;
     drop(generation_guard);
+    drop(dispatch_guard);
     let state = app.state::<AppState>();
-    invalidate_lesson_for_source_revision(
-        app,
-        state.inner(),
-        &lesson_session_id,
-        &lesson_event,
-    );
+    invalidate_lesson_for_source_revision(app, state.inner(), &lesson_session_id, &lesson_event);
     Ok(())
 }
 
@@ -2055,6 +2253,10 @@ pub(crate) fn record_event(
     event: SessionEvent,
 ) -> Result<(), openai::ApiError> {
     let state = app.state::<AppState>();
+    let _dispatch = state
+        .event_dispatch
+        .lock()
+        .map_err(|_| service_error("Session event dispatcher is unavailable."))?;
     let envelope = {
         let mut snapshot = state
             .canonical
@@ -2073,7 +2275,10 @@ pub(crate) fn record_event(
 }
 
 fn upsert_ordered_segment(segments: &mut Vec<SubtitleSegment>, segment: SubtitleSegment) {
-    if let Some(index) = segments.iter().position(|existing| existing.id == segment.id) {
+    if let Some(index) = segments
+        .iter()
+        .position(|existing| existing.id == segment.id)
+    {
         segments.remove(index);
     }
     let insertion = segments
@@ -2309,7 +2514,10 @@ fn place_composer_near_cursor(
             monitor.size().height,
         ),
         (width, height),
-        (cursor_global_x.round() as i32, cursor_global_y.round() as i32),
+        (
+            cursor_global_x.round() as i32,
+            cursor_global_y.round() as i32,
+        ),
         18,
     );
     let _ = lesson.set_position(tauri::PhysicalPosition::new(x, y));
@@ -2384,11 +2592,9 @@ fn invalidate_lesson_for_source_revision(
         .lock()
         .ok()
         .and_then(|mut context| {
-            let should_invalidate = context
-                .as_ref()
-                .is_some_and(|open| {
-                    open.session_id == session_id && lesson_event_revises_context(open, event)
-                });
+            let should_invalidate = context.as_ref().is_some_and(|open| {
+                open.session_id == session_id && lesson_event_revises_context(open, event)
+            });
             if should_invalidate {
                 context.take()
             } else {
@@ -2605,8 +2811,8 @@ fn dispatch_action(app: &tauri::AppHandle, id: &str) {
         }
         "show_lesson" => {
             let state = app.state::<AppState>();
-            if let Some(source) = visible_lesson_source(app)
-                .or_else(|| app.get_webview_window("main"))
+            if let Some(source) =
+                visible_lesson_source(app).or_else(|| app.get_webview_window("main"))
             {
                 let source_surface = match source.label() {
                     "viewer" => "viewer",
@@ -2662,7 +2868,10 @@ fn dispatch_action(app: &tauri::AppHandle, id: &str) {
             let _ = show_surface(app, "workbench");
             let _ = app.emit("tray-action", id);
         }
-        "quit" => app.exit(0),
+        "quit" => {
+            cleanup_for_quit(app);
+            app.exit(0);
+        }
         "play_pause"
         | "subtitle_earlier"
         | "subtitle_later"
@@ -2712,8 +2921,8 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            let _ = sweep_stale_owned_temp_directories(&std::env::temp_dir(), SystemTime::now());
             setup_tray(app)?;
             let has_key = api_key_marker_exists(app.handle());
             if has_key {
@@ -2773,6 +2982,35 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn valid_preferences() -> serde_json::Value {
+        serde_json::json!({
+            "level": "beginner",
+            "style": {
+                "preset": "momento",
+                "position": { "x": 0.5, "y": 0.82 },
+                "overlayPosition": { "x": 0.5, "y": 0.78 },
+                "overlayWidth": 900,
+                "fontFamily": "Inter",
+                "fontSize": 28,
+                "backgroundOpacity": 0.58,
+                "effect": "outline",
+                "displayMode": "both",
+                "showSpeakerNames": true,
+                "wiredColors": {
+                    "panel": "#05081c", "wash": "#0b2944", "sourceText": "#c9e6fa",
+                    "translationText": "#ffffff", "metadata": "#5fa8dc", "fallbackAccent": "#4ac8ff"
+                },
+                "falloutColors": { "text": "#f0a14a", "panel": "#0b0d08" }
+            },
+            "languages": { "source": "auto", "target": "en", "explanation": "en" },
+            "sync": { "liveMode": "coordinated" },
+            "processingMode": "translated",
+            "onboardingComplete": true,
+            "lessonPlacements": {},
+            "experimentalExternalPause": false
+        })
+    }
     use contracts::{SegmentStatus, SessionMode};
 
     fn file_segment(id: &str, source: &str, translation: &str, start_ms: u64) -> SubtitleSegment {
@@ -2875,7 +3113,12 @@ mod tests {
         assert_eq!(open.selected_segment.source_text, "今日はちょっと");
         assert_eq!(envelope.sequence, 1);
         assert_eq!(
-            state.canonical.lock().unwrap().selected_segment_id.as_deref(),
+            state
+                .canonical
+                .lock()
+                .unwrap()
+                .selected_segment_id
+                .as_deref(),
             Some("segment-2")
         );
 
@@ -2900,8 +3143,7 @@ mod tests {
             Some("Today will not work.".into());
         assert!(current_lesson_material(&state, open.selection_id).is_ok());
 
-        state.canonical.lock().unwrap().segments[1].source_text =
-            "今日はちょっと難しいです".into();
+        state.canonical.lock().unwrap().segments[1].source_text = "今日はちょっと難しいです".into();
         assert!(current_lesson_material(&state, open.selection_id).is_err());
 
         state.canonical.lock().unwrap().segments[1].source_text = "今日はちょっと".into();
@@ -2912,12 +3154,29 @@ mod tests {
     #[test]
     fn canonical_lesson_context_is_bounded_around_the_selected_line() {
         let segments = (0..10)
-            .map(|index| file_segment(&format!("segment-{index}"), "source", "target", index * 1_000))
+            .map(|index| {
+                file_segment(
+                    &format!("segment-{index}"),
+                    "source",
+                    "target",
+                    index * 1_000,
+                )
+            })
             .collect::<Vec<_>>();
         let context = canonical_lesson_context(&segments, "segment-6", 3, 2);
         assert_eq!(
-            context.iter().map(|segment| segment.id.as_str()).collect::<Vec<_>>(),
-            ["segment-3", "segment-4", "segment-5", "segment-6", "segment-7", "segment-8"]
+            context
+                .iter()
+                .map(|segment| segment.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "segment-3",
+                "segment-4",
+                "segment-5",
+                "segment-6",
+                "segment-7",
+                "segment-8"
+            ]
         );
     }
 
@@ -3096,11 +3355,7 @@ mod tests {
     #[test]
     fn preference_broker_rebases_stale_leaf_patches_without_losing_unrelated_changes() {
         let mut slot = None;
-        let initial = serde_json::json!({
-            "style": { "preset": "momento", "position": { "x": 0.5, "y": 0.8 } },
-            "languages": { "source": "auto", "target": "en", "explanation": "en" },
-            "lessonPlacements": {}
-        });
+        let initial = valid_preferences();
         let initialized = initialize_preference_state(&mut slot, initial).unwrap();
         assert_eq!(initialized.revision, 0);
 
@@ -3129,12 +3384,11 @@ mod tests {
 
     #[test]
     fn preference_broker_merges_independent_monitor_placements_and_orders_conflicts() {
+        let mut preferences = valid_preferences();
+        preferences["style"]["preset"] = serde_json::json!("clean");
         let mut state = CanonicalPreferences {
             revision: 4,
-            preferences: serde_json::json!({
-                "style": { "preset": "clean" },
-                "lessonPlacements": {}
-            }),
+            preferences,
         };
         apply_preference_patch(
             &mut state,
@@ -3161,7 +3415,13 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(last.preferences["lessonPlacements"].as_object().unwrap().len(), 2);
+        assert_eq!(
+            last.preferences["lessonPlacements"]
+                .as_object()
+                .unwrap()
+                .len(),
+            2
+        );
         assert_eq!(last.preferences["style"]["preset"], "wired");
         assert_eq!(last.revision, 8);
         assert!(last.rebased);
@@ -3170,16 +3430,55 @@ mod tests {
     #[test]
     fn preference_broker_keeps_the_first_valid_seed_and_rejects_non_object_patches() {
         let mut slot = None;
-        initialize_preference_state(&mut slot, serde_json::json!({ "level": "beginner" }))
-            .unwrap();
-        let second = initialize_preference_state(
-            &mut slot,
-            serde_json::json!({ "level": "advanced" }),
-        )
-        .unwrap();
+        initialize_preference_state(&mut slot, valid_preferences()).unwrap();
+        let mut second_seed = valid_preferences();
+        second_seed["level"] = serde_json::json!("advanced");
+        let second = initialize_preference_state(&mut slot, second_seed).unwrap();
         assert_eq!(second.preferences["level"], "beginner");
-        assert!(apply_preference_patch(slot.as_mut().unwrap(), 0, serde_json::json!("bad"))
-            .is_err());
+        assert!(
+            apply_preference_patch(slot.as_mut().unwrap(), 0, serde_json::json!("bad")).is_err()
+        );
+    }
+
+    #[test]
+    fn preference_validation_rejects_unsafe_ranges_languages_and_colors() {
+        let mut invalid = valid_preferences();
+        invalid["style"]["fontSize"] = serde_json::json!(9_999);
+        assert!(validate_preferences(&invalid).is_err());
+        let mut invalid = valid_preferences();
+        invalid["languages"]["target"] = serde_json::json!("<script>");
+        assert!(validate_preferences(&invalid).is_err());
+        let mut invalid = valid_preferences();
+        invalid["style"]["wiredColors"]["panel"] = serde_json::json!("url(evil)");
+        assert!(validate_preferences(&invalid).is_err());
+    }
+
+    #[test]
+    fn production_state_starts_empty() {
+        let state = AppState::default();
+        let snapshot = state.canonical.lock().unwrap();
+        assert_eq!(snapshot.session_id, "idle");
+        assert!(snapshot.segments.is_empty());
+        assert!(snapshot.mode.is_none());
+    }
+
+    #[test]
+    fn startup_sweep_only_removes_old_owned_temp_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let owned = root.path().join("nonosub-session-owned");
+        let playback = root.path().join("nonosub-playback-owned");
+        let foreign = root.path().join("another-app-session");
+        std::fs::create_dir_all(&owned).unwrap();
+        std::fs::create_dir_all(&playback).unwrap();
+        std::fs::create_dir_all(&foreign).unwrap();
+        let removed = sweep_stale_owned_temp_directories(
+            root.path(),
+            SystemTime::now() + STALE_TEMP_AGE + Duration::from_secs(1),
+        );
+        assert_eq!(removed, 2);
+        assert!(!owned.exists());
+        assert!(!playback.exists());
+        assert!(foreign.exists());
     }
 
     #[test]
@@ -3240,7 +3539,10 @@ mod tests {
         assert!(first.is_cancelled());
         assert!(!second.is_cancelled());
         assert!(runs.lease(first.generation).is_err());
-        assert_eq!(runs.lease(second.generation).unwrap().generation, second.generation);
+        assert_eq!(
+            runs.lease(second.generation).unwrap().generation,
+            second.generation
+        );
 
         runs.cancel().unwrap();
         assert!(first.is_cancelled());
@@ -3258,8 +3560,7 @@ mod tests {
         };
         let first = coordinator.begin(7, spanish.clone()).unwrap().unwrap();
         assert!(coordinator.begin(7, spanish.clone()).unwrap().is_none());
-        coordinator.active.lock().unwrap().as_mut().unwrap().status =
-            RetranslationStatus::Failed;
+        coordinator.active.lock().unwrap().as_mut().unwrap().status = RetranslationStatus::Failed;
         assert!(coordinator.begin(7, spanish).unwrap().is_none());
 
         let french = LanguageSettings {
@@ -3277,7 +3578,14 @@ mod tests {
     #[test]
     fn complete_file_retranslation_changes_every_line_and_language_atomically() {
         let state = completed_file_state();
-        let run_generation = state.runs.active.lock().unwrap().as_ref().unwrap().generation;
+        let run_generation = state
+            .runs
+            .active
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .generation;
         let requested = LanguageSettings {
             source: "ja".into(),
             target: "es".into(),
@@ -3302,19 +3610,15 @@ mod tests {
             },
         ];
 
-        let (run_guard, request_guard, envelope) = scoped_file_retranslation_success(
-            &state,
-            &lease,
-            &revision,
-            replacements,
-        )
-        .unwrap();
+        let (dispatch_guard, run_guard, request_guard, envelope) =
+            scoped_file_retranslation_success(&state, &lease, &revision, replacements).unwrap();
         assert!(matches!(
             envelope.event,
             SessionEvent::FileRetranslationApplied { .. }
         ));
         drop(request_guard);
         drop(run_guard);
+        drop(dispatch_guard);
         let snapshot = state.canonical.lock().unwrap();
         assert_eq!(snapshot.languages, requested);
         assert_eq!(
@@ -3332,7 +3636,14 @@ mod tests {
     #[test]
     fn stale_retranslation_generation_cannot_change_the_visible_target() {
         let state = completed_file_state();
-        let generation = state.runs.active.lock().unwrap().as_ref().unwrap().generation;
+        let generation = state
+            .runs
+            .active
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .generation;
         let first = state
             .retranslations
             .begin(
@@ -3388,7 +3699,14 @@ mod tests {
     #[test]
     fn incomplete_atomic_replacement_is_rejected_without_partial_mutation() {
         let state = completed_file_state();
-        let generation = state.runs.active.lock().unwrap().as_ref().unwrap().generation;
+        let generation = state
+            .runs
+            .active
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .generation;
         let lease = state
             .retranslations
             .begin(
@@ -3425,7 +3743,14 @@ mod tests {
     #[test]
     fn failed_retranslation_preserves_the_previous_language_and_complete_subtitles() {
         let state = completed_file_state();
-        let generation = state.runs.active.lock().unwrap().as_ref().unwrap().generation;
+        let generation = state
+            .runs
+            .active
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .generation;
         let requested = LanguageSettings {
             source: "ja".into(),
             target: "es".into(),
@@ -3438,18 +3763,16 @@ mod tests {
             .unwrap();
         let before = state.canonical.lock().unwrap().clone();
 
-        let (run_guard, request_guard, envelope) = scoped_file_retranslation_failure(
-            &state,
-            &lease,
-            "network unavailable".into(),
-        )
-        .unwrap();
+        let (dispatch_guard, run_guard, request_guard, envelope) =
+            scoped_file_retranslation_failure(&state, &lease, "network unavailable".into())
+                .unwrap();
         assert!(matches!(
             envelope.event,
             SessionEvent::RecoverableError { .. }
         ));
         drop(request_guard);
         drop(run_guard);
+        drop(dispatch_guard);
         let after = state.canonical.lock().unwrap();
         assert_eq!(after.languages, before.languages);
         assert_eq!(after.segments, before.segments);
@@ -3467,7 +3790,7 @@ mod tests {
         let state = AppState::default();
         let first = state.runs.replace().unwrap();
         state.canonical.lock().unwrap().session_id = format!("session-{}", first.generation);
-        let (first_guard, _) = scoped_event_envelope(
+        let (first_dispatch, first_guard, _) = scoped_event_envelope(
             &state,
             first.generation,
             SessionEvent::PhaseChanged {
@@ -3476,6 +3799,7 @@ mod tests {
         )
         .unwrap();
         drop(first_guard);
+        drop(first_dispatch);
 
         let second = state.runs.replace().unwrap();
         *state.canonical.lock().unwrap() = SessionSnapshot {
@@ -3500,7 +3824,7 @@ mod tests {
         assert_eq!(after_stale.phase, before.phase);
         assert_eq!(after_stale.fatal_error, before.fatal_error);
 
-        let (generation_guard, accepted) = scoped_event_envelope(
+        let (dispatch_guard, generation_guard, accepted) = scoped_event_envelope(
             &state,
             second.generation,
             SessionEvent::PhaseChanged {
@@ -3510,7 +3834,11 @@ mod tests {
         .unwrap();
         assert!(state.runs.active.try_lock().is_err());
         drop(generation_guard);
-        assert_eq!(accepted.session_id, format!("session-{}", second.generation));
+        drop(dispatch_guard);
+        assert_eq!(
+            accepted.session_id,
+            format!("session-{}", second.generation)
+        );
         assert_eq!(accepted.sequence, 1);
         assert_eq!(state.canonical.lock().unwrap().phase, "transcribing");
     }

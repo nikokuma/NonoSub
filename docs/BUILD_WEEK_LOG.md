@@ -236,3 +236,15 @@
 - Split the capture and transmission timelines. Captured samples always advance source time; transmitted spans map OpenAI elapsed metadata back to capture intervals; silent suppression, failed sends, and reconnects create real gaps and clause boundaries.
 - Preserved odd 48 kHz samples between resampler calls and inserted packet-duration silence when a local AAC packet cannot decode.
 - Full verification passes with zero Svelte errors or warnings, 128 frontend tests, a successful production build, 107 Rust tests, and warning-free clippy.
+
+## July 20 — Release-state and lifecycle repair
+
+- Removed fixture-backed startup state from every production Tauri subtitle surface while preserving explicit browser fixtures for deterministic UI QA.
+- Added retrying, teardown-safe native event subscriptions and a final monotonic snapshot guard so late refreshes cannot replace newer same-session state.
+- Added a single ordering lock for the primary canonical session dispatcher and required generation-scoped events to match both the active run and `session_id` before mutation.
+- Sanitized persisted language, subtitle, palette, placement, font, numeric, and speaker fields; malformed values fall back safely in the web layer and are rejected by Rust before broadcast.
+- Kept startup Keychain-free through the existing presence marker, removed the marker after an actual retrieval failure or authenticated validation failure, and removed the unused opener plugin/capability.
+- Added startup cleanup restricted to NonoSub-owned temporary directory prefixes older than 24 hours and explicit resource release before Quit.
+- Checkpointed Fable's animation/export lane separately as `d0fdc3c`, then added GLTF late-completion guards and complete Three.js model/mixer/material/texture teardown.
+- `pnpm verify` passes with zero Svelte errors or warnings, 135 frontend tests, a successful production build, 110 Rust tests, and warning-free clippy. All five production surface URLs return HTTP 200.
+- Built an arm64 `.app`, `.dmg`, and `.app.zip`; strict code-sign verification passes after ad-hoc signing. Manual paid-network, ScreenCaptureKit permission, multi-display, and second-Mac Gatekeeper checks remain open.

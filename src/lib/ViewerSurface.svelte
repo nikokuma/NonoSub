@@ -4,15 +4,13 @@
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import type { LessonClosedContext, LessonOpenContext, SessionState } from "./contracts";
-  import { EMPTY_SESSION } from "./contracts";
-  import { FIXTURE_EVENTS } from "./fixtures";
-  import { activeSegments, canResumeForCoverage, formatTime, reduceSession, shouldPauseForCoverage, subtitleTimelineTime } from "./session";
+  import { activeSegments, canResumeForCoverage, formatTime, shouldPauseForCoverage, subtitleTimelineTime } from "./session";
   import { effectiveStyle } from "./preferences";
-  import { loadPreferences, savePreferencePatch, subscribePreferences, subscribeSession } from "./runtime";
+  import { initialSession, loadPreferences, maintainSubscription, savePreferencePatch, subscribePreferences, subscribeSession } from "./runtime";
   import { closeIdentifiesPlaybackLease, createPlaybackPauseLease, shouldResumePlayback, type PlaybackPauseLease } from "./playbackOwnership";
   import SubtitleStack from "./SubtitleStack.svelte";
 
-  let session = $state<SessionState>(FIXTURE_EVENTS.reduce(reduceSession, structuredClone(EMPTY_SESSION)));
+  let session = $state<SessionState>(initialSession());
   let preferences = $state(loadPreferences());
   let video = $state<HTMLVideoElement>();
   let stage = $state<HTMLDivElement>();
@@ -35,6 +33,7 @@
   let offsetHudVisible = $state(false);
   let offsetHudTimer: ReturnType<typeof setTimeout> | undefined;
   let offsetSessionId = "";
+  let connectionIssue = $state("");
 
   const active = $derived(activeSegments(session.segments, subtitleTimelineTime(currentMs, manualSubtitleOffsetMs)));
   const activeStyle = $derived(effectiveStyle(preferences.style, session.processingMode));
@@ -43,8 +42,8 @@
   onMount(() => {
     document.documentElement.dataset.surface = "viewer";
     const cleanup: Array<() => void> = [];
-    void subscribeSession((value) => session = value).then((unlisten) => cleanup.push(unlisten));
-    void subscribePreferences((value) => preferences = value).then((unlisten) => cleanup.push(unlisten));
+    cleanup.push(maintainSubscription(() => subscribeSession((value) => session = value), (message) => connectionIssue = message));
+    cleanup.push(maintainSubscription(() => subscribePreferences((value) => preferences = value), (message) => connectionIssue = message));
     if (isTauri()) {
       void listen<string>("tray-action", ({ payload }) => {
         if (payload === "play_pause") togglePlayback();
@@ -257,6 +256,7 @@
   </div>{/if}
 
   {#if catchingUp}<div class="catching"><i>の</i>Nono is catching up…</div>{/if}
+  {#if connectionIssue}<div class="connection-warning">{connectionIssue}</div>{/if}
   {#if offsetHudVisible}<div class="offset-hud">Subtitles {formattedOffset()}</div>{/if}
   <div class="chrome" class:visible={controlsVisible}>
     <div class="topbar" data-tauri-drag-region><b>{session.media?.fileName ?? "Video"}</b></div>
@@ -265,5 +265,5 @@
 </div>
 
 <style>
-  .viewer{position:fixed;inset:0;background:#000;overflow:hidden;cursor:none}.viewer:has(.chrome.visible){cursor:default}video,.fixture-backdrop{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}.fixture-backdrop{display:grid;place-content:center;text-align:center;background:radial-gradient(circle at 30% 20%,#54345e,#161827 44%,#07080d)}.fixture-backdrop span{font-family:serif;font-size:80px;color:#ffffff20}.fixture-backdrop small{color:#ff80be;letter-spacing:.2em}.subtitle-position{position:absolute;transform:translate(-50%,-50%);z-index:4;cursor:grab;touch-action:none}.subtitle-position.dragging{cursor:grabbing;filter:drop-shadow(0 0 8px #71e7df99)}.catching{position:absolute;left:50%;top:44%;transform:translate(-50%,-50%);display:flex;align-items:center;gap:9px;padding:11px 15px;background:#0d1119e8;border:1px solid #ffffff20;border-radius:8px;font-size:11px}.catching i{font-style:normal;display:grid;place-items:center;width:28px;height:28px;border-radius:7px;background:#ff70b7}.offset-hud{position:absolute;left:50%;bottom:82px;transform:translateX(-50%);padding:7px 11px;border:1px solid #ffffff24;background:#090d14e8;border-radius:7px;font-size:9px;letter-spacing:.04em}.chrome{position:absolute;inset:0;opacity:0;pointer-events:none;transition:opacity .2s;background:linear-gradient(#000a,transparent 18%,transparent 76%,#000c)}.chrome.visible{opacity:1}.topbar,.controls{pointer-events:auto;position:absolute;left:0;right:0;display:flex;align-items:center}.topbar{top:0;height:42px;padding:0 18px;justify-content:center}.topbar b{font-size:9px;color:#e3e6ebcc;font-weight:600;text-shadow:0 1px 3px #000}.controls{bottom:0;height:62px;padding:0 22px;gap:12px}.controls button{border:0;background:none}.controls .play{width:34px;height:34px;background:white;color:#10131a;border-radius:50%}.controls input{flex:1;accent-color:#ff70b7}.controls time{font-size:9px;color:#c0c4cc}.sync-controls{display:flex;align-items:center;border:1px solid #ffffff20;border-radius:6px;background:#0b0e15c9}.sync-controls button{min-width:25px;padding:5px;color:#d6d9df;font-size:8px}.sync-controls button:nth-child(2){min-width:46px;border-inline:1px solid #ffffff18}
+  .viewer{position:fixed;inset:0;background:#000;overflow:hidden;cursor:none}.viewer:has(.chrome.visible){cursor:default}video,.fixture-backdrop{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}.fixture-backdrop{display:grid;place-content:center;text-align:center;background:radial-gradient(circle at 30% 20%,#54345e,#161827 44%,#07080d)}.fixture-backdrop span{font-family:serif;font-size:80px;color:#ffffff20}.fixture-backdrop small{color:#ff80be;letter-spacing:.2em}.subtitle-position{position:absolute;transform:translate(-50%,-50%);z-index:4;cursor:grab;touch-action:none}.subtitle-position.dragging{cursor:grabbing;filter:drop-shadow(0 0 8px #71e7df99)}.catching{position:absolute;left:50%;top:44%;transform:translate(-50%,-50%);display:flex;align-items:center;gap:9px;padding:11px 15px;background:#0d1119e8;border:1px solid #ffffff20;border-radius:8px;font-size:11px}.catching i{font-style:normal;display:grid;place-items:center;width:28px;height:28px;border-radius:7px;background:#ff70b7}.connection-warning{position:absolute;left:50%;top:18px;transform:translateX(-50%);z-index:8;max-width:80%;padding:7px 11px;border:1px solid #ff70b766;background:#250d18e8;color:#ffc0dc;border-radius:7px;font-size:9px}.offset-hud{position:absolute;left:50%;bottom:82px;transform:translateX(-50%);padding:7px 11px;border:1px solid #ffffff24;background:#090d14e8;border-radius:7px;font-size:9px;letter-spacing:.04em}.chrome{position:absolute;inset:0;opacity:0;pointer-events:none;transition:opacity .2s;background:linear-gradient(#000a,transparent 18%,transparent 76%,#000c)}.chrome.visible{opacity:1}.topbar,.controls{pointer-events:auto;position:absolute;left:0;right:0;display:flex;align-items:center}.topbar{top:0;height:42px;padding:0 18px;justify-content:center}.topbar b{font-size:9px;color:#e3e6ebcc;font-weight:600;text-shadow:0 1px 3px #000}.controls{bottom:0;height:62px;padding:0 22px;gap:12px}.controls button{border:0;background:none}.controls .play{width:34px;height:34px;background:white;color:#10131a;border-radius:50%}.controls input{flex:1;accent-color:#ff70b7}.controls time{font-size:9px;color:#c0c4cc}.sync-controls{display:flex;align-items:center;border:1px solid #ffffff20;border-radius:6px;background:#0b0e15c9}.sync-controls button{min-width:25px;padding:5px;color:#d6d9df;font-size:8px}.sync-controls button:nth-child(2){min-width:46px;border-inline:1px solid #ffffff18}
 </style>

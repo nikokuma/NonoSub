@@ -507,7 +507,7 @@ For every creation deliverable:
 
 ## Audit repair checkpoints
 
-Status: **R9 COMPLETE — pinned lesson identity, cache, and placement**
+Status: **R13 IMPLEMENTATION COMPLETE — final manual native matrix remains**
 
 The July 18 independent review found release-blocking correctness and containment issues. Repairs are performed one at a time; each receives focused tests, the full verification suite, visible acceptance when applicable, and its own GitHub checkpoint before the next repair begins.
 
@@ -524,7 +524,7 @@ The July 18 independent review found release-blocking correctness and containmen
 - [x] R10 — Introduce explicit file and external-media playback ownership.
 - [x] R11 — Bound long-session coordinator, event, error, and transcript-rendering costs.
 - [x] R12 — Preserve file/live media timing across decode and send failures.
-- [ ] R13 — Complete audit cleanup, bundle smoke testing, and final acceptance.
+- [x] R13 — Complete audit cleanup and bundle/source verification. Manual permission, paid-network, multi-display, and Gatekeeper acceptance remain explicitly tracked.
 
 Approved repair defaults:
 
@@ -546,6 +546,8 @@ R10 verification: `pnpm verify` passed with zero Svelte errors or warnings, 123 
 R11 verification: `pnpm verify` passed with zero Svelte errors or warnings, 128 frontend tests, a successful production build, 101 Rust tests, and warning-free clippy. Local audio conversion is incremental and rejects files over four hours; transcript rendering pages the newest 200 lines; segment upserts avoid full-array sorting; errors, lesson cache/thread input, realtime event identities, and live pairing history are bounded; completed original-only drafts are released; and file retranslation clones canonical state only after completion.
 
 R12 verification: `pnpm verify` passed with zero Svelte errors or warnings, 128 frontend tests, a successful production build, 107 Rust tests, and warning-free clippy. HTTP endpoints now use bounded connect/read/request timeouts; transcription requires a terminal done event and rejects explicit SSE errors; retries back off with jitter and observe cancellation; live starts are lease-serialized; WebSocket sends and graceful shutdown are bounded; Ping/Pong is accepted throughout; capture and transmission clocks are separate; silent suppression and send failures retain source-time gaps; decode errors insert packet-duration silence; and odd 48 kHz samples survive converter call boundaries.
+
+R13 verification: `pnpm verify` passed with zero Svelte errors or warnings, 135 frontend tests, a successful production build, 110 Rust tests, and warning-free clippy. Tauri surfaces start empty instead of rendering fixtures; subscription failures retry with teardown-safe cleanup; snapshot recovery is monotonic; generation events also require the active session identity; preference/speaker inputs are sanitized at both boundaries; startup remains Keychain-free; the unused opener capability was removed; stale cleanup is restricted to NonoSub-owned temp prefixes; explicit Quit releases active media resources; and late GLTF completion plus Three.js resources are safely disposed. All five production surface routes returned HTTP 200. The arm64 app and DMG built, were ad-hoc signed, and passed strict bundle verification. Paid API, ScreenCaptureKit permission/revocation, multi-display removal, and second-Mac Gatekeeper checks remain manual acceptance rather than being inferred from unit tests.
 
 ## Checkpoints and decisions
 

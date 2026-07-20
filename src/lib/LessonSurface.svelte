@@ -3,14 +3,14 @@
   import { invoke, isTauri } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { LogicalSize, PhysicalPosition, currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
-  import type { LessonCard, LessonMessage, LessonOpenContext, LessonSurfaceMode } from "./contracts";
+  import type { LessonCard, LessonMessage, LessonOpenContext, LessonSurfaceMode, SubtitleSegment } from "./contracts";
   import { EMPTY_SESSION } from "./contracts";
   import { FIXTURE_EVENTS, FIXTURE_LESSON } from "./fixtures";
   import { dominantChalkColor, isLessonSkipped, lessonStepOrder } from "./lesson";
   import { lessonThreadKey } from "./lessonIdentity";
   import { fitLogicalWindowSize, makeMonitorKey, normalizeLessonPlacement, resolveLessonPosition, shouldPersistLessonPlacement, type MonitorGeometry } from "./floatingPlacement";
   import { reduceSession } from "./session";
-  import { loadPreferences, savePreferencePatch, subscribePreferences } from "./runtime";
+  import { loadPreferences, maintainSubscription, savePreferencePatch, subscribePreferences } from "./runtime";
   import ChalkDemo from "./ChalkDemo.svelte";
   import ChalkPhrase from "./ChalkPhrase.svelte";
   import ChalkStepNumber from "./ChalkStepNumber.svelte";
@@ -24,12 +24,22 @@
   const UNDERLINE_LEAD_MS = 350;
 
   const fixtureSession = FIXTURE_EVENTS.reduce(reduceSession, structuredClone(EMPTY_SESSION));
+  const emptySegment: SubtitleSegment = {
+    id: "",
+    origin: "file",
+    startMs: 0,
+    endMs: 0,
+    sourceText: "",
+    isProvisional: false,
+    transcriptionStatus: "pending",
+    translationStatus: "pending",
+  };
   const emptyOpenContext: LessonOpenContext = {
     selectionId: 0,
     sessionId: "",
     sourceSurface: "workbench",
     segmentId: "",
-    selectedSegment: fixtureSession.segments[3],
+    selectedSegment: isTauri() ? emptySegment : fixtureSession.segments[3],
     cursorX: 0,
     cursorY: 0,
     externalMediaControl: "not_requested",
@@ -92,7 +102,10 @@
   onMount(() => {
     document.documentElement.dataset.surface = "lesson";
     const cleanup: Array<() => void> = [];
-    void subscribePreferences((value) => preferences = value).then((unlisten) => cleanup.push(unlisten));
+    cleanup.push(maintainSubscription(
+      () => subscribePreferences((value) => preferences = value),
+      (message) => { if (message) error = message; },
+    ));
     void tick().then(() => playCueSequence());
     if (isTauri()) {
       void invoke<LessonOpenContext | null>("get_lesson_open_context").then((context) => {

@@ -79,9 +79,12 @@ export function serializePreferences(preferences: Preferences): string {
 
 export function parsePreferences(serialized: string): Preferences | undefined {
   try {
-    const parsed = JSON.parse(serialized) as Partial<Preferences>;
-    if (!parsed.style || !["beginner", "intermediate", "advanced"].includes(parsed.level ?? "")) return undefined;
-    const savedPreset = (parsed.style as { preset?: string }).preset;
+    const value = JSON.parse(serialized) as unknown;
+    if (!isPlainObject(value) || !isPlainObject(value.style)) return undefined;
+    const parsed = value as unknown as Partial<Preferences>;
+    if (!["beginner", "intermediate", "advanced"].includes(parsed.level ?? "")) return undefined;
+    const style = parsed.style as Partial<StyleSettings>;
+    const savedPreset = (style as { preset?: string }).preset;
     const preset = savedPreset === "nono-pop"
       ? "momento"
       : savedPreset === "cyberia"
@@ -91,16 +94,18 @@ export function parsePreferences(serialized: string): Preferences | undefined {
           : ["clean", "classic-outline", "yellow-drop", "fallout", "momento", "wired"].includes(savedPreset ?? "")
             ? savedPreset
             : DEFAULT_STYLE.preset;
-    const legacyStyle = parsed.style as Partial<StyleSettings> & {
+    const legacyStyle = style as Partial<StyleSettings> & {
       cyberiaColors?: StyleSettings["wiredColors"];
       arcadeColors?: StyleSettings["falloutColors"];
     };
     return {
       level: parsed.level as LearnerLevel,
       languages: {
-        source: parsed.languages?.source ?? DEFAULT_LANGUAGES.source,
-        target: parsed.languages?.target ?? DEFAULT_LANGUAGES.target,
-        explanation: parsed.languages?.explanation ?? parsed.languages?.target ?? DEFAULT_LANGUAGES.explanation,
+        source: validLanguage(parsed.languages?.source, true) ?? DEFAULT_LANGUAGES.source,
+        target: validLanguage(parsed.languages?.target, false) ?? DEFAULT_LANGUAGES.target,
+        explanation: validLanguage(parsed.languages?.explanation, false)
+          ?? validLanguage(parsed.languages?.target, false)
+          ?? DEFAULT_LANGUAGES.explanation,
       },
       onboardingComplete: parsed.onboardingComplete ?? false,
       lessonPlacements: parseLessonPlacements(parsed.lessonPlacements),
@@ -111,27 +116,30 @@ export function parsePreferences(serialized: string): Preferences | undefined {
       },
       style: {
         ...DEFAULT_STYLE,
-        ...parsed.style,
         preset: preset as StyleSettings["preset"],
+        fontFamily: safeText(style.fontFamily, DEFAULT_STYLE.fontFamily, 80),
+        fontSize: finiteClamp(style.fontSize, DEFAULT_STYLE.fontSize, 14, 72),
+        backgroundOpacity: finiteClamp(style.backgroundOpacity, DEFAULT_STYLE.backgroundOpacity, 0, 0.9),
+        effect: ["none", "outline", "shadow"].includes(style.effect ?? "")
+          ? style.effect as StyleSettings["effect"]
+          : DEFAULT_STYLE.effect,
+        displayMode: ["source", "translation", "both"].includes(style.displayMode ?? "")
+          ? style.displayMode as StyleSettings["displayMode"]
+          : DEFAULT_STYLE.displayMode,
+        showSpeakerNames: typeof style.showSpeakerNames === "boolean"
+          ? style.showSpeakerNames
+          : DEFAULT_STYLE.showSpeakerNames,
         position: {
-          x: clamp(parsed.style.position?.x ?? DEFAULT_STYLE.position.x, 0.08, 0.92),
-          y: clamp(parsed.style.position?.y ?? DEFAULT_STYLE.position.y, 0.12, 0.92),
+          x: finiteClamp(style.position?.x, DEFAULT_STYLE.position.x, 0.08, 0.92),
+          y: finiteClamp(style.position?.y, DEFAULT_STYLE.position.y, 0.12, 0.92),
         },
         overlayPosition: {
-          x: clamp(parsed.style.overlayPosition?.x ?? DEFAULT_STYLE.overlayPosition.x, 0.05, 0.95),
-          y: clamp(parsed.style.overlayPosition?.y ?? DEFAULT_STYLE.overlayPosition.y, 0.05, 0.95),
+          x: finiteClamp(style.overlayPosition?.x, DEFAULT_STYLE.overlayPosition.x, 0.05, 0.95),
+          y: finiteClamp(style.overlayPosition?.y, DEFAULT_STYLE.overlayPosition.y, 0.05, 0.95),
         },
-        overlayWidth: clamp(parsed.style.overlayWidth ?? DEFAULT_STYLE.overlayWidth, 520, 1200),
-        wiredColors: {
-          ...DEFAULT_STYLE.wiredColors,
-          ...(legacyStyle.cyberiaColors ?? {}),
-          ...legacyStyle.wiredColors,
-        },
-        falloutColors: {
-          ...DEFAULT_STYLE.falloutColors,
-          ...(legacyStyle.arcadeColors ?? {}),
-          ...legacyStyle.falloutColors,
-        },
+        overlayWidth: finiteClamp(style.overlayWidth, DEFAULT_STYLE.overlayWidth, 520, 1200),
+        wiredColors: safePalette(DEFAULT_STYLE.wiredColors, legacyStyle.cyberiaColors, legacyStyle.wiredColors),
+        falloutColors: safePalette(DEFAULT_STYLE.falloutColors, legacyStyle.arcadeColors, legacyStyle.falloutColors),
       },
     };
   } catch {
@@ -161,7 +169,7 @@ export function renameSpeaker(
   displayName: string,
 ): Record<string, SpeakerProfile> {
   const speaker = speakers[id];
-  const normalized = displayName.trim();
+  const normalized = displayName.replace(/[\u0000-\u001f\u007f]/gu, "").trim().slice(0, 48);
   if (!speaker || !normalized) return speakers;
   return { ...speakers, [id]: { ...speaker, displayName: normalized } };
 }
@@ -211,4 +219,37 @@ export function applyPreferenceAction(preferences: Preferences, action: string):
 
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value));
+}
+
+function finiteClamp(value: unknown, fallback: number, minimum: number, maximum: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? clamp(value, minimum, maximum) : fallback;
+}
+
+function safeText(value: unknown, fallback: string, maximumLength: number): string {
+  if (typeof value !== "string") return fallback;
+  const normalized = value.replace(/[\u0000-\u001f\u007f]/gu, "").trim().slice(0, maximumLength);
+  return normalized || fallback;
+}
+
+function validLanguage(value: unknown, allowAuto: boolean): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (allowAuto && normalized === "auto") return normalized;
+  return /^[a-z]{2,3}(?:-[a-z0-9]{2,8}){0,2}$/u.test(normalized) ? normalized : undefined;
+}
+
+function safeColor(value: unknown, fallback: string): string {
+  return typeof value === "string" && /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/iu.test(value) ? value : fallback;
+}
+
+function safePalette<T extends object>(defaults: T, ...candidates: Array<Partial<T> | undefined>): T {
+  const result = { ...defaults };
+  for (const candidate of candidates) {
+    if (!isPlainObject(candidate)) continue;
+    for (const key of Object.keys(defaults) as Array<keyof T>) {
+      const current = result[key];
+      result[key] = safeColor(candidate[key], typeof current === "string" ? current : "#000000") as T[keyof T];
+    }
+  }
+  return result;
 }

@@ -4,11 +4,9 @@
   import { invoke, isTauri } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import type { ModelReadiness, SessionState, SpeakerProfile, SubtitlePreset, SubtitleSegment } from "./contracts";
-  import { EMPTY_SESSION } from "./contracts";
-  import { FIXTURE_EVENTS } from "./fixtures";
-  import { formatTime, reduceSession } from "./session";
+  import { formatTime } from "./session";
   import { applyPreferenceAction, preferencePatchBetween } from "./preferences";
-  import { loadPreferences, savePreferencePatch, subscribePreferences, subscribeSession } from "./runtime";
+  import { initialSession, loadPreferences, maintainSubscription, savePreferencePatch, subscribePreferences, subscribeSession } from "./runtime";
   import type { PreferencePatch } from "./preferences";
   import { errorMessage, startFileSession, startLiveSession } from "./sessionLaunch";
   import SubtitleStylePreview from "./SubtitleStylePreview.svelte";
@@ -21,7 +19,7 @@
   ] as const;
   const PRESETS: SubtitlePreset[] = ["clean", "classic-outline", "yellow-drop", "fallout", "momento", "wired"];
 
-  let session = $state<SessionState>(FIXTURE_EVENTS.reduce(reduceSession, structuredClone(EMPTY_SESSION)));
+  let session = $state<SessionState>(initialSession());
   let preferences = $state(loadPreferences());
   let apiReady = $state(false);
   let liveReady = $state(false);
@@ -70,8 +68,14 @@
       document.fonts.load('400 18px "Share Tech Mono"', "FALLOUT SUBTITLE PREVIEW"),
     ]);
     const cleanup: Array<() => void> = [];
-    void subscribeSession((value) => session = value).then((unlisten) => cleanup.push(unlisten));
-    void subscribePreferences((value) => preferences = value).then((unlisten) => cleanup.push(unlisten));
+    cleanup.push(maintainSubscription(
+      () => subscribeSession((value) => session = value),
+      (message) => { if (message) mediaMessage = message; },
+    ));
+    cleanup.push(maintainSubscription(
+      () => subscribePreferences((value) => preferences = value),
+      (message) => { if (message) mediaMessage = message; },
+    ));
     if (isTauri()) {
       void invoke<{ present: boolean }>("api_key_status").then((status) => {
         onboarding = !status.present;
@@ -175,7 +179,7 @@
   }
 
   async function updateSpeaker(speaker: SpeakerProfile) {
-    if (isTauri()) await invoke("update_speaker", { speaker });
+    if (isTauri()) await invoke("update_speaker", { sessionId: session.sessionId, speaker });
     else session.speakers[speaker.id] = speaker;
   }
 

@@ -9,7 +9,7 @@ NonoSub is verified on Apple Silicon macOS. File mode is the guaranteed submissi
 3. Keep Source on **Auto-detect**, Subtitles on **English**, and Nono explains in **English**.
 4. Choose **Open MP4 or MOV** and select `demo/NonoSubIndirectRefusalDemo.mp4` from the repository.
 5. Wait for translated coverage, then watch the six-turn conversation in the minimal viewer.
-6. Click `今日はちょっと……`, choose **What is omitted?**, and ask why the incomplete phrase functions as a polite refusal.
+6. Right-click `今日はちょっと……`, choose **What is omitted?**, and ask why the incomplete phrase functions as a polite refusal.
 7. Return to the workbench to rename a speaker, change a speaker color, or try the six subtitle presets.
 
 For the reverse-direction path, set Subtitles to **Japanese** and open `demo/NonoSubEnglishFixture.mp4`. Changing a file target reuses its transcript and does not retranscribe the media.
