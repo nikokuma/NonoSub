@@ -17,7 +17,7 @@ use contracts::{
 };
 use serde::Serialize;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -33,6 +33,53 @@ use tauri::{
 const KEYRING_SERVICE: &str = "com.nono.nonosub";
 const KEYRING_ACCOUNT: &str = "openai-api-key";
 const API_KEY_MARKER: &str = "api-key-configured";
+const MAX_RECOVERABLE_ERRORS: usize = 50;
+const MAX_LESSON_CACHE_ENTRIES: usize = 128;
+const MAX_LESSON_THREAD_MESSAGES: usize = 32;
+
+#[derive(Debug)]
+struct BoundedLessonCache {
+    entries: HashMap<String, LessonCard>,
+    recency: VecDeque<String>,
+    capacity: usize,
+}
+
+impl Default for BoundedLessonCache {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            recency: VecDeque::new(),
+            capacity: MAX_LESSON_CACHE_ENTRIES,
+        }
+    }
+}
+
+impl BoundedLessonCache {
+    fn get(&mut self, key: &str) -> Option<LessonCard> {
+        let card = self.entries.get(key).cloned()?;
+        self.recency.retain(|existing| existing != key);
+        self.recency.push_back(key.to_owned());
+        Some(card)
+    }
+
+    fn insert(&mut self, key: String, card: LessonCard) {
+        self.recency.retain(|existing| existing != &key);
+        self.entries.insert(key.clone(), card);
+        self.recency.push_back(key);
+        while self.entries.len() > self.capacity {
+            if let Some(oldest) = self.recency.pop_front() {
+                self.entries.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.recency.clear();
+    }
+}
 
 #[derive(Debug)]
 struct AppState {
@@ -44,7 +91,7 @@ struct AppState {
     retranslations: RetranslationCoordinator,
     canonical: Mutex<SessionSnapshot>,
     preferences: Mutex<Option<CanonicalPreferences>>,
-    lesson_cache: Mutex<HashMap<String, LessonCard>>,
+    lesson_cache: Mutex<BoundedLessonCache>,
     lesson_selection_sequence: AtomicU64,
     launcher_mode: Mutex<String>,
     lesson_open_context: Mutex<Option<LessonOpenContext>>,
@@ -65,7 +112,7 @@ impl Default for AppState {
             retranslations: RetranslationCoordinator::default(),
             canonical: Mutex::new(SessionSnapshot::default()),
             preferences: Mutex::new(None),
-            lesson_cache: Mutex::new(HashMap::new()),
+            lesson_cache: Mutex::new(BoundedLessonCache::default()),
             lesson_selection_sequence: AtomicU64::new(0),
             launcher_mode: Mutex::new("file".into()),
             lesson_open_context: Mutex::new(None),
@@ -1077,6 +1124,14 @@ async fn request_lesson(
     if question.trim().is_empty() {
         return Err(service_error("Ask Nono a question first."));
     }
+    let thread = thread
+        .into_iter()
+        .rev()
+        .take(MAX_LESSON_THREAD_MESSAGES)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
     let material = current_lesson_material(state.inner(), selection_id)?;
     let normalized_question = question.trim();
     let cache_key = lesson_cache_key(
@@ -1094,7 +1149,6 @@ async fn request_lesson(
         .lock()
         .map_err(|_| service_error("Lesson cache is unavailable."))?
         .get(&cache_key)
-        .cloned()
     {
         return validate_lesson_response_selection(card, &material.selected.id);
     }
@@ -1342,25 +1396,31 @@ async fn completed_file_snapshot(
         let state = app.state::<AppState>();
         state.runs.lease(lease.session_generation)?;
         state.retranslations.ensure_current(lease)?;
-        let snapshot = state
-            .canonical
-            .lock()
-            .map_err(|_| service_error("Session state is unavailable."))?
-            .clone();
-        if snapshot.session_id != format!("session-{}", lease.session_generation) {
-            return Err(cancelled_error());
-        }
-        if let Some(message) = snapshot.fatal_error.as_ref() {
-            return Err(service_error(&format!(
-                "The file session could not finish before retranslation: {message}"
-            )));
-        }
-        if snapshot.phase == "complete" {
-            if snapshot.mode != Some(SessionMode::File)
-                || snapshot.processing_mode != CaptionProcessingMode::Translated
-            {
+        let completed = {
+            let snapshot = state
+                .canonical
+                .lock()
+                .map_err(|_| service_error("Session state is unavailable."))?;
+            if snapshot.session_id != format!("session-{}", lease.session_generation) {
                 return Err(cancelled_error());
             }
+            if let Some(message) = snapshot.fatal_error.as_ref() {
+                return Err(service_error(&format!(
+                    "The file session could not finish before retranslation: {message}"
+                )));
+            }
+            if snapshot.phase == "complete" {
+                if snapshot.mode != Some(SessionMode::File)
+                    || snapshot.processing_mode != CaptionProcessingMode::Translated
+                {
+                    return Err(cancelled_error());
+                }
+                Some(snapshot.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(snapshot) = completed {
             return Ok(snapshot);
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1980,6 +2040,21 @@ pub(crate) fn record_event(
         .map_err(|error| service_error(&format!("Could not update subtitle windows: {error}")))
 }
 
+fn upsert_ordered_segment(segments: &mut Vec<SubtitleSegment>, segment: SubtitleSegment) {
+    if let Some(index) = segments.iter().position(|existing| existing.id == segment.id) {
+        segments.remove(index);
+    }
+    let insertion = segments
+        .binary_search_by(|existing| {
+            existing
+                .start_ms
+                .cmp(&segment.start_ms)
+                .then_with(|| existing.id.cmp(&segment.id))
+        })
+        .unwrap_or_else(|index| index);
+    segments.insert(insertion, segment);
+}
+
 fn apply_event(snapshot: &mut SessionSnapshot, event: &SessionEvent) {
     match event {
         SessionEvent::SessionReset {
@@ -1996,11 +2071,7 @@ fn apply_event(snapshot: &mut SessionSnapshot, event: &SessionEvent) {
         SessionEvent::PhaseChanged { phase } => snapshot.phase = phase.clone(),
         SessionEvent::CaptionUpserted { segment }
         | SessionEvent::TranscriptFinalized { segment } => {
-            snapshot
-                .segments
-                .retain(|existing| existing.id != segment.id);
-            snapshot.segments.push(segment.clone());
-            snapshot.segments.sort_by_key(|segment| segment.start_ms);
+            upsert_ordered_segment(&mut snapshot.segments, segment.clone());
         }
         SessionEvent::TranslationFinalized {
             segment_id,
@@ -2046,7 +2117,13 @@ fn apply_event(snapshot: &mut SessionSnapshot, event: &SessionEvent) {
         SessionEvent::LessonSelected { segment_id } => {
             snapshot.selected_segment_id = segment_id.clone()
         }
-        SessionEvent::RecoverableError { error } => snapshot.errors.push(error.clone()),
+        SessionEvent::RecoverableError { error } => {
+            snapshot.errors.push(error.clone());
+            if snapshot.errors.len() > MAX_RECOVERABLE_ERRORS {
+                let excess = snapshot.errors.len() - MAX_RECOVERABLE_ERRORS;
+                snapshot.errors.drain(..excess);
+            }
+        }
         SessionEvent::FatalError { message } => snapshot.fatal_error = Some(message.clone()),
         SessionEvent::Complete => snapshot.phase = "complete".into(),
     }
@@ -2942,6 +3019,46 @@ mod tests {
         let error = validate_lesson_response_selection(card, "segment-1").unwrap_err();
         assert_eq!(error.kind, openai::ApiErrorKind::MalformedResponse);
         assert!(error.retryable);
+    }
+
+    #[test]
+    fn lesson_cache_evicts_the_least_recently_used_entry() {
+        let card = |id: &str| LessonCard {
+            schema_version: 2,
+            selected_segment_id: id.into(),
+            moments: Vec::new(),
+            suggested_follow_ups: Vec::new(),
+        };
+        let mut cache = BoundedLessonCache {
+            capacity: 2,
+            ..BoundedLessonCache::default()
+        };
+        cache.insert("one".into(), card("one"));
+        cache.insert("two".into(), card("two"));
+        assert!(cache.get("one").is_some());
+        cache.insert("three".into(), card("three"));
+        assert!(cache.get("one").is_some());
+        assert!(cache.get("two").is_none());
+        assert!(cache.get("three").is_some());
+    }
+
+    #[test]
+    fn canonical_recoverable_errors_are_bounded() {
+        let mut snapshot = SessionSnapshot::default();
+        for index in 0..75 {
+            apply_event(
+                &mut snapshot,
+                &SessionEvent::RecoverableError {
+                    error: RecoverableError {
+                        code: format!("error-{index}"),
+                        message: "recoverable".into(),
+                        segment_id: None,
+                    },
+                },
+            );
+        }
+        assert_eq!(snapshot.errors.len(), MAX_RECOVERABLE_ERRORS);
+        assert_eq!(snapshot.errors[0].code, "error-25");
     }
 
     #[test]

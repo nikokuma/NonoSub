@@ -48,9 +48,50 @@ const MAX_CAPTURE_CLAUSE_MS: u64 = 10_000;
 const MAX_CLAUSE_GRAPHEMES: usize = 220;
 const CLAUSE_PAIR_TOLERANCE_MS: u64 = 1_000;
 const SOURCE_FALLBACK_MS: u64 = 6_000;
+const MAX_RECENT_EVENT_IDS: usize = 2_048;
+const MAX_RETAINED_LIVE_UNITS: usize = 256;
+const MAX_RETAINED_LIVE_MS: u64 = 120_000;
 type RealtimeSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 type RealtimeWriter = SplitSink<RealtimeSocket, Message>;
 type RealtimeReader = SplitStream<RealtimeSocket>;
+
+#[derive(Debug)]
+struct RecentEventIds {
+    set: HashSet<String>,
+    order: VecDeque<String>,
+    capacity: usize,
+}
+
+impl Default for RecentEventIds {
+    fn default() -> Self {
+        Self {
+            set: HashSet::new(),
+            order: VecDeque::new(),
+            capacity: MAX_RECENT_EVENT_IDS,
+        }
+    }
+}
+
+impl RecentEventIds {
+    fn insert(&mut self, id: &str) -> bool {
+        if self.set.contains(id) {
+            return false;
+        }
+        self.set.insert(id.to_owned());
+        self.order.push_back(id.to_owned());
+        while self.order.len() > self.capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.set.remove(&oldest);
+            }
+        }
+        true
+    }
+
+    fn clear(&mut self) {
+        self.set.clear();
+        self.order.clear();
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct LiveState {
@@ -330,7 +371,7 @@ struct CaptionCoordinator {
     translation_pair_cursor: usize,
     translation_group_units: HashMap<u64, usize>,
     paired_source_groups: HashSet<u64>,
-    seen_event_ids: HashSet<String>,
+    seen_event_ids: RecentEventIds,
     lag: LagEstimator,
     display_cursor_ms: u64,
     visible_segment_id: Option<String>,
@@ -355,7 +396,7 @@ impl CaptionCoordinator {
             translation_pair_cursor: 0,
             translation_group_units: HashMap::new(),
             paired_source_groups: HashSet::new(),
-            seen_event_ids: HashSet::new(),
+            seen_event_ids: RecentEventIds::default(),
             lag: LagEstimator::default(),
             display_cursor_ms: 0,
             visible_segment_id: None,
@@ -408,7 +449,7 @@ impl CaptionCoordinator {
 
     fn accept(&mut self, event_id: &Option<String>) -> bool {
         match event_id {
-            Some(id) if !id.is_empty() => self.seen_event_ids.insert(id.clone()),
+            Some(id) if !id.is_empty() => self.seen_event_ids.insert(id),
             _ => false,
         }
     }
@@ -906,11 +947,120 @@ impl CaptionCoordinator {
             },
             visible_segment_id: self.visible_segment_id.clone(),
         };
-        if self.last_emitted_sync.as_ref() == Some(&sync) {
+        let events = if self.last_emitted_sync.as_ref() == Some(&sync) {
             Vec::new()
         } else {
             self.last_emitted_sync = Some(sync.clone());
             vec![SessionEvent::LiveSyncChanged { sync }]
+        };
+        self.prune_history(capture_clock_ms);
+        events
+    }
+
+    fn prune_history(&mut self, capture_clock_ms: u64) {
+        let cutoff = capture_clock_ms.saturating_sub(MAX_RETAINED_LIVE_MS);
+        let mut remove_drafts = 0;
+        while remove_drafts < self.drafts.len() {
+            let draft = &self.drafts[remove_drafts];
+            let outside_time_window = draft.end_ms < cutoff;
+            let outside_count_window = self.drafts.len() - remove_drafts > MAX_RETAINED_LIVE_UNITS;
+            let translation_settled = draft.translation_closed
+                || (draft.translation.is_empty()
+                    && draft.source_closed_at_ms.is_some_and(|closed| {
+                        capture_clock_ms.saturating_sub(closed) >= SOURCE_FALLBACK_MS
+                    }));
+            if (!outside_time_window && !outside_count_window)
+                || !draft.source_closed
+                || !translation_settled
+                || self.visible_segment_id.as_deref() == Some(draft.id.as_str())
+            {
+                break;
+            }
+            remove_drafts += 1;
+        }
+        if remove_drafts == 0 {
+            return;
+        }
+
+        self.drafts.drain(..remove_drafts);
+        self.translation_pair_cursor = self.translation_pair_cursor.saturating_sub(remove_drafts);
+        for draft in &mut self.drafts {
+            draft.source_origin_unit = draft
+                .source_origin_unit
+                .and_then(|index| index.checked_sub(remove_drafts));
+        }
+        for clause in &mut self.source_clauses {
+            clause.unit_index = clause
+                .unit_index
+                .and_then(|index| index.checked_sub(remove_drafts));
+        }
+        for clause in &mut self.translation_clauses {
+            clause.unit_index = clause
+                .unit_index
+                .and_then(|index| index.checked_sub(remove_drafts));
+        }
+        self.translation_group_units.retain(|_, unit| {
+            if let Some(adjusted) = unit.checked_sub(remove_drafts) {
+                *unit = adjusted;
+                true
+            } else {
+                false
+            }
+        });
+        self.paired_source_groups = self
+            .drafts
+            .iter()
+            .filter(|draft| draft.translation_clause.is_some())
+            .map(|draft| draft.source_group_id)
+            .collect();
+
+        let mut source_map = vec![None; self.source_clauses.len()];
+        let mut retained_sources = Vec::new();
+        for (index, clause) in self.source_clauses.drain(..).enumerate() {
+            if clause.unit_index.is_some()
+                || self.active_source_clause == Some(index)
+                || !clause.closed
+            {
+                source_map[index] = Some(retained_sources.len());
+                retained_sources.push(clause);
+            }
+        }
+        self.source_clauses = retained_sources;
+        self.active_source_clause = self
+            .active_source_clause
+            .and_then(|index| source_map.get(index).copied().flatten());
+
+        let unpaired = self
+            .unpaired_translation_clauses
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        let mut translation_map = vec![None; self.translation_clauses.len()];
+        let mut retained_translations = Vec::new();
+        for (index, clause) in self.translation_clauses.drain(..).enumerate() {
+            let recent_unpaired = unpaired.contains(&index)
+                && (!clause.closed || clause.end_ms >= cutoff);
+            if clause.unit_index.is_some()
+                || self.active_translation_clause == Some(index)
+                || recent_unpaired
+            {
+                translation_map[index] = Some(retained_translations.len());
+                retained_translations.push(clause);
+            }
+        }
+        self.translation_clauses = retained_translations;
+        self.active_translation_clause = self
+            .active_translation_clause
+            .and_then(|index| translation_map.get(index).copied().flatten());
+        self.unpaired_translation_clauses = self
+            .unpaired_translation_clauses
+            .drain(..)
+            .filter_map(|index| translation_map.get(index).copied().flatten())
+            .collect();
+        for draft in &mut self.drafts {
+            draft.translation_clause = draft
+                .translation_clause
+                .and_then(|index| translation_map.get(index).copied().flatten());
         }
     }
 
@@ -959,14 +1109,14 @@ impl CaptionCoordinator {
 #[derive(Debug, Default)]
 struct TranscriptionCoordinator {
     segments: HashMap<String, SubtitleSegment>,
-    seen_event_ids: HashSet<String>,
+    seen_event_ids: RecentEventIds,
     next_segment: u64,
 }
 
 impl TranscriptionCoordinator {
     fn accept(&mut self, event_id: &Option<String>) -> bool {
         match event_id {
-            Some(id) if !id.is_empty() => self.seen_event_ids.insert(id.clone()),
+            Some(id) if !id.is_empty() => self.seen_event_ids.insert(id),
             _ => true,
         }
     }
@@ -1043,11 +1193,14 @@ impl TranscriptionCoordinator {
         segment.end_ms = capture_clock_ms.max(segment.start_ms.saturating_add(250));
         segment.is_provisional = false;
         segment.transcription_status = SegmentStatus::Complete;
+        let finalized = segment.clone();
+        let sync_id = finalized.id.clone();
+        self.segments.remove(&item_id);
         vec![
             SessionEvent::TranscriptFinalized {
-                segment: segment.clone(),
+                segment: finalized,
             },
-            Self::sync(segment.id.clone()),
+            Self::sync(sync_id),
         ]
     }
 
@@ -2665,5 +2818,49 @@ mod tests {
                 .any(|action| matches!(action, TranscriptionAudioAction::Commit));
         }
         assert!(committed);
+    }
+
+    #[test]
+    fn recent_event_identity_is_bounded() {
+        let mut ids = RecentEventIds {
+            capacity: 3,
+            ..RecentEventIds::default()
+        };
+        assert!(ids.insert("one"));
+        assert!(ids.insert("two"));
+        assert!(ids.insert("three"));
+        assert!(!ids.insert("three"));
+        assert!(ids.insert("four"));
+        assert_eq!(ids.order.iter().cloned().collect::<Vec<_>>(), ["two", "three", "four"]);
+        assert!(ids.insert("one"), "an evicted event can be accepted in a later epoch window");
+    }
+
+    #[test]
+    fn live_clause_pairing_history_stays_within_retention_window() {
+        let mut coordinator = CaptionCoordinator::new(LiveSyncMode::Coordinated);
+        for index in 0..320_u64 {
+            let clock = index * 1_000;
+            coordinator.on_source(
+                TimedText {
+                    event_id: Some(format!("source-{index}")),
+                    text: format!("Source {index}."),
+                    elapsed_ms: Some(clock),
+                },
+                clock,
+            );
+            coordinator.on_translation(
+                TimedText {
+                    event_id: Some(format!("target-{index}")),
+                    text: format!("Target {index}."),
+                    elapsed_ms: Some(clock),
+                },
+                clock,
+            );
+            coordinator.tick(clock + TERMINAL_QUIET_MS);
+        }
+        coordinator.tick(320_000);
+        assert!(coordinator.drafts.len() <= MAX_RETAINED_LIVE_UNITS);
+        assert!(coordinator.source_clauses.len() <= MAX_RETAINED_LIVE_UNITS);
+        assert!(coordinator.translation_clauses.len() <= MAX_RETAINED_LIVE_UNITS);
     }
 }

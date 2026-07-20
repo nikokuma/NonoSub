@@ -216,3 +216,12 @@
 - Reserved left pointer input for subtitle dragging and made right-click the only overlay path into Ask Nono, while retaining macOS Look Up suppression.
 - Removed the blind external-media close toggle. A successful experimental pause now exposes an explicit Resume External Media action and never guesses the external player's state on close.
 - Full verification passes with zero Svelte errors or warnings, 123 frontend tests, a successful production build, 95 Rust tests, and warning-free clippy.
+
+## July 20 — Bounded long sessions
+
+- Replaced full-file float audio staging with incremental channel mixing and stateful linear resampling directly into the final 16 kHz PCM16 buffer. Local videos over four hours now fail with a clear preparation error.
+- Kept the canonical current-session transcript complete while limiting the Settings & Transcript DOM to the newest 200 lines, with explicit 200-line Load Earlier batches.
+- Replaced filter-plus-sort subtitle updates with ID replacement and ordered insertion in both Rust and TypeScript.
+- Added hard bounds for recoverable errors, the structured lesson LRU, hidden lesson input, realtime event identities, and recent live clause/pairing history. Finalized original-only drafts are removed from the coordinator after canonical emission.
+- Changed file retranslation waiting to inspect lightweight phase/status fields and clone the canonical snapshot only once, after the source session is complete.
+- Full verification passes with zero Svelte errors or warnings, 128 frontend tests, a successful production build, 101 Rust tests, and warning-free clippy.

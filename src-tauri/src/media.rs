@@ -11,11 +11,92 @@ use symphonia::core::{
 };
 
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;
+pub const MAX_MEDIA_DURATION_SECONDS: u64 = 4 * 60 * 60;
 
 #[derive(Debug, Clone)]
 pub struct DecodedAudio {
     pub samples: Vec<i16>,
     pub sample_rate: u32,
+}
+
+#[derive(Debug)]
+struct StreamingLinearResampler {
+    source_rate: u32,
+    target_rate: u32,
+    input_len: u64,
+    next_output: u64,
+    previous: Option<f32>,
+    samples: Vec<i16>,
+}
+
+impl StreamingLinearResampler {
+    fn new(source_rate: u32, target_rate: u32) -> Self {
+        Self {
+            source_rate,
+            target_rate,
+            input_len: 0,
+            next_output: 0,
+            previous: None,
+            samples: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, sample: f32) {
+        if self.source_rate == 0 || self.target_rate == 0 {
+            return;
+        }
+        let current_index = self.input_len;
+        self.input_len = self.input_len.saturating_add(1);
+        if self.source_rate == self.target_rate {
+            self.samples.push(pcm16(sample));
+            self.previous = Some(sample);
+            self.next_output = self.next_output.saturating_add(1);
+            return;
+        }
+        let Some(previous) = self.previous.replace(sample) else {
+            if self.next_output == 0 {
+                self.samples.push(pcm16(sample));
+                self.next_output = 1;
+            }
+            return;
+        };
+        while self.next_output.saturating_mul(self.source_rate as u64)
+            <= current_index.saturating_mul(self.target_rate as u64)
+        {
+            let position = self.next_output as f64 * self.source_rate as f64
+                / self.target_rate as f64;
+            let fraction = (position - (current_index - 1) as f64).clamp(0.0, 1.0) as f32;
+            self.samples
+                .push(pcm16(previous * (1.0 - fraction) + sample * fraction));
+            self.next_output = self.next_output.saturating_add(1);
+        }
+    }
+
+    fn finish(mut self) -> Vec<i16> {
+        let output_len = self
+            .input_len
+            .saturating_mul(self.target_rate as u64)
+            / self.source_rate.max(1) as u64;
+        if let Some(last) = self.previous {
+            while self.next_output < output_len {
+                self.samples.push(pcm16(last));
+                self.next_output += 1;
+            }
+        }
+        self.samples
+    }
+}
+
+fn pcm16(sample: f32) -> i16 {
+    (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16
+}
+
+fn ensure_duration_limit(decoded_frames: u64, sample_rate: u32) -> Result<(), String> {
+    if decoded_frames > u64::from(sample_rate).saturating_mul(MAX_MEDIA_DURATION_SECONDS) {
+        Err("NonoSub supports local videos up to four hours long.".into())
+    } else {
+        Ok(())
+    }
 }
 
 pub fn needs_macos_playback_proxy(path: &Path) -> Result<bool, String> {
@@ -72,7 +153,8 @@ pub fn decode_to_mono_16k(path: &Path) -> Result<DecodedAudio, String> {
         .map_err(|error| {
             format!("Unsupported audio codec (AAC is required for the MVP): {error}")
         })?;
-    let mut mono = Vec::<f32>::new();
+    let mut resampler = StreamingLinearResampler::new(source_rate, TARGET_SAMPLE_RATE);
+    let mut decoded_frames = 0_u64;
 
     loop {
         let packet = match format.next_packet() {
@@ -95,24 +177,23 @@ pub fn decode_to_mono_16k(path: &Path) -> Result<DecodedAudio, String> {
         let mut interleaved = vec![f32::MID; decoded.samples_interleaved()];
         decoded.copy_to_slice_interleaved(&mut interleaved);
         for frame in interleaved.chunks_exact(channels) {
-            mono.push(frame.iter().sum::<f32>() / channels as f32);
+            decoded_frames = decoded_frames.saturating_add(1);
+            ensure_duration_limit(decoded_frames, source_rate)?;
+            resampler.push(frame.iter().sum::<f32>() / channels as f32);
         }
     }
 
-    if mono.is_empty() {
+    if decoded_frames == 0 {
         return Err("No audio samples could be decoded from this file.".into());
     }
-    let resampled = resample_linear(&mono, source_rate, TARGET_SAMPLE_RATE);
-    let samples = resampled
-        .into_iter()
-        .map(|sample| (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16)
-        .collect();
+    let samples = resampler.finish();
     Ok(DecodedAudio {
         samples,
         sample_rate: TARGET_SAMPLE_RATE,
     })
 }
 
+#[cfg(test)]
 pub fn resample_linear(input: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32> {
     if input.is_empty() || source_rate == 0 || target_rate == 0 {
         return Vec::new();
@@ -163,6 +244,32 @@ mod tests {
         assert_eq!(output.len(), 8);
         assert!((output[2] - 0.5).abs() < 0.001);
         assert_eq!(*output.last().unwrap(), 0.5);
+    }
+
+    #[test]
+    fn streaming_resampler_matches_batch_output_across_packet_boundaries() {
+        let source = [0.0, 0.5, 1.0, 0.25, -0.5, -1.0, 0.75];
+        let expected = resample_linear(&source, 7, 11)
+            .into_iter()
+            .map(pcm16)
+            .collect::<Vec<_>>();
+        let mut streaming = StreamingLinearResampler::new(7, 11);
+        for packet in source.chunks(2) {
+            for sample in packet {
+                streaming.push(*sample);
+            }
+        }
+        assert_eq!(streaming.finish(), expected);
+    }
+
+    #[test]
+    fn four_hour_limit_is_inclusive() {
+        let maximum = u64::from(48_000_u32) * MAX_MEDIA_DURATION_SECONDS;
+        assert!(ensure_duration_limit(maximum, 48_000).is_ok());
+        assert_eq!(
+            ensure_duration_limit(maximum + 1, 48_000).unwrap_err(),
+            "NonoSub supports local videos up to four hours long."
+        );
     }
 
     #[test]

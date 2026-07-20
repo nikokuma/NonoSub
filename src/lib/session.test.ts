@@ -46,6 +46,33 @@ describe("session contract", () => {
     expect(latestLiveSegments(withFinal.segments)).toEqual([finalized]);
   });
 
+  it("inserts and replaces segments without reordering equal timestamps unpredictably", () => {
+    const late = { ...FIXTURE_SEGMENTS[0], id: "late", startMs: 3_000 };
+    const early = { ...FIXTURE_SEGMENTS[0], id: "early", startMs: 1_000 };
+    const middle = { ...FIXTURE_SEGMENTS[0], id: "middle", startMs: 2_000 };
+    let state = { ...EMPTY_SESSION, segments: [early, late] };
+    state = reduceSession(state, { type: "caption_upserted", segment: middle });
+    state = reduceSession(state, {
+      type: "transcript_finalized",
+      segment: { ...middle, sourceText: "final" },
+    });
+    expect(state.segments.map((segment) => segment.id)).toEqual(["early", "middle", "late"]);
+    expect(state.segments[1].sourceText).toBe("final");
+  });
+
+  it("retains only the newest fifty recoverable errors", () => {
+    let state = EMPTY_SESSION;
+    for (let index = 0; index < 75; index += 1) {
+      state = reduceSession(state, {
+        type: "recoverable_error",
+        error: { code: `error-${index}`, message: "recoverable" },
+      });
+    }
+    expect(state.errors).toHaveLength(50);
+    expect(state.errors[0].code).toBe("error-25");
+    expect(state.errors.at(-1)?.code).toBe("error-74");
+  });
+
   it("updates a reconciled file boundary in place without orphaning selection", () => {
     const original = {
       ...FIXTURE_SEGMENTS[0],

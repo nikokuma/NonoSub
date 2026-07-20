@@ -522,7 +522,7 @@ The July 18 independent review found release-blocking correctness and containmen
 - [x] R8 — Repair multi-window snapshot ordering and preference patching. Focused plan: `docs/plans/MULTI_WINDOW_STATE_CONVERGENCE.md`.
 - [x] R9 — Pin lesson identity and correct cache/placement behavior. Focused plan: `docs/plans/PINNED_LESSON_IDENTITY.md`.
 - [x] R10 — Introduce explicit file and external-media playback ownership.
-- [ ] R11 — Bound long-session coordinator, event, error, and transcript-rendering costs.
+- [x] R11 — Bound long-session coordinator, event, error, and transcript-rendering costs.
 - [ ] R12 — Preserve file/live media timing across decode and send failures.
 - [ ] R13 — Complete audit cleanup, bundle smoke testing, and final acceptance.
 
@@ -542,6 +542,8 @@ R8 verification: `pnpm verify` passed with zero Svelte errors or warnings, 89 fr
 R9 verification: `pnpm verify` passed with zero Svelte errors or warnings, 92 frontend tests, a successful production build, 92 Rust tests, and warning-free clippy.
 
 R10 verification: `pnpm verify` passed with zero Svelte errors or warnings, 123 frontend tests, a successful production build, 95 Rust tests, and warning-free clippy. File playback now uses a session/media/selection/revision-bound pause lease; subtitle lesson activation is right-click-only; stale or invalidated closes cannot resume playback; experimental external pause never posts a blind close toggle and instead offers an explicit resume action.
+
+R11 verification: `pnpm verify` passed with zero Svelte errors or warnings, 128 frontend tests, a successful production build, 101 Rust tests, and warning-free clippy. Local audio conversion is incremental and rejects files over four hours; transcript rendering pages the newest 200 lines; segment upserts avoid full-array sorting; errors, lesson cache/thread input, realtime event identities, and live pairing history are bounded; completed original-only drafts are released; and file retranslation clones canonical state only after completion.
 
 ## Checkpoints and decisions
 

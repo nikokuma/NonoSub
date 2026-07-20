@@ -1,6 +1,27 @@
 import { DEFAULT_LIVE_SYNC } from "./contracts";
 import type { LiveSyncState, SequencedSessionEvent, SessionEvent, SessionState, SubtitleSegment } from "./contracts";
 
+const MAX_RECOVERABLE_ERRORS = 50;
+
+function compareSegments(left: SubtitleSegment, right: SubtitleSegment): number {
+  return left.startMs - right.startMs || left.id.localeCompare(right.id);
+}
+
+export function upsertOrderedSegment(segments: SubtitleSegment[], segment: SubtitleSegment): SubtitleSegment[] {
+  const next = segments.slice();
+  const existing = next.findIndex((candidate) => candidate.id === segment.id);
+  if (existing >= 0) next.splice(existing, 1);
+  let low = 0;
+  let high = next.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (compareSegments(next[middle], segment) <= 0) low = middle + 1;
+    else high = middle;
+  }
+  next.splice(low, 0, segment);
+  return next;
+}
+
 export function reduceSession(state: SessionState, event: SessionEvent): SessionState {
   switch (event.type) {
     case "session_reset":
@@ -24,8 +45,7 @@ export function reduceSession(state: SessionState, event: SessionEvent): Session
       return { ...state, speakers: { ...state.speakers, [event.speaker.id]: event.speaker } };
     case "caption_upserted":
     case "transcript_finalized": {
-      const segments = [...state.segments.filter((segment) => segment.id !== event.segment.id), event.segment]
-        .sort((left, right) => left.startMs - right.startMs);
+      const segments = upsertOrderedSegment(state.segments, event.segment);
       return { ...state, segments };
     }
     case "translation_finalized":
@@ -60,7 +80,7 @@ export function reduceSession(state: SessionState, event: SessionEvent): Session
     case "lesson_selected":
       return { ...state, selectedSegmentId: event.segmentId };
     case "recoverable_error":
-      return { ...state, errors: [...state.errors, event.error] };
+      return { ...state, errors: [...state.errors, event.error].slice(-MAX_RECOVERABLE_ERRORS) };
     case "fatal_error":
       return { ...state, fatalError: event.message };
     case "complete":
