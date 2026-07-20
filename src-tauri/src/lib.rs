@@ -1081,6 +1081,17 @@ fn validate_lesson_response_selection(
     }
 }
 
+async fn wait_for_lesson_retry(
+    state: &AppState,
+    selection_id: u64,
+) -> Result<(), openai::ApiError> {
+    for _ in 0..10 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        current_lesson_material(state, selection_id)?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lesson_cache_key(
     open_context: &LessonOpenContext,
@@ -1167,11 +1178,13 @@ async fn request_lesson(
         Ok(card) => match validate_lesson_response_selection(card, &material.selected.id) {
             Ok(card) => card,
             Err(_) => {
+                wait_for_lesson_retry(state.inner(), selection_id).await?;
                 let retry = client.lesson(&lesson_context).await?;
                 validate_lesson_response_selection(retry, &material.selected.id)?
             }
         },
         Err(error) if error.retryable => {
+            wait_for_lesson_retry(state.inner(), selection_id).await?;
             let retry = client.lesson(&lesson_context).await?;
             validate_lesson_response_selection(retry, &material.selected.id)?
         }
@@ -1458,11 +1471,12 @@ async fn run_file_retranslation(
             .lease(lease.session_generation)?;
         let start = batch_index * 6;
         let preceding_start = start.saturating_sub(80);
-        let outputs = pipeline::translate_batch_with_retry(
+        let outputs = pipeline::translate_batch_with_retry_cancelled(
             &client,
             &inputs[preceding_start..start],
             batch,
             &lease.languages,
+            Some(&lease.cancelled),
         )
         .await?;
         app.state::<AppState>()
@@ -1861,7 +1875,7 @@ async fn start_live_capture(
                 run.generation,
                 SessionEvent::RecoverableError {
                     error: RecoverableError {
-                        code: "live_start_failed".into(),
+                        code: live_start_error_code(&error).into(),
                         message: error.message.clone(),
                         segment_id: None,
                     },
@@ -1872,6 +1886,24 @@ async fn start_live_capture(
             }
             Err(error)
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn live_start_error_code(error: &openai::ApiError) -> &'static str {
+    let message = error.message.to_ascii_lowercase();
+    if error.kind == openai::ApiErrorKind::Cancelled {
+        "live_start_cancelled"
+    } else if message.contains("permission") || message.contains("screen recording") {
+        "capture_permission_denied"
+    } else if matches!(
+        error.kind,
+        openai::ApiErrorKind::Authentication | openai::ApiErrorKind::ModelUnavailable
+    ) || !error.retryable
+    {
+        "live_configuration_failed"
+    } else {
+        "live_start_failed"
     }
 }
 

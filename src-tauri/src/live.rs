@@ -96,6 +96,8 @@ impl RecentEventIds {
 #[derive(Debug, Default)]
 pub struct LiveState {
     cancelled: Arc<AtomicBool>,
+    start_sequence: std::sync::atomic::AtomicU64,
+    start_lock: tokio::sync::Mutex<()>,
     task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
 }
 
@@ -1227,13 +1229,20 @@ impl TranscriptionCoordinator {
 
 #[derive(Debug)]
 enum TranscriptionAudioAction {
-    Append(Vec<i16>),
+    Append(CapturedPcm),
     Commit,
+}
+
+#[derive(Debug, Clone)]
+struct CapturedPcm {
+    samples: Vec<i16>,
+    capture_start_sample: u64,
+    capture_end_sample: u64,
 }
 
 #[derive(Debug)]
 struct SpeechCommitter {
-    preroll: VecDeque<Vec<i16>>,
+    preroll: VecDeque<CapturedPcm>,
     active: bool,
     speech_frames: usize,
     quiet_frames: usize,
@@ -1255,8 +1264,8 @@ impl Default for SpeechCommitter {
 }
 
 impl SpeechCommitter {
-    fn push(&mut self, samples: Vec<i16>) -> Vec<TranscriptionAudioAction> {
-        let rms = rms(&samples);
+    fn push(&mut self, frame: CapturedPcm) -> Vec<TranscriptionAudioAction> {
+        let rms = rms(&frame.samples);
         let threshold = (self.noise_floor * 3.0).max(500.0);
         let speech = rms >= threshold;
         let mut actions = Vec::new();
@@ -1265,7 +1274,7 @@ impl SpeechCommitter {
             if !speech {
                 self.noise_floor = self.noise_floor * 0.96 + rms * 0.04;
             }
-            self.preroll.push_back(samples);
+            self.preroll.push_back(frame);
             while self.preroll.len() > 3 {
                 self.preroll.pop_front();
             }
@@ -1283,7 +1292,7 @@ impl SpeechCommitter {
 
         self.buffered_frames += 1;
         self.quiet_frames = if speech { 0 } else { self.quiet_frames + 1 };
-        actions.push(TranscriptionAudioAction::Append(samples));
+        actions.push(TranscriptionAudioAction::Append(frame));
         if (self.quiet_frames >= 4 && self.buffered_frames >= 6) || self.buffered_frames >= 30 {
             actions.push(TranscriptionAudioAction::Commit);
             self.active = false;
@@ -1383,7 +1392,10 @@ pub async fn start(
     processing_mode: CaptionProcessingMode,
     generation: u64,
 ) -> Result<(), ApiError> {
-    abort_previous(state);
+    let start_lease = state.start_sequence.fetch_add(1, Ordering::Relaxed) + 1;
+    abort_previous(state).await;
+    let _start_guard = state.start_lock.lock().await;
+    ensure_live_start_current(state, start_lease)?;
     state.cancelled.store(false, Ordering::Relaxed);
 
     let mut picker_config = SCContentSharingPickerConfiguration::new();
@@ -1394,13 +1406,14 @@ pub async fn start(
         SCContentSharingPickerMode::SingleWindow,
     ]);
     let picked = AsyncSCContentSharingPicker::show(&picker_config).await;
+    ensure_live_start_current(state, start_lease)?;
     let filter = match picked {
         SCPickerOutcome::Picked(result) => result.filter(),
         SCPickerOutcome::Cancelled => {
             return Err(ApiError {
-                kind: ApiErrorKind::Service,
+                kind: ApiErrorKind::Cancelled,
                 message: "Live caption selection was cancelled.".into(),
-                retryable: true,
+                retryable: false,
             })
         }
         SCPickerOutcome::Error(error) => {
@@ -1419,10 +1432,12 @@ pub async fn start(
 
     let (mut writer, mut reader) =
         connect_realtime(&api_key, &languages, &processing_mode, generation, 0).await?;
+    ensure_live_start_current(state, start_lease)?;
 
     stream.start_capture().await.map_err(|error| {
         capture_error(&format!("System audio capture could not start: {error}"))
     })?;
+    ensure_live_start_current(state, start_lease)?;
     let _ = record_event_for_generation(
         &app,
         generation,
@@ -1435,10 +1450,14 @@ pub async fn start(
     let task = tauri::async_runtime::spawn(async move {
         let original_only = processing_mode == CaptionProcessingMode::OriginalOnly;
         let mut pcm = Vec::<i16>::with_capacity(SEND_SAMPLES * 2);
+        let mut resampler = Pcm24Resampler::default();
+        let mut captured_input_samples_48k = 0_u64;
+        let mut pcm_front_capture_sample = 0_u64;
+        let mut transmission = TransmissionTimeline::default();
+        transmission.begin_epoch(0);
         let mut coordinator = CaptionCoordinator::new(sync_mode);
         let mut transcription = TranscriptionCoordinator::default();
         let mut speech_committer = SpeechCommitter::default();
-        let mut sent_samples = 0_u64;
         let mut ready = false;
         let mut tick = tokio::time::interval(Duration::from_millis(100));
         let mut closing = false;
@@ -1458,13 +1477,11 @@ pub async fn start(
                     Some(json!({ "type": "session.close" }))
                 };
                 if let Some(close_event) = close_event {
-                    let _ = writer
-                        .send(Message::Text(close_event.to_string().into()))
-                        .await;
+                    let _ = send_realtime(&mut writer, close_event).await;
                 }
             }
             if closed
-                || close_started.is_some_and(|started| started.elapsed() > Duration::from_secs(2))
+                || close_started.is_some_and(|started| started.elapsed() > Duration::from_secs(3))
             {
                 break;
             }
@@ -1474,7 +1491,10 @@ pub async fn start(
                     match sample {
                         Some(sample) => {
                             if let Some(list) = sample.audio_buffer_list() {
-                                for buffer in list.iter() { append_f32_48k_as_pcm16_24k(buffer.data(), &mut pcm); }
+                                for buffer in list.iter() {
+                                    captured_input_samples_48k = captured_input_samples_48k
+                                        .saturating_add(resampler.append_f32_48k(buffer.data(), &mut pcm));
+                                }
                             } else {
                                 emit_recoverable(&app, generation, "capture_buffer", "A system-audio buffer could not be read.");
                             }
@@ -1483,46 +1503,50 @@ pub async fn start(
                             {
                                 while pcm.len() >= SEND_SAMPLES {
                                     let samples: Vec<i16> = pcm.drain(..SEND_SAMPLES).collect();
+                                    let frame = CapturedPcm {
+                                        capture_start_sample: pcm_front_capture_sample,
+                                        capture_end_sample: pcm_front_capture_sample
+                                            .saturating_add(samples.len() as u64),
+                                        samples,
+                                    };
+                                    pcm_front_capture_sample = frame.capture_end_sample;
                                     let actions = if original_only {
-                                        speech_committer.push(samples)
+                                        speech_committer.push(frame)
                                     } else {
-                                        vec![TranscriptionAudioAction::Append(samples)]
+                                        vec![TranscriptionAudioAction::Append(frame)]
                                     };
                                     for action in actions {
-                                        let (event, appended_samples) = match action {
-                                            TranscriptionAudioAction::Append(samples) => {
-                                                let appended_samples = samples.len() as u64;
-                                                let mut bytes = Vec::with_capacity(samples.len() * 2);
-                                                for sample in samples { bytes.extend_from_slice(&sample.to_le_bytes()); }
+                                        let (event, frame) = match action {
+                                            TranscriptionAudioAction::Append(frame) => {
+                                                let mut bytes = Vec::with_capacity(frame.samples.len() * 2);
+                                                for sample in &frame.samples { bytes.extend_from_slice(&sample.to_le_bytes()); }
                                                 (json!({
                                                     "type": if original_only { "input_audio_buffer.append" } else { "session.input_audio_buffer.append" },
                                                     "audio": BASE64.encode(bytes)
-                                                }), appended_samples)
+                                                }), Some(frame))
                                             }
-                                            TranscriptionAudioAction::Commit => (json!({ "type": "input_audio_buffer.commit" }), 0),
+                                            TranscriptionAudioAction::Commit => (json!({ "type": "input_audio_buffer.commit" }), None),
                                         };
-                                        let sent = writer
-                                            .send(Message::Text(event.to_string().into()))
-                                            .await
-                                            .is_ok();
-                                        record_transmitted_samples(
-                                            &mut sent_samples,
-                                            appended_samples,
-                                            sent,
-                                        );
+                                        let sent = send_realtime(&mut writer, event).await;
+                                        if sent {
+                                            if let Some(frame) = frame.as_ref() {
+                                                transmission.record(frame);
+                                            }
+                                        }
                                         if !sent {
+                                            let captured_samples_24k = captured_input_samples_48k / 2;
+                                            let capture_ms = capture_clock_ms(captured_samples_24k);
+                                            close_for_transmission_gap(original_only, &app, generation, &mut transcription, &mut coordinator, capture_ms);
                                             if reconnect.claim(closing) {
                                                 let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
                                                 pcm.clear();
+                                                resampler = Pcm24Resampler::default();
+                                                pcm_front_capture_sample = captured_samples_24k;
                                                 if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &processing_mode, generation, 1).await {
                                                     writer = next_writer;
                                                     reader = next_reader;
-                                                    if original_only {
-                                                        emit_events(&app, generation, transcription.finish(capture_clock_ms(sent_samples)));
-                                                        speech_committer = SpeechCommitter::default();
-                                                    } else {
-                                                        emit_events(&app, generation, coordinator.begin_epoch(capture_clock_ms(sent_samples)));
-                                                    }
+                                                    transmission.begin_epoch(captured_samples_24k);
+                                                    speech_committer = SpeechCommitter::default();
                                                     let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "ready".into() });
                                                     continue 'capture;
                                                 }
@@ -1538,7 +1562,17 @@ pub async fn start(
                                 }
                             }
                         }
-                        None => break,
+                        None => {
+                            if !closing {
+                                emit_recoverable(
+                                    &app,
+                                    generation,
+                                    "live_source_ended",
+                                    "The selected audio source ended or became unavailable.",
+                                );
+                            }
+                            break;
+                        }
                     }
                 }
                 message = reader.next() => {
@@ -1549,16 +1583,17 @@ pub async fn start(
                         }
                         if reconnect.claim(closing) {
                             let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
+                            let captured_samples_24k = captured_input_samples_48k / 2;
+                            let capture_ms = capture_clock_ms(captured_samples_24k);
+                            close_for_transmission_gap(original_only, &app, generation, &mut transcription, &mut coordinator, capture_ms);
                             pcm.clear();
+                            resampler = Pcm24Resampler::default();
+                            pcm_front_capture_sample = captured_samples_24k;
                             if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &processing_mode, generation, 1).await {
                                 writer = next_writer;
                                 reader = next_reader;
-                                if original_only {
-                                    emit_events(&app, generation, transcription.finish(capture_clock_ms(sent_samples)));
-                                    speech_committer = SpeechCommitter::default();
-                                } else {
-                                    emit_events(&app, generation, coordinator.begin_epoch(capture_clock_ms(sent_samples)));
-                                }
+                                transmission.begin_epoch(captured_samples_24k);
+                                speech_committer = SpeechCommitter::default();
                                 let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "ready".into() });
                                 continue 'capture;
                             }
@@ -1573,39 +1608,42 @@ pub async fn start(
                                     ready = true;
                                     let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "ready".into() });
                                 }
-                                emit_events(&app, generation, coordinator.on_source(delta, capture_clock_ms(sent_samples)));
+                                let capture_ms = capture_clock_ms(captured_input_samples_48k / 2);
+                                emit_events(&app, generation, coordinator.on_source(align_timed_text(delta, &transmission), capture_ms));
                             }
                             RealtimeEvent::TranslationDelta(delta) => {
                                 if !ready {
                                     ready = true;
                                     let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "ready".into() });
                                 }
-                                emit_events(&app, generation, coordinator.on_translation(delta, capture_clock_ms(sent_samples)));
+                                let capture_ms = capture_clock_ms(captured_input_samples_48k / 2);
+                                emit_events(&app, generation, coordinator.on_translation(align_timed_text(delta, &transmission), capture_ms));
                             }
                             RealtimeEvent::TranscriptionDelta { item_id, event_id, text } => {
                                 if !ready {
                                     ready = true;
                                     let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "ready".into() });
                                 }
-                                emit_events(&app, generation, transcription.on_delta(item_id, event_id, text, capture_clock_ms(sent_samples)));
+                                emit_events(&app, generation, transcription.on_delta(item_id, event_id, text, capture_clock_ms(captured_input_samples_48k / 2)));
                             }
                             RealtimeEvent::TranscriptionDone { item_id, event_id, text } => {
-                                emit_events(&app, generation, transcription.on_done(item_id, event_id, text, capture_clock_ms(sent_samples)));
+                                emit_events(&app, generation, transcription.on_done(item_id, event_id, text, capture_clock_ms(captured_input_samples_48k / 2)));
                             }
                             RealtimeEvent::Closed if closing => closed = true,
                             RealtimeEvent::Closed => {
                                 if reconnect.claim(closing) {
                                     let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
+                                    let captured_samples_24k = captured_input_samples_48k / 2;
+                                    let capture_ms = capture_clock_ms(captured_samples_24k);
+                                    close_for_transmission_gap(original_only, &app, generation, &mut transcription, &mut coordinator, capture_ms);
                                     pcm.clear();
+                                    resampler = Pcm24Resampler::default();
+                                    pcm_front_capture_sample = captured_samples_24k;
                                     if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &processing_mode, generation, 1).await {
                                         writer = next_writer;
                                         reader = next_reader;
-                                        if original_only {
-                                            emit_events(&app, generation, transcription.finish(capture_clock_ms(sent_samples)));
-                                            speech_committer = SpeechCommitter::default();
-                                        } else {
-                                            emit_events(&app, generation, coordinator.begin_epoch(capture_clock_ms(sent_samples)));
-                                        }
+                                        transmission.begin_epoch(captured_samples_24k);
+                                        speech_committer = SpeechCommitter::default();
                                         let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "ready".into() });
                                         continue 'capture;
                                     }
@@ -1622,22 +1660,26 @@ pub async fn start(
                         Ok(Message::Close(_)) => {
                             if reconnect.claim(closing) {
                                 let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
+                                let captured_samples_24k = captured_input_samples_48k / 2;
+                                let capture_ms = capture_clock_ms(captured_samples_24k);
+                                close_for_transmission_gap(original_only, &app, generation, &mut transcription, &mut coordinator, capture_ms);
                                 pcm.clear();
+                                resampler = Pcm24Resampler::default();
+                                pcm_front_capture_sample = captured_samples_24k;
                                 if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &processing_mode, generation, 1).await {
                                     writer = next_writer;
                                     reader = next_reader;
-                                    if original_only {
-                                        emit_events(&app, generation, transcription.finish(capture_clock_ms(sent_samples)));
-                                        speech_committer = SpeechCommitter::default();
-                                    } else {
-                                        emit_events(&app, generation, coordinator.begin_epoch(capture_clock_ms(sent_samples)));
-                                    }
+                                    transmission.begin_epoch(captured_samples_24k);
+                                    speech_committer = SpeechCommitter::default();
                                     let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "ready".into() });
                                     continue 'capture;
                                 }
                             }
                             emit_recoverable(&app, generation, "live_disconnected", "Live captions closed unexpectedly and the automatic reconnect did not succeed.");
                             break;
+                        }
+                        Ok(Message::Ping(payload)) => {
+                            let _ = send_realtime_message(&mut writer, Message::Pong(payload)).await;
                         }
                         Ok(_) => {}
                         Err(error) => {
@@ -1647,16 +1689,17 @@ pub async fn start(
                             }
                             if reconnect.claim(closing) {
                                 let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
+                                let captured_samples_24k = captured_input_samples_48k / 2;
+                                let capture_ms = capture_clock_ms(captured_samples_24k);
+                                close_for_transmission_gap(original_only, &app, generation, &mut transcription, &mut coordinator, capture_ms);
                                 pcm.clear();
+                                resampler = Pcm24Resampler::default();
+                                pcm_front_capture_sample = captured_samples_24k;
                                 if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &processing_mode, generation, 1).await {
                                     writer = next_writer;
                                     reader = next_reader;
-                                    if original_only {
-                                        emit_events(&app, generation, transcription.finish(capture_clock_ms(sent_samples)));
-                                        speech_committer = SpeechCommitter::default();
-                                    } else {
-                                        emit_events(&app, generation, coordinator.begin_epoch(capture_clock_ms(sent_samples)));
-                                    }
+                                    transmission.begin_epoch(captured_samples_24k);
+                                    speech_committer = SpeechCommitter::default();
                                     let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "ready".into() });
                                     continue 'capture;
                                 }
@@ -1668,7 +1711,7 @@ pub async fn start(
                 }
                 _ = tick.tick() => {
                     if !original_only {
-                        emit_events(&app, generation, coordinator.tick(capture_clock_ms(sent_samples)));
+                        emit_events(&app, generation, coordinator.tick(capture_clock_ms(captured_input_samples_48k / 2)));
                     }
                 }
             }
@@ -1678,13 +1721,13 @@ pub async fn start(
             emit_events(
                 &app,
                 generation,
-                transcription.finish(capture_clock_ms(sent_samples)),
+                transcription.finish(capture_clock_ms(captured_input_samples_48k / 2)),
             );
         } else {
             emit_events(
                 &app,
                 generation,
-                coordinator.finish(capture_clock_ms(sent_samples)),
+                coordinator.finish(capture_clock_ms(captured_input_samples_48k / 2)),
             );
         }
         let _ = stream.stop_capture().await;
@@ -1697,26 +1740,130 @@ pub async fn start(
     Ok(())
 }
 
-fn capture_clock_ms(sent_samples: u64) -> u64 {
-    sent_samples.saturating_mul(1_000) / 24_000
+#[derive(Debug, Clone, Copy)]
+struct TransmissionSpan {
+    transmitted_start: u64,
+    transmitted_end: u64,
+    capture_start: u64,
+    capture_end: u64,
 }
 
-fn record_transmitted_samples(sent_samples: &mut u64, appended_samples: u64, sent: bool) {
-    if sent {
-        *sent_samples = sent_samples.saturating_add(appended_samples);
+#[derive(Debug, Default)]
+struct TransmissionTimeline {
+    epoch_capture_start: u64,
+    transmitted_samples: u64,
+    spans: VecDeque<TransmissionSpan>,
+}
+
+impl TransmissionTimeline {
+    fn begin_epoch(&mut self, capture_sample: u64) {
+        self.epoch_capture_start = capture_sample;
+        self.transmitted_samples = 0;
+        self.spans.clear();
+    }
+
+    fn record(&mut self, frame: &CapturedPcm) {
+        let length = frame.samples.len() as u64;
+        let span = TransmissionSpan {
+            transmitted_start: self.transmitted_samples,
+            transmitted_end: self.transmitted_samples.saturating_add(length),
+            capture_start: frame.capture_start_sample,
+            capture_end: frame.capture_end_sample,
+        };
+        self.transmitted_samples = span.transmitted_end;
+        self.spans.push_back(span);
+        while self.spans.len() > MAX_RETAINED_LIVE_UNITS {
+            self.spans.pop_front();
+        }
+    }
+
+    fn align_elapsed_ms(&self, elapsed_ms: u64) -> u64 {
+        let transmitted_sample = elapsed_ms.saturating_mul(24);
+        let span = self
+            .spans
+            .iter()
+            .find(|span| transmitted_sample < span.transmitted_end)
+            .or_else(|| self.spans.back());
+        let capture_sample = span.map_or(self.epoch_capture_start, |span| {
+            let offset = transmitted_sample
+                .saturating_sub(span.transmitted_start)
+                .min(span.transmitted_end.saturating_sub(span.transmitted_start));
+            span.capture_start
+                .saturating_add(offset)
+                .min(span.capture_end)
+        });
+        samples_24k_to_ms(capture_sample.saturating_sub(self.epoch_capture_start))
+    }
+}
+
+fn samples_24k_to_ms(samples: u64) -> u64 {
+    samples.saturating_mul(1_000) / 24_000
+}
+
+fn align_timed_text(mut delta: TimedText, timeline: &TransmissionTimeline) -> TimedText {
+    delta.elapsed_ms = delta
+        .elapsed_ms
+        .map(|elapsed| timeline.align_elapsed_ms(elapsed));
+    delta
+}
+
+fn capture_clock_ms(captured_samples_24k: u64) -> u64 {
+    samples_24k_to_ms(captured_samples_24k)
+}
+
+async fn send_realtime(writer: &mut RealtimeWriter, event: Value) -> bool {
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        writer.send(Message::Text(event.to_string().into())),
+    )
+    .await
+    .is_ok_and(|result| result.is_ok())
+}
+
+async fn send_realtime_message(writer: &mut RealtimeWriter, message: Message) -> bool {
+    tokio::time::timeout(Duration::from_secs(5), writer.send(message))
+        .await
+        .is_ok_and(|result| result.is_ok())
+}
+
+fn close_for_transmission_gap(
+    original_only: bool,
+    app: &tauri::AppHandle,
+    generation: u64,
+    transcription: &mut TranscriptionCoordinator,
+    coordinator: &mut CaptionCoordinator,
+    capture_clock_ms: u64,
+) {
+    if original_only {
+        emit_events(app, generation, transcription.finish(capture_clock_ms));
+    } else {
+        emit_events(app, generation, coordinator.begin_epoch(capture_clock_ms));
     }
 }
 
 pub fn stop(state: &LiveState) {
+    state.start_sequence.fetch_add(1, Ordering::Relaxed);
     state.cancelled.store(true, Ordering::Relaxed);
 }
 
-fn abort_previous(state: &LiveState) {
+fn ensure_live_start_current(state: &LiveState, lease: u64) -> Result<(), ApiError> {
+    if state.start_sequence.load(Ordering::Relaxed) == lease {
+        Ok(())
+    } else {
+        Err(ApiError {
+            kind: ApiErrorKind::Cancelled,
+            message: "The previous Live Captions start was replaced.".into(),
+            retryable: false,
+        })
+    }
+}
+
+async fn abort_previous(state: &LiveState) {
     state.cancelled.store(true, Ordering::Relaxed);
-    if let Ok(mut task) = state.task.lock() {
-        if let Some(task) = task.take() {
-            task.abort();
-        }
+    let previous = state.task.lock().ok().and_then(|mut task| task.take());
+    if let Some(task) = previous {
+        task.abort();
+        let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
     }
 }
 
@@ -1741,20 +1888,22 @@ async fn connect_realtime(
             .parse()
             .map_err(|_| network_error("Could not authorize the realtime connection."))?,
     );
-    let (mut socket, _) = connect_async(request)
+    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(15), connect_async(request))
         .await
+        .map_err(|_| network_error("Realtime connection timed out."))?
         .map_err(realtime_connect_error)?;
     wait_for_session_created(&mut socket).await?;
 
     let configuration_event_id = format!("nonosub-config-{generation}-{attempt}");
     let update =
         realtime_session_update(languages, processing_mode, configuration_event_id.as_str());
-    socket
-        .send(Message::Text(update.to_string().into()))
-        .await
-        .map_err(|error| {
-            network_error(&format!("Could not configure realtime captions: {error}"))
-        })?;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        socket.send(Message::Text(update.to_string().into())),
+    )
+    .await
+    .map_err(|_| network_error("Realtime caption configuration timed out."))?
+    .map_err(|error| network_error(&format!("Could not configure realtime captions: {error}")))?;
     wait_for_session_updated(
         &mut socket,
         languages,
@@ -1768,22 +1917,27 @@ async fn connect_realtime(
 }
 
 async fn wait_for_session_created(socket: &mut RealtimeSocket) -> Result<(), ApiError> {
-    let message = tokio::time::timeout(REALTIME_CONFIGURATION_TIMEOUT, socket.next())
-        .await
-        .map_err(|_| configuration_error("Realtime captions timed out before session.created."))?
-        .ok_or_else(|| network_error("Realtime captions closed before session.created."))?
-        .map_err(|error| {
-            network_error(&format!(
-                "Realtime captions failed before session.created: {error}"
-            ))
-        })?;
-
-    let Message::Text(text) = message else {
-        return Err(configuration_error(
-            "Realtime captions did not send session.created as the first event.",
-        ));
-    };
-    validate_session_created_event(parse_realtime_event(&text))
+    tokio::time::timeout(REALTIME_CONFIGURATION_TIMEOUT, async {
+        loop {
+            let message = socket
+                .next()
+                .await
+                .ok_or_else(|| network_error("Realtime captions closed before session.created."))?
+                .map_err(|error| network_error(&format!("Realtime captions failed before session.created: {error}")))?;
+            match message {
+                Message::Ping(payload) => {
+                    socket.send(Message::Pong(payload)).await.map_err(|error| {
+                        network_error(&format!("Realtime captions could not answer a ping: {error}"))
+                    })?;
+                }
+                Message::Text(text) => return validate_session_created_event(parse_realtime_event(&text)),
+                Message::Close(_) => return Err(network_error("Realtime captions closed before session.created.")),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .map_err(|_| configuration_error("Realtime captions timed out before session.created."))?
 }
 
 fn validate_session_created_event(event: RealtimeEvent) -> Result<(), ApiError> {
@@ -1813,13 +1967,16 @@ async fn wait_for_session_updated(
                         "Realtime captions failed before session.updated: {error}"
                     ))
                 })?;
-            let Message::Text(text) = message else {
-                if matches!(message, Message::Close(_)) {
-                    return Err(network_error(
-                        "Realtime captions closed before session.updated.",
-                    ));
+            let text = match message {
+                Message::Ping(payload) => {
+                    socket.send(Message::Pong(payload)).await.map_err(|error| {
+                        network_error(&format!("Realtime captions could not answer a ping: {error}"))
+                    })?;
+                    continue;
                 }
-                continue;
+                Message::Text(text) => text,
+                Message::Close(_) => return Err(network_error("Realtime captions closed before session.updated.")),
+                _ => continue,
             };
             if validate_session_update_event(
                 parse_realtime_event(&text),
@@ -2002,16 +2159,25 @@ fn server_configuration_error(error: &RealtimeServerError) -> ApiError {
     }
 }
 
-fn append_f32_48k_as_pcm16_24k(bytes: &[u8], output: &mut Vec<i16>) {
-    let mut frames = bytes.chunks_exact(4);
-    while let Some(first) = frames.next() {
-        let Some(second) = frames.next() else {
-            break;
-        };
-        let a = f32::from_ne_bytes(first.try_into().expect("four-byte float"));
-        let b = f32::from_ne_bytes(second.try_into().expect("four-byte float"));
-        let averaged = ((a + b) * 0.5).clamp(-1.0, 1.0);
-        output.push((averaged * i16::MAX as f32).round() as i16);
+#[derive(Debug, Default)]
+struct Pcm24Resampler {
+    pending: Option<f32>,
+}
+
+impl Pcm24Resampler {
+    fn append_f32_48k(&mut self, bytes: &[u8], output: &mut Vec<i16>) -> u64 {
+        let mut input_samples = 0_u64;
+        for frame in bytes.chunks_exact(4) {
+            input_samples = input_samples.saturating_add(1);
+            let sample = f32::from_ne_bytes(frame.try_into().expect("four-byte float"));
+            if let Some(first) = self.pending.take() {
+                let averaged = ((first + sample) * 0.5).clamp(-1.0, 1.0);
+                output.push((averaged * i16::MAX as f32).round() as i16);
+            } else {
+                self.pending = Some(sample);
+            }
+        }
+        input_samples
     }
 }
 
@@ -2147,21 +2313,42 @@ mod tests {
             .flat_map(f32::to_ne_bytes)
             .collect();
         let mut output = Vec::new();
-        append_f32_48k_as_pcm16_24k(&input, &mut output);
+        let mut resampler = Pcm24Resampler::default();
+        assert_eq!(resampler.append_f32_48k(&input, &mut output), 4);
         assert_eq!(output.len(), 2);
         assert!((output[0] - 16_384).abs() <= 1);
         assert_eq!(output[1], -32_767);
     }
 
     #[test]
-    fn capture_clock_advances_only_after_successful_audio_appends() {
-        let mut sent_samples = 0;
-        record_transmitted_samples(&mut sent_samples, SEND_SAMPLES as u64, false);
-        assert_eq!(capture_clock_ms(sent_samples), 0);
-        record_transmitted_samples(&mut sent_samples, SEND_SAMPLES as u64, true);
-        assert_eq!(capture_clock_ms(sent_samples), 100);
-        record_transmitted_samples(&mut sent_samples, 0, true);
-        assert_eq!(capture_clock_ms(sent_samples), 100);
+    fn capture_clock_and_transmission_timeline_preserve_gaps() {
+        assert_eq!(capture_clock_ms(4_800), 200);
+        let mut timeline = TransmissionTimeline::default();
+        timeline.begin_epoch(0);
+        timeline.record(&CapturedPcm {
+            samples: vec![0; 2_400],
+            capture_start_sample: 0,
+            capture_end_sample: 2_400,
+        });
+        timeline.record(&CapturedPcm {
+            samples: vec![0; 2_400],
+            capture_start_sample: 4_800,
+            capture_end_sample: 7_200,
+        });
+        assert_eq!(timeline.align_elapsed_ms(50), 50);
+        assert_eq!(timeline.align_elapsed_ms(150), 250);
+    }
+
+    #[test]
+    fn odd_input_sample_is_preserved_across_resampler_calls() {
+        let first: Vec<u8> = [0.25_f32].into_iter().flat_map(f32::to_ne_bytes).collect();
+        let second: Vec<u8> = [0.75_f32].into_iter().flat_map(f32::to_ne_bytes).collect();
+        let mut resampler = Pcm24Resampler::default();
+        let mut output = Vec::new();
+        resampler.append_f32_48k(&first, &mut output);
+        assert!(output.is_empty());
+        resampler.append_f32_48k(&second, &mut output);
+        assert_eq!(output, vec![16_384]);
     }
 
     #[test]
@@ -2174,6 +2361,19 @@ mod tests {
         let mut unexpected = ReconnectAllowance::default();
         assert!(unexpected.claim(false));
         assert!(!unexpected.claim(false));
+    }
+
+    #[test]
+    fn newer_live_start_invalidates_an_older_picker_lease() {
+        let state = LiveState::default();
+        let first = state.start_sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        assert!(ensure_live_start_current(&state, first).is_ok());
+        let second = state.start_sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        assert_eq!(
+            ensure_live_start_current(&state, first).unwrap_err().kind,
+            ApiErrorKind::Cancelled
+        );
+        assert!(ensure_live_start_current(&state, second).is_ok());
     }
 
     #[test]
@@ -2801,19 +3001,24 @@ mod tests {
     #[test]
     fn speech_committer_ignores_silence_and_commits_after_quiet() {
         let mut committer = SpeechCommitter::default();
+        let frame = |samples: Vec<i16>| CapturedPcm {
+            capture_start_sample: 0,
+            capture_end_sample: samples.len() as u64,
+            samples,
+        };
         for _ in 0..6 {
-            assert!(committer.push(vec![0; SEND_SAMPLES]).is_empty());
+            assert!(committer.push(frame(vec![0; SEND_SAMPLES])).is_empty());
         }
         let loud = vec![4_000; SEND_SAMPLES];
-        assert!(committer.push(loud.clone()).is_empty());
+        assert!(committer.push(frame(loud.clone())).is_empty());
         assert!(committer
-            .push(loud)
+            .push(frame(loud))
             .iter()
             .any(|action| matches!(action, TranscriptionAudioAction::Append(_))));
         let mut committed = false;
         for _ in 0..4 {
             committed |= committer
-                .push(vec![0; SEND_SAMPLES])
+                .push(frame(vec![0; SEND_SAMPLES]))
                 .iter()
                 .any(|action| matches!(action, TranscriptionAudioAction::Commit));
         }

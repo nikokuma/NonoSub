@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -78,8 +79,15 @@ async fn run_inner(
     for chunk in &chunks {
         check_cancelled(&cancelled)?;
         let remote =
-            retry_transcription(&client, &chunk.path, &references, &languages.source, events)
-                .await?;
+            retry_transcription(
+                &client,
+                &chunk.path,
+                &references,
+                &languages.source,
+                events,
+                &cancelled,
+            )
+            .await?;
         let mut incoming = Vec::new();
         let mut last_stable_speaker = all_segments
             .iter()
@@ -184,10 +192,13 @@ async fn retry_transcription(
     references: &[SpeakerReference],
     source_language: &str,
     events: &EventSink,
+    cancelled: &AtomicBool,
 ) -> Result<Vec<DiarizedSegment>, ApiError> {
-    let first = client
-        .transcribe_chunk(path, references, source_language)
-        .await;
+    let first = cancellable_request(
+        client.transcribe_chunk(path, references, source_language),
+        cancelled,
+    )
+    .await;
     match first {
         Err(error) if error.retryable => {
             send(
@@ -200,9 +211,12 @@ async fn retry_transcription(
                     },
                 },
             )?;
-            client
-                .transcribe_chunk(path, references, source_language)
-                .await
+            cancellable_retry_delay(cancelled, 0).await?;
+            cancellable_request(
+                client.transcribe_chunk(path, references, source_language),
+                cancelled,
+            )
+            .await
         }
         result => result,
     }
@@ -234,7 +248,15 @@ async fn translate_pending(
             .map(|index| translation_input(&segments[*index]))
             .collect::<Vec<_>>();
         let translations =
-            match translate_batch_with_retry(client, &context, &batch, languages).await {
+            match translate_batch_with_retry_cancelled(
+                client,
+                &context,
+                &batch,
+                languages,
+                Some(cancelled),
+            )
+            .await
+            {
                 Ok(output) => output,
                 Err(error) if translation_error_is_session_fatal(&error) => return Err(error),
                 Err(error) => {
@@ -269,9 +291,65 @@ pub(crate) async fn translate_batch_with_retry(
     batch: &[TranslationInput],
     languages: &LanguageSettings,
 ) -> Result<Vec<crate::openai::TranslationOutput>, ApiError> {
-    match client.translate(context, batch, languages).await {
-        Err(error) if error.retryable => client.translate(context, batch, languages).await,
+    translate_batch_with_retry_cancelled(client, context, batch, languages, None).await
+}
+
+pub(crate) async fn translate_batch_with_retry_cancelled(
+    client: &OpenAiClient,
+    context: &[TranslationInput],
+    batch: &[TranslationInput],
+    languages: &LanguageSettings,
+    cancelled: Option<&AtomicBool>,
+) -> Result<Vec<crate::openai::TranslationOutput>, ApiError> {
+    let first = match cancelled {
+        Some(cancelled) => cancellable_request(client.translate(context, batch, languages), cancelled).await,
+        None => client.translate(context, batch, languages).await,
+    };
+    match first {
+        Err(error) if error.retryable => {
+            if let Some(cancelled) = cancelled {
+                cancellable_retry_delay(cancelled, 0).await?;
+                cancellable_request(client.translate(context, batch, languages), cancelled).await
+            } else {
+                tokio::time::sleep(retry_delay(0)).await;
+                client.translate(context, batch, languages).await
+            }
+        }
         result => result,
+    }
+}
+
+fn retry_delay(attempt: u32) -> std::time::Duration {
+    let exponential_ms = 400_u64.saturating_mul(1_u64 << attempt.min(4));
+    let jitter = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| u64::from(duration.subsec_nanos()) % 251);
+    std::time::Duration::from_millis((exponential_ms + jitter).min(8_000))
+}
+
+async fn cancellable_retry_delay(cancelled: &AtomicBool, attempt: u32) -> Result<(), ApiError> {
+    check_cancelled(cancelled)?;
+    let delay = tokio::time::sleep(retry_delay(attempt));
+    tokio::pin!(delay);
+    loop {
+        tokio::select! {
+            _ = &mut delay => return Ok(()),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => check_cancelled(cancelled)?,
+        }
+    }
+}
+
+async fn cancellable_request<T, F>(future: F, cancelled: &AtomicBool) -> Result<T, ApiError>
+where
+    F: Future<Output = Result<T, ApiError>>,
+{
+    check_cancelled(cancelled)?;
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            result = &mut future => return result,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => check_cancelled(cancelled)?,
+        }
     }
 }
 
@@ -719,6 +797,28 @@ mod tests {
             transcription_status: SegmentStatus::Complete,
             translation_status: SegmentStatus::Pending,
         }
+    }
+
+    #[tokio::test]
+    async fn request_wait_is_cancelled_without_waiting_for_network_completion() {
+        let cancelled = AtomicBool::new(true);
+        let result = cancellable_request::<(), _>(
+            async {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                Ok(())
+            },
+            &cancelled,
+        )
+        .await;
+        assert_eq!(result.unwrap_err().kind, ApiErrorKind::Cancelled);
+    }
+
+    #[test]
+    fn retry_backoff_is_bounded_with_jitter() {
+        let first = retry_delay(0);
+        assert!(first >= std::time::Duration::from_millis(400));
+        assert!(first <= std::time::Duration::from_millis(650));
+        assert!(retry_delay(100) <= std::time::Duration::from_secs(8));
     }
 
     #[test]

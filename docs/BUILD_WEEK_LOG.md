@@ -225,3 +225,14 @@
 - Added hard bounds for recoverable errors, the structured lesson LRU, hidden lesson input, realtime event identities, and recent live clause/pairing history. Finalized original-only drafts are removed from the coordinator after canonical emission.
 - Changed file retranslation waiting to inspect lightweight phase/status fields and clone the canonical snapshot only once, after the source session is complete.
 - Full verification passes with zero Svelte errors or warnings, 128 frontend tests, a successful production build, 101 Rust tests, and warning-free clippy.
+
+## July 20 — Transport and media clocks
+
+- Added 15-second OpenAI connection, 45-second read-idle, 120-second Responses, and 300-second transcription request limits.
+- Made streamed diarization require `transcript.text.done`; truncated EOF and explicit SSE errors are retryable failures. OpenAI error codes and request IDs are sanitized without exposing response bodies.
+- Added one bounded jittered retry delay, bounded `Retry-After` handling, and cancellation-aware file transcription, translation, retranslation, and lesson retry waits.
+- Installed a serialized live-start lease before Apple's picker. Replaced starts invalidate older pickers, abort and drain older tasks, and cannot retain a second paid connection.
+- Added five-second WebSocket send limits, three-second graceful drain, Ping/Pong handling during configuration and capture, and explicit source-ended/start-error classifications.
+- Split the capture and transmission timelines. Captured samples always advance source time; transmitted spans map OpenAI elapsed metadata back to capture intervals; silent suppression, failed sends, and reconnects create real gaps and clause boundaries.
+- Preserved odd 48 kHz samples between resampler calls and inserted packet-duration silence when a local AAC packet cannot decode.
+- Full verification passes with zero Svelte errors or warnings, 128 frontend tests, a successful production build, 107 Rust tests, and warning-free clippy.

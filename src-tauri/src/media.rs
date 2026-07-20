@@ -140,6 +140,7 @@ pub fn decode_to_mono_16k(path: &Path) -> Result<DecodedAudio, String> {
         .default_track(TrackType::Audio)
         .ok_or_else(|| "The selected video has no decodable audio track.".to_string())?;
     let track_id = track.id;
+    let time_base = track.time_base;
     let audio_parameters = track
         .codec_params
         .as_ref()
@@ -170,7 +171,22 @@ pub fn decode_to_mono_16k(path: &Path) -> Result<DecodedAudio, String> {
         }
         let decoded = match decoder.decode(&packet) {
             Ok(decoded) => decoded,
-            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(SymphoniaError::DecodeError(_)) => {
+                let missing_frames = packet_duration_frames(
+                    packet.dur.get(),
+                    time_base,
+                    source_rate,
+                );
+                ensure_duration_limit(
+                    decoded_frames.saturating_add(missing_frames),
+                    source_rate,
+                )?;
+                for _ in 0..missing_frames {
+                    resampler.push(0.0);
+                }
+                decoded_frames = decoded_frames.saturating_add(missing_frames);
+                continue;
+            }
             Err(error) => return Err(format!("Could not decode AAC audio: {error}")),
         };
         let channels = decoded.spec().channels().count();
@@ -191,6 +207,20 @@ pub fn decode_to_mono_16k(path: &Path) -> Result<DecodedAudio, String> {
         samples,
         sample_rate: TARGET_SAMPLE_RATE,
     })
+}
+
+fn packet_duration_frames(
+    duration_ticks: u64,
+    time_base: Option<symphonia::core::units::TimeBase>,
+    sample_rate: u32,
+) -> u64 {
+    let Some(time_base) = time_base else {
+        return duration_ticks;
+    };
+    duration_ticks
+        .saturating_mul(u64::from(time_base.numer.get()))
+        .saturating_mul(u64::from(sample_rate))
+        / u64::from(time_base.denom.get())
 }
 
 #[cfg(test)]
@@ -270,6 +300,14 @@ mod tests {
             ensure_duration_limit(maximum + 1, 48_000).unwrap_err(),
             "NonoSub supports local videos up to four hours long."
         );
+    }
+
+    #[test]
+    fn packet_duration_becomes_equivalent_source_silence() {
+        let time_base = symphonia::core::units::TimeBase::try_new(1, 48_000).unwrap();
+        assert_eq!(packet_duration_frames(1_024, Some(time_base), 48_000), 1_024);
+        let millisecond_base = symphonia::core::units::TimeBase::try_new(1, 1_000).unwrap();
+        assert_eq!(packet_duration_frames(250, Some(millisecond_base), 48_000), 12_000);
     }
 
     #[test]

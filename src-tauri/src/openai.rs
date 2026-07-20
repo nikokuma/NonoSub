@@ -2,7 +2,7 @@ use futures_util::StreamExt;
 use reqwest::{multipart, Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::HashSet, path::Path};
+use std::{collections::HashSet, path::Path, time::Duration};
 
 use crate::contracts::{
     ChalkColor, ChalkMark, ChalkPhrase, LanguageSettings, LessonCard, TailCue, TeachingMoment,
@@ -11,6 +11,10 @@ use crate::contracts::{
 pub const TRANSCRIPTION_MODEL: &str = "gpt-4o-transcribe-diarize";
 pub const LANGUAGE_MODEL: &str = "gpt-5.6-sol";
 pub const REALTIME_TRANSLATION_MODEL: &str = "gpt-realtime-translate";
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+const RESPONSES_TIMEOUT: Duration = Duration::from_secs(120);
+const TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -85,7 +89,11 @@ pub struct OpenAiClient {
 
 impl OpenAiClient {
     pub fn new(api_key: String) -> Result<Self, ApiError> {
-        let http = Client::builder().build().map_err(|error| ApiError {
+        let http = Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_IDLE_TIMEOUT)
+            .build()
+            .map_err(|error| ApiError {
             kind: ApiErrorKind::Network,
             message: format!("Could not initialize secure networking: {error}"),
             retryable: false,
@@ -99,11 +107,12 @@ impl OpenAiClient {
                 .http
                 .get(format!("https://api.openai.com/v1/models/{model}"))
                 .bearer_auth(&self.api_key)
+                .timeout(Duration::from_secs(30))
                 .send()
                 .await
                 .map_err(network_error)?;
             if !response.status().is_success() {
-                return Err(response_error(response.status(), model).await);
+                return Err(response_error(response, model).await);
             }
         }
         Ok(())
@@ -113,6 +122,7 @@ impl OpenAiClient {
         self.http
             .get(format!("https://api.openai.com/v1/models/{model}"))
             .bearer_auth(&self.api_key)
+            .timeout(Duration::from_secs(30))
             .send()
             .await
             .is_ok_and(|response| response.status().is_success())
@@ -163,32 +173,39 @@ impl OpenAiClient {
             .post("https://api.openai.com/v1/audio/transcriptions")
             .bearer_auth(&self.api_key)
             .multipart(form)
+            .timeout(TRANSCRIPTION_TIMEOUT)
             .send()
             .await
             .map_err(network_error)?;
         if !response.status().is_success() {
-            return Err(response_error(response.status(), TRANSCRIPTION_MODEL).await);
+            return Err(response_error(response, TRANSCRIPTION_MODEL).await);
         }
 
         let mut stream = response.bytes_stream();
         let mut pending = Vec::new();
         let mut segments = Vec::new();
+        let mut terminal = false;
         while let Some(chunk) = stream.next().await {
             let bytes = chunk.map_err(network_error)?;
             pending.extend_from_slice(&bytes);
             while let Some(event) = take_sse_event(&mut pending)? {
-                if let Some(segment) = parse_diarized_sse_event(&event)? {
-                    segments.push(segment);
+                match parse_transcription_sse_event(&event)? {
+                    TranscriptionStreamEvent::Segment(segment) => segments.push(segment),
+                    TranscriptionStreamEvent::Done => terminal = true,
+                    TranscriptionStreamEvent::Ignored => {}
                 }
             }
         }
         if pending.iter().any(|byte| !byte.is_ascii_whitespace()) {
             let trailing = String::from_utf8(pending)
                 .map_err(|error| malformed_transcription_stream(&error.to_string()))?;
-            if let Some(segment) = parse_diarized_sse_event(&trailing)? {
-                segments.push(segment);
+            match parse_transcription_sse_event(&trailing)? {
+                TranscriptionStreamEvent::Segment(segment) => segments.push(segment),
+                TranscriptionStreamEvent::Done => terminal = true,
+                TranscriptionStreamEvent::Ignored => {}
             }
         }
+        require_transcription_terminal(terminal)?;
         Ok(segments)
     }
 
@@ -256,11 +273,12 @@ impl OpenAiClient {
             .post("https://api.openai.com/v1/responses")
             .bearer_auth(&self.api_key)
             .json(&request)
+            .timeout(RESPONSES_TIMEOUT)
             .send()
             .await
             .map_err(network_error)?;
         if !response.status().is_success() {
-            return Err(response_error(response.status(), LANGUAGE_MODEL).await);
+            return Err(response_error(response, LANGUAGE_MODEL).await);
         }
         let value: Value = response.json().await.map_err(|error| ApiError {
             kind: ApiErrorKind::MalformedResponse,
@@ -375,11 +393,12 @@ impl OpenAiClient {
             .post("https://api.openai.com/v1/responses")
             .bearer_auth(&self.api_key)
             .json(&request)
+            .timeout(RESPONSES_TIMEOUT)
             .send()
             .await
             .map_err(network_error)?;
         if !response.status().is_success() {
-            return Err(response_error(response.status(), LANGUAGE_MODEL).await);
+            return Err(response_error(response, LANGUAGE_MODEL).await);
         }
         let value: Value = response.json().await.map_err(|error| ApiError {
             kind: ApiErrorKind::MalformedResponse,
@@ -428,6 +447,12 @@ fn malformed_transcription_stream(detail: &str) -> ApiError {
         message: format!("Transcription stream contained invalid text: {detail}"),
         retryable: true,
     }
+}
+
+fn require_transcription_terminal(terminal: bool) -> Result<(), ApiError> {
+    terminal.then_some(()).ok_or_else(|| {
+        malformed_transcription_stream("the connection ended before transcript.text.done")
+    })
 }
 
 fn validate_lesson_card(card: LessonCard) -> Result<LessonCard, ApiError> {
@@ -548,7 +573,14 @@ fn cue_counts(moment: &TeachingMoment) -> (usize, usize) {
     )
 }
 
-pub fn parse_diarized_sse_event(event: &str) -> Result<Option<DiarizedSegment>, ApiError> {
+#[derive(Debug, PartialEq)]
+enum TranscriptionStreamEvent {
+    Segment(DiarizedSegment),
+    Done,
+    Ignored,
+}
+
+fn parse_transcription_sse_event(event: &str) -> Result<TranscriptionStreamEvent, ApiError> {
     let data = event
         .lines()
         .filter_map(|line| line.strip_prefix("data:"))
@@ -556,18 +588,38 @@ pub fn parse_diarized_sse_event(event: &str) -> Result<Option<DiarizedSegment>, 
         .collect::<Vec<_>>()
         .join("\n");
     if data.is_empty() || data == "[DONE]" {
-        return Ok(None);
+        return Ok(TranscriptionStreamEvent::Ignored);
     }
     let value: Value = serde_json::from_str(&data).map_err(|error| ApiError {
         kind: ApiErrorKind::MalformedResponse,
         message: format!("Transcription stream returned malformed JSON: {error}"),
         retryable: true,
     })?;
-    if value.get("type").and_then(Value::as_str) != Some("transcript.text.segment") {
-        return Ok(None);
+    match value.get("type").and_then(Value::as_str) {
+        Some("transcript.text.done") => return Ok(TranscriptionStreamEvent::Done),
+        Some("error") => {
+            let error = value.get("error").unwrap_or(&value);
+            let code = error
+                .get("code")
+                .or_else(|| error.get("type"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("stream_error");
+            let request_id = value
+                .get("request_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty());
+            return Err(ApiError {
+                kind: ApiErrorKind::Service,
+                message: sanitized_openai_error("Transcription stream failed", code, request_id),
+                retryable: true,
+            });
+        }
+        Some("transcript.text.segment") => {}
+        _ => return Ok(TranscriptionStreamEvent::Ignored),
     }
     let segment = value.get("segment").unwrap_or(&value);
-    Ok(Some(DiarizedSegment {
+    Ok(TranscriptionStreamEvent::Segment(DiarizedSegment {
         id: segment
             .get("id")
             .and_then(Value::as_str)
@@ -578,6 +630,33 @@ pub fn parse_diarized_sse_event(event: &str) -> Result<Option<DiarizedSegment>, 
         text: required_string(segment, "text")?,
         speaker: required_string(segment, "speaker")?,
     }))
+}
+
+#[cfg(test)]
+pub fn parse_diarized_sse_event(event: &str) -> Result<Option<DiarizedSegment>, ApiError> {
+    match parse_transcription_sse_event(event)? {
+        TranscriptionStreamEvent::Segment(segment) => Ok(Some(segment)),
+        TranscriptionStreamEvent::Done | TranscriptionStreamEvent::Ignored => Ok(None),
+    }
+}
+
+fn sanitized_openai_error(prefix: &str, code: &str, request_id: Option<&str>) -> String {
+    let safe_code = code
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+        .take(80)
+        .collect::<String>();
+    let safe_request_id = request_id.map(|request_id| {
+        request_id
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+            .take(100)
+            .collect::<String>()
+    });
+    match safe_request_id.filter(|value| !value.is_empty()) {
+        Some(request_id) => format!("{prefix} ({safe_code}; request {request_id})."),
+        None => format!("{prefix} ({safe_code})."),
+    }
 }
 
 fn required_f64(value: &Value, key: &str) -> Result<f64, ApiError> {
@@ -760,8 +839,37 @@ pub fn parse_response_delta(event: &str) -> Result<Option<String>, ApiError> {
         .map(str::to_owned))
 }
 
-async fn response_error(status: StatusCode, model: &str) -> ApiError {
-    classify_status(status, model)
+async fn response_error(response: reqwest::Response, model: &str) -> ApiError {
+    let status = response.status();
+    let request_id = response
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|seconds| Duration::from_secs(seconds.min(30)));
+    let metadata = response.json::<Value>().await.ok();
+    let code = metadata
+        .as_ref()
+        .and_then(|value| value.get("error"))
+        .and_then(|error| error.get("code").or_else(|| error.get("type")))
+        .and_then(Value::as_str);
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        if let Some(delay) = retry_after {
+            tokio::time::sleep(delay).await;
+        }
+    }
+    let mut error = classify_status(status, model);
+    if let Some(code) = code {
+        error.message = sanitized_openai_error(&error.message, code, request_id.as_deref());
+    } else if let Some(request_id) = request_id.as_deref() {
+        error.message = sanitized_openai_error(&error.message, "request_failed", Some(request_id));
+    }
+    error
 }
 
 fn classify_status(status: StatusCode, model: &str) -> ApiError {
@@ -802,7 +910,13 @@ fn classify_status(status: StatusCode, model: &str) -> ApiError {
 fn network_error(error: reqwest::Error) -> ApiError {
     ApiError {
         kind: ApiErrorKind::Network,
-        message: format!("Could not reach OpenAI: {error}"),
+        message: if error.is_timeout() {
+            "The OpenAI request timed out.".into()
+        } else if error.is_connect() {
+            "Could not connect to OpenAI.".into()
+        } else {
+            "The OpenAI connection ended unexpectedly.".into()
+        },
         retryable: true,
     }
 }
@@ -881,6 +995,28 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn recognizes_terminal_transcription_and_rejects_explicit_stream_errors() {
+        assert_eq!(
+            parse_transcription_sse_event(
+                "data: {\"type\":\"transcript.text.done\",\"text\":\"complete\"}"
+            )
+            .unwrap(),
+            TranscriptionStreamEvent::Done
+        );
+        let error = parse_transcription_sse_event(
+            "data: {\"type\":\"error\",\"request_id\":\"req_safe-1\",\"error\":{\"code\":\"server_error\",\"message\":\"sensitive body\"}}",
+        )
+        .unwrap_err();
+        assert!(error.retryable);
+        assert!(error.message.contains("server_error"));
+        assert!(error.message.contains("req_safe-1"));
+        assert!(!error.message.contains("sensitive body"));
+        let truncated = require_transcription_terminal(false).unwrap_err();
+        assert_eq!(truncated.kind, ApiErrorKind::MalformedResponse);
+        assert!(truncated.retryable);
     }
 
     #[test]
