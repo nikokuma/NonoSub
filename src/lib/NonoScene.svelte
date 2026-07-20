@@ -5,6 +5,7 @@
   import { applyHairMotion, resolveHairMotionRig, type HairMotionRig } from "./hairMotion";
   import { applyNonoMaterials, nonoAssetFromLocation, shaderVariantFromLocation } from "./nonoToon";
   import {
+    aimChainTip,
     applyTravelingWave,
     blendGuidePolyline,
     buildCableCurve,
@@ -28,13 +29,15 @@
   } from "./tailDynamics";
   import {
     captureTailRestPose,
+    CHALK_TAIL_SIDE,
     CURRENT_TAIL_BONES,
+    pointTailStrengthTarget,
+    POINT_TAIL_SIDE,
     requiredTailStretch,
     restoreTailRestPose,
     SEMANTIC_TAIL_BONES,
-    chooseNearestTail,
     cueScreenPoint,
-    presentationStrength,
+    underlineTailStrengthTarget,
     type ScreenPoint,
     type TailPresentation,
     type TailRestPose,
@@ -111,8 +114,6 @@
     let tailCableBuffers: Record<TailSide, TailCableBuffers> | undefined;
     let tailDebugLines: Record<TailSide, THREE.Line> | undefined;
     let hairRig: HairMotionRig | undefined;
-    let assignedPointTail: TailSide | undefined;
-    let assignedUnderlineTail: TailSide | undefined;
     let assignedSequence = -1;
     const motionPreference = window.matchMedia("(prefers-reduced-motion: reduce)");
     let reducedMotion = motionPreference.matches;
@@ -155,6 +156,10 @@
           left: createTailCableBuffers(tailRig.left),
           right: createTailCableBuffers(tailRig.right),
         };
+        tailRig[CHALK_TAIL_SIDE].at(-1)!.add(createChalkProp(
+          tailRig[CHALK_TAIL_SIDE],
+          tailRestPoses[CHALK_TAIL_SIDE],
+        ));
         if (tailDebugEnabled) {
           tailDebugLines = {
             left: createTailDebugLine(0xff70b7),
@@ -233,7 +238,7 @@
         restoreTailRestPose(tailRig.left, tailRestPoses.left);
         restoreTailRestPose(tailRig.right, tailRestPoses.right);
         if (!reducedMotion) {
-          ({ assignedPointTail, assignedUnderlineTail, assignedSequence } = applyPresentation({
+          assignedSequence = applyPresentation({
             presentation,
             rig: tailRig,
             restPoses: tailRestPoses,
@@ -244,10 +249,8 @@
             canvas: renderer.domElement,
             delta,
             timestamp,
-            assignedPointTail,
-            assignedUnderlineTail,
             assignedSequence,
-          }));
+          });
         } else {
           resetTailDynamics(tailDynamics.left);
           resetTailDynamics(tailDynamics.right);
@@ -318,8 +321,6 @@
     canvas,
     delta,
     timestamp,
-    assignedPointTail,
-    assignedUnderlineTail,
     assignedSequence,
   }: {
     presentation: TailPresentation;
@@ -332,50 +333,33 @@
     canvas: HTMLCanvasElement;
     delta: number;
     timestamp: number;
-    assignedPointTail?: TailSide;
-    assignedUnderlineTail?: TailSide;
     assignedSequence: number;
-  }) {
+  }): number {
     const pointElement = cueElement(presentation.pointCueId);
     const underlineElement = cueElement(presentation.underlineCueId);
     if (presentation.sequenceId !== assignedSequence) {
-      const primaryElement = pointElement ?? underlineElement;
-      if (primaryElement) {
-        const target = cueScreenPoint(primaryElement.getBoundingClientRect(), pointElement ? "point" : "underline", 0, false, _cueScreenPoint);
-        const leftTip = projectTip(rig.left.at(-1)!, camera, canvas, _leftTipPoint);
-        const rightTip = projectTip(rig.right.at(-1)!, camera, canvas, _rightTipPoint);
-        const nearest = chooseNearestTail(leftTip, rightTip, target);
-        if (pointElement) {
-          assignedPointTail = nearest;
-          assignedUnderlineTail = nearest === "left" ? "right" : "left";
-        } else {
-          assignedUnderlineTail = nearest;
-          assignedPointTail = undefined;
-        }
-        if (assignedPointTail) seedTailForSequence(assignedPointTail, presentation.sequenceId, rig, dynamics);
-        if (assignedUnderlineTail && assignedUnderlineTail !== assignedPointTail) {
-          seedTailForSequence(assignedUnderlineTail, presentation.sequenceId, rig, dynamics);
-        }
-      }
+      if (pointElement) seedTailForSequence(POINT_TAIL_SIDE, presentation.sequenceId, rig, dynamics);
+      if (underlineElement) seedTailForSequence(CHALK_TAIL_SIDE, presentation.sequenceId, rig, dynamics);
       assignedSequence = presentation.sequenceId;
     }
 
-    const baseStrength = presentationStrength(presentation);
-    const targetSpring = presentation.phase === "point" || presentation.phase === "hold"
-      ? TAIL_SPRING.target.point
-      : presentation.phase === "underline"
-        ? TAIL_SPRING.target.underline
-        : TAIL_SPRING.target.retract;
+    const targetSpring = presentation.phase === "sustain"
+      ? TAIL_SPRING.target.sustain
+      : presentation.phase === "point" || presentation.phase === "hold"
+        ? TAIL_SPRING.target.point
+        : presentation.phase === "underline"
+          ? TAIL_SPRING.target.underline
+          : TAIL_SPRING.target.retract;
     for (const side of TAIL_SIDES) {
       const state = dynamics[side];
-      const isPointTail = assignedPointTail === side;
-      const isUnderlineTail = assignedUnderlineTail === side;
+      const isPointTail = side === POINT_TAIL_SIDE;
+      const isUnderlineTail = side === CHALK_TAIL_SIDE;
       const pointEngaged = isPointTail && Boolean(pointElement);
       const underlineEngaged = isUnderlineTail && Boolean(underlineElement) && presentation.phase !== "point";
-      const phaseTarget = underlineEngaged && presentation.phase === "hold"
-        ? Math.max(0, Math.min(1, presentation.progress))
-        : pointEngaged || underlineEngaged
-          ? baseStrength
+      const phaseTarget = pointEngaged
+        ? pointTailStrengthTarget(presentation)
+        : underlineEngaged
+          ? underlineTailStrengthTarget(presentation)
           : 0;
       stepScalarSpring(
         state.strength,
@@ -450,7 +434,7 @@
       }
       if (state.strength.value <= 0.01 && presentation.phase === "idle") resetTailDynamics(state);
     }
-    return { assignedPointTail, assignedUnderlineTail, assignedSequence };
+    return assignedSequence;
   }
 
   function seedTailForSequence(
@@ -572,12 +556,36 @@
       timestamp / 1_000,
       side,
       strength,
-      presentation.phase === "underline" ? 2 : 0,
+      presentation.phase === "underline" || (presentation.phase === "sustain" && isPointTail) ? 2 : 0,
       chainRestLength,
     );
     fitChainToPolyline(chain, restPose.positions, buffers.blendedJoints, buffers.segmentLengths);
+    if (isPointTail && pointElement && (presentation.phase === "point" || presentation.phase === "sustain")) {
+      aimChainTip(chain, buffers.tipTangent, strength);
+    }
     if (debugLine) updateTailDebugLine(debugLine, buffers.curve);
     return true;
+  }
+
+  function createChalkProp(chain: THREE.Bone[], restPose: TailRestPose): THREE.Mesh {
+    chain[0].updateWorldMatrix(true, true);
+    const worldOutward = chain[11].getWorldPosition(new THREE.Vector3())
+      .sub(chain[10].getWorldPosition(new THREE.Vector3()));
+    const localOutward = worldOutward
+      .applyQuaternion(chain[11].getWorldQuaternion(new THREE.Quaternion()).invert())
+      .normalize();
+    if (localOutward.lengthSq() <= 1e-12) localOutward.copy(restPose.positions[11]).normalize();
+    const segmentLocal = restPose.positions[11].length();
+    const length = CHALK_PROP.lengthScale * segmentLocal;
+    const radius = CHALK_PROP.radiusScale * segmentLocal;
+    const mesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(radius * 0.85, radius, length, 10),
+      new THREE.MeshToonMaterial({ color: CHALK_PROP.color }),
+    );
+    mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), localOutward);
+    mesh.position.copy(localOutward).multiplyScalar(length * CHALK_PROP.protrusion);
+    mesh.name = "Nono_ChalkStick";
+    return mesh;
   }
 
   function resolveTipTangent(
@@ -736,9 +744,8 @@
 
   const TAIL_SIDES = ["left", "right"] as const;
   const TAIL_DEBUG_POINTS = 32;
+  const CHALK_PROP = { lengthScale: 1.4, radiusScale: 0.15, protrusion: 0.3, color: 0xf4f0df } as const;
   const WORLD_DOWN = new THREE.Vector3(0, -1, 0);
-  const _leftTipPoint: ScreenPoint = { x: 0, y: 0 };
-  const _rightTipPoint: ScreenPoint = { x: 0, y: 0 };
   const _reportedTipPoint: ScreenPoint = { x: 0, y: 0 };
   const _cueScreenPoint: ScreenPoint = { x: 0, y: 0 };
   const _tipWorldPosition = new THREE.Vector3();

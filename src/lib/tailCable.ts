@@ -119,8 +119,22 @@ export function buildCableCurve(input: CableCurveInput, out = createCableCurve()
 }
 
 export function curvePointByArc(curve: CableCurve, s: number, out = new THREE.Vector3()): THREE.Vector3 {
+  if (!Number.isFinite(s) || s <= 0) return out.copy(curve.p0);
+  if (s > curve.totalLength) {
+    let high = curve.cumulativeLengths.length - 1;
+    while (high > 0 && curve.cumulativeLengths[high] - curve.cumulativeLengths[high - 1] <= 1e-8) high -= 1;
+    if (high === 0) return out.copy(curve.p3);
+    const end = high * 3;
+    const start = end - 3;
+    _endTangent.set(
+      curve.points[end] - curve.points[start],
+      curve.points[end + 1] - curve.points[start + 1],
+      curve.points[end + 2] - curve.points[start + 2],
+    ).normalize();
+    return out.copy(curve.p3).addScaledVector(_endTangent, s - curve.totalLength);
+  }
   if (curve.totalLength <= 1e-8) return out.copy(curve.p0);
-  const distance = THREE.MathUtils.clamp(Number.isFinite(s) ? s : 0, 0, curve.totalLength);
+  const distance = s;
   let low = 0;
   let high = curve.cumulativeLengths.length - 1;
   while (low + 1 < high) {
@@ -145,7 +159,7 @@ export function curveLength(curve: CableCurve): number {
 }
 
 export function presentationTargetOffset(
-  phase: "idle" | "point" | "hold" | "underline" | "retract",
+  phase: "idle" | "point" | "hold" | "underline" | "retract" | "sustain",
   progress: number,
   isPointTail: boolean,
   out: { pullback: number; droop: number } = { pullback: 0, droop: 0 },
@@ -276,6 +290,36 @@ export function fitChainToPolyline(
   }
 }
 
+export function aimChainTip(chain: THREE.Bone[], worldDirection: THREE.Vector3, blend: number): void {
+  if (chain.length < 2) return;
+  const clampedBlend = THREE.MathUtils.clamp(Number.isFinite(blend) ? blend : 0, 0, 1);
+  if (clampedBlend <= 1e-4 || worldDirection.lengthSq() <= 1e-12) return;
+  const bone = chain[chain.length - 2];
+  const tip = chain[chain.length - 1];
+  bone.updateWorldMatrix(true, true);
+  bone.getWorldPosition(_boneWorldPosition);
+  tip.getWorldPosition(_childWorldPosition);
+  _currentDirection.subVectors(_childWorldPosition, _boneWorldPosition);
+  if (_currentDirection.lengthSq() <= 1e-12) return;
+  _currentDirection.normalize();
+  _desiredDirection.copy(worldDirection).normalize();
+  const dot = THREE.MathUtils.clamp(_currentDirection.dot(_desiredDirection), -1, 1);
+  bone.getWorldQuaternion(_boneWorldQuaternion);
+  if (dot < -0.999) {
+    stableLocalLateral(tip.position, _stableAxis).applyQuaternion(_boneWorldQuaternion).normalize();
+    _delta.setFromAxisAngle(_stableAxis, Math.PI);
+  } else {
+    _delta.setFromUnitVectors(_currentDirection, _desiredDirection);
+  }
+  _desiredWorldQuaternion.copy(_delta).multiply(_boneWorldQuaternion);
+  _boneWorldQuaternion.slerp(_desiredWorldQuaternion, clampedBlend);
+  if (bone.parent) bone.parent.getWorldQuaternion(_parentWorldQuaternion).invert();
+  else _parentWorldQuaternion.identity();
+  bone.quaternion.copy(_parentWorldQuaternion).multiply(_boneWorldQuaternion).normalize();
+  bone.updateWorldMatrix(false, false);
+  tip.updateWorldMatrix(false, false);
+}
+
 function applyBulge(curve: CableCurve, direction: THREE.Vector3, magnitude: number): void {
   curve.p1.copy(_baseP1).addScaledVector(direction, magnitude * TAIL_TUNING.bulgeSplit[0] * 2);
   curve.p2.copy(_baseP2).addScaledVector(direction, magnitude * TAIL_TUNING.bulgeSplit[1] * 2);
@@ -328,6 +372,7 @@ function smoothstep(value: number): number {
 
 const _baseP1 = new THREE.Vector3();
 const _baseP2 = new THREE.Vector3();
+const _endTangent = new THREE.Vector3();
 const _boneWorldPosition = new THREE.Vector3();
 const _childWorldPosition = new THREE.Vector3();
 const _currentDirection = new THREE.Vector3();

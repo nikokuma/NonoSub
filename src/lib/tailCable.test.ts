@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import * as THREE from "three";
 import {
+  aimChainTip,
   blendGuidePolyline,
   buildCableCurve,
   curveLength,
@@ -37,7 +38,7 @@ describe("tail presentation target offsets", () => {
   });
 
   it("returns no offsets for inactive phases and stays within tuning magnitudes", () => {
-    for (const phase of ["idle", "hold", "underline"] as const) {
+    for (const phase of ["idle", "hold", "underline", "sustain"] as const) {
       expect(presentationTargetOffset(phase, 0.5, true)).toEqual({ pullback: 0, droop: 0 });
     }
     for (let index = -10; index <= 110; index += 1) {
@@ -127,6 +128,65 @@ describe("tail cable curve", () => {
     expect(curveLength(curve)).toBe(0);
     const point = curvePointByArc(curve, 10);
     expect([point.x, point.y, point.z].every(Number.isFinite)).toBe(true);
+  });
+
+  it("extrapolates straight curves past the endpoint without collapsing samples", () => {
+    const curve = buildCableCurve({
+      root: ROOT,
+      baseTangent: RIGHT,
+      target: new THREE.Vector3(10, 0, 0),
+      tipTangent: RIGHT,
+      chainLength: 10,
+      bulgeDirection: FORWARD,
+      sagDirection: new THREE.Vector3(),
+    });
+    const first = curvePointByArc(curve, curve.totalLength + 1.25);
+    const second = curvePointByArc(curve, curve.totalLength + 2.5);
+    expect(first.distanceTo(new THREE.Vector3(11.25, 0, 0))).toBeLessThan(1e-6);
+    expect(second.distanceTo(new THREE.Vector3(12.5, 0, 0))).toBeLessThan(1e-6);
+    expect(first.equals(second)).toBe(false);
+  });
+
+  it("continues curved paths along the final non-degenerate LUT interval", () => {
+    const curve = buildCableCurve({
+      root: ROOT,
+      baseTangent: new THREE.Vector3(1, 1, 0).normalize(),
+      target: new THREE.Vector3(4, 2, 1),
+      tipTangent: new THREE.Vector3(1, -0.2, 0.4).normalize(),
+      chainLength: 4,
+      bulgeDirection: FORWARD,
+      sagDirection: DOWN,
+    });
+    const last = curve.cumulativeLengths.length - 1;
+    const offset = last * 3;
+    const previousOffset = offset - 3;
+    const expectedDirection = new THREE.Vector3(
+      curve.points[offset] - curve.points[previousOffset],
+      curve.points[offset + 1] - curve.points[previousOffset + 1],
+      curve.points[offset + 2] - curve.points[previousOffset + 2],
+    ).normalize();
+    const distance = 0.75;
+    const extrapolated = curvePointByArc(curve, curve.totalLength + distance);
+    const displacement = extrapolated.clone().sub(curve.p3);
+    expect(displacement.length()).toBeCloseTo(distance, 3);
+    expect(displacement.normalize().distanceTo(expectedDirection)).toBeLessThan(1e-3);
+  });
+
+  it("returns stable endpoints for degenerate, negative, and NaN samples", () => {
+    const curve = buildCableCurve({
+      root: new THREE.Vector3(2, -1, 4),
+      baseTangent: new THREE.Vector3(),
+      target: new THREE.Vector3(2, -1, 4),
+      tipTangent: new THREE.Vector3(),
+      chainLength: 0,
+      bulgeDirection: new THREE.Vector3(),
+      sagDirection: new THREE.Vector3(),
+    });
+    for (const distance of [10, Number.NaN, -2]) {
+      const point = curvePointByArc(curve, distance);
+      expect([point.x, point.y, point.z].every(Number.isFinite)).toBe(true);
+      expect(point.equals(distance > 0 ? curve.p3 : curve.p0)).toBe(true);
+    }
   });
 });
 
@@ -231,6 +291,80 @@ describe("tail cable bone fitting", () => {
       previous = chain.map((bone) => bone.quaternion.clone());
     }
   });
+
+  it("aims the final segment fully or partially without changing its length", () => {
+    const chain = makeChain();
+    const pose = captureTailRestPose(chain);
+    const lengths = Array.from({ length: chain.length - 1 }, () => 0.4);
+    const guide = makeGuide(lengths, 0.45);
+    fitChainToPolyline(chain, pose.positions, guide, lengths);
+    const before = worldJoints(chain);
+    const beforeLength = before.at(-1)!.distanceTo(before.at(-2)!);
+    const target = new THREE.Vector3(0, 0, 1);
+
+    aimChainTip(chain, target, 1);
+    const aimed = worldJoints(chain);
+    const aimedDirection = aimed.at(-1)!.clone().sub(aimed.at(-2)!).normalize();
+    expect(aimedDirection.angleTo(target)).toBeLessThan(1e-6);
+    expect(aimed.at(-1)!.distanceTo(aimed.at(-2)!)).toBeCloseTo(beforeLength, 9);
+
+    restoreTailRestPose(chain, pose);
+    fitChainToPolyline(chain, pose.positions, guide, lengths);
+    const currentDirection = finalSegmentDirection(chain);
+    const initialAngle = currentDirection.angleTo(target);
+    aimChainTip(chain, target, 0.5);
+    expect(finalSegmentDirection(chain).angleTo(target)).toBeCloseTo(initialAngle / 2, 1);
+  });
+
+  it("leaves the pose unchanged for zero blend and zero direction", () => {
+    const chain = makeChain();
+    const pose = captureTailRestPose(chain);
+    const lengths = Array.from({ length: chain.length - 1 }, () => 0.4);
+    fitChainToPolyline(chain, pose.positions, makeGuide(lengths, 0.3), lengths);
+    const before = chain.map((bone) => ({ position: bone.position.clone(), rotation: bone.quaternion.clone() }));
+    aimChainTip(chain, new THREE.Vector3(0, 0, 1), 0);
+    aimChainTip(chain, new THREE.Vector3(), 1);
+    chain.forEach((bone, index) => {
+      expect(bone.position.distanceTo(before[index].position)).toBeLessThan(1e-12);
+      expect(bone.quaternion.angleTo(before[index].rotation)).toBeLessThan(1e-12);
+    });
+  });
+
+  it("uses a finite rotation for antiparallel tip aims", () => {
+    const chain = makeChain();
+    const pose = captureTailRestPose(chain);
+    const lengths = Array.from({ length: chain.length - 1 }, () => 0.4);
+    fitChainToPolyline(chain, pose.positions, makeGuide(lengths, 0.2), lengths);
+    const opposite = finalSegmentDirection(chain).negate();
+    const beforeLengths = segmentLengths(worldJoints(chain));
+    aimChainTip(chain, opposite, 1);
+    chain.forEach((bone) => {
+      expect([bone.quaternion.x, bone.quaternion.y, bone.quaternion.z, bone.quaternion.w].every(Number.isFinite)).toBe(true);
+    });
+    segmentLengths(worldJoints(chain)).forEach((length, index) => expect(length).toBeCloseTo(beforeLengths[index], 9));
+  });
+
+  it("does not drift across repeated restored fits and tip aims", () => {
+    const chain = makeChain();
+    const pose = captureTailRestPose(chain);
+    const lengths = Array.from({ length: chain.length - 1 }, () => 0.4);
+    const guide = makeGuide(lengths, 0.5);
+    const target = new THREE.Vector3(0.2, -0.3, 1).normalize();
+    restoreTailRestPose(chain, pose);
+    fitChainToPolyline(chain, pose.positions, guide, lengths);
+    aimChainTip(chain, target, 1);
+    const expected = chain.map((bone) => ({ position: bone.position.clone(), rotation: bone.quaternion.clone() }));
+
+    for (let cycle = 0; cycle < 100; cycle += 1) {
+      restoreTailRestPose(chain, pose);
+      fitChainToPolyline(chain, pose.positions, guide, lengths);
+      aimChainTip(chain, target, 1);
+    }
+    chain.forEach((bone, index) => {
+      expect(bone.position.distanceTo(expected[index].position)).toBeLessThan(1e-8);
+      expect(bone.quaternion.angleTo(expected[index].rotation)).toBeLessThan(1e-8);
+    });
+  });
 });
 
 function makeChain(count = 12, localLength = 0.4): THREE.Bone[] {
@@ -260,6 +394,11 @@ function worldJoints(chain: THREE.Bone[]): THREE.Vector3[] {
 
 function segmentLengths(joints: readonly THREE.Vector3[]): number[] {
   return joints.slice(1).map((joint, index) => joint.distanceTo(joints[index]));
+}
+
+function finalSegmentDirection(chain: THREE.Bone[]): THREE.Vector3 {
+  const joints = worldJoints(chain);
+  return joints.at(-1)!.clone().sub(joints.at(-2)!).normalize();
 }
 
 function expectChainAtGuide(chain: THREE.Bone[], guide: readonly THREE.Vector3[], lengths: readonly number[], tolerance: number): void {

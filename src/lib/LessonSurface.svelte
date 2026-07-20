@@ -20,6 +20,8 @@
 
   type BoardPhase = "idle" | "erasing" | "thinking" | "writing";
 
+  const UNDERLINE_LEAD_MS = 350;
+
   const fixtureSession = FIXTURE_EVENTS.reduce(reduceSession, structuredClone(EMPTY_SESSION));
   const emptyOpenContext: LessonOpenContext = {
     selectionId: 0,
@@ -370,27 +372,30 @@
       return;
     }
 
+    const cues = { pointCueId, underlineCueId, underlineColor };
     if (pointCueId) {
-      await animatePresentation(generation, "point", 450, { pointCueId, underlineCueId, underlineColor });
+      await animatePresentation(generation, "point", 450, cues);
       if (generation !== cueGeneration) return;
     }
     if (underlineCueId) {
-      await animatePresentation(generation, "hold", 400, { pointCueId, underlineCueId, underlineColor });
+      if (!pointCueId) {
+        await sleep(UNDERLINE_LEAD_MS);
+        if (generation !== cueGeneration) return;
+      }
+      await animatePresentation(generation, "hold", 400, cues);
       if (generation !== cueGeneration) return;
-      await animatePresentation(generation, "underline", 550, { pointCueId, underlineCueId, underlineColor }, (progress) => {
+      await animatePresentation(generation, "underline", 550, cues, (progress) => {
         if (!tailRigAvailable) underlineProgress = { ...underlineProgress, [underlineCueId]: progress };
       });
       if (generation !== cueGeneration) return;
       await sleep(320);
       if (generation !== cueGeneration) return;
       underlineProgress = { ...underlineProgress, [underlineCueId]: 1 };
-    } else {
-      tailPresentation = { sequenceId: generation, phase: "hold", progress: 1, pointCueId };
-      await sleep(700);
+      await animatePresentation(generation, "retract", 350, cues);
+      if (generation !== cueGeneration) return;
     }
-    if (generation !== cueGeneration) return;
-    await animatePresentation(generation, "retract", 350, { pointCueId, underlineCueId, underlineColor });
-    if (generation === cueGeneration) tailPresentation = { ...IDLE_TAIL_PRESENTATION, sequenceId: generation };
+    if (pointCueId) tailPresentation = { sequenceId: generation, phase: "sustain", progress: 1, ...cues };
+    else tailPresentation = { ...IDLE_TAIL_PRESENTATION, sequenceId: generation };
   }
 
   function animatePresentation(

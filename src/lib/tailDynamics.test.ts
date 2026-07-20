@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as THREE from "three";
-import { seedVec3Spring, stepScalarSpring, stepVec3Spring, type ScalarSpringState, type Vec3SpringState } from "./tailDynamics";
+import { seedVec3Spring, stepScalarSpring, stepVec3Spring, TAIL_SPRING, type ScalarSpringState, type Vec3SpringState } from "./tailDynamics";
 
 describe("tail spring dynamics", () => {
   it("critically damped scalar motion converges without overshooting", () => {
@@ -64,5 +64,10 @@ describe("tail spring dynamics", () => {
     expect(state.position.equals(position)).toBe(true);
     expect(state.velocity.length()).toBe(0);
     expect(state.initialized).toBe(true);
+  });
+
+  it("uses a calmer target spring for sustained pointing", () => {
+    expect(TAIL_SPRING.target.sustain).toBeDefined();
+    expect(TAIL_SPRING.target.sustain.frequency).toBeLessThan(TAIL_SPRING.target.underline.frequency);
   });
 });

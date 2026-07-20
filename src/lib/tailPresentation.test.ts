@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
 import * as THREE from "three";
 import {
+  CHALK_TAIL_SIDE,
   captureTailRestPose,
-  chooseNearestTail,
   cueScreenPoint,
+  pointTailStrengthTarget,
+  POINT_TAIL_SIDE,
   presentationStrength,
   requiredTailStretch,
   restoreTailRestPose,
   tipUnderlineProgress,
+  UNDERLINE_TIP_DROP_PX,
+  underlineTailStrengthTarget,
   type TailPresentation,
 } from "./tailPresentation";
 
@@ -19,14 +23,37 @@ describe("tail presentation geometry", () => {
     expect(cueScreenPoint(rect, "underline", 1, false).x).toBe(300);
     expect(cueScreenPoint(rect, "underline", 0, true).x).toBe(300);
     expect(cueScreenPoint(rect, "underline", 1, true).x).toBe(100);
+    expect(cueScreenPoint(rect, "underline", 0.5).y).toBe(rect.top + rect.height + UNDERLINE_TIP_DROP_PX);
   });
 
-  it("chooses the nearest resting tail and keeps phase strength bounded", () => {
-    expect(chooseNearestTail({ x: 10, y: 20 }, { x: 90, y: 20 }, { x: 25, y: 30 })).toBe("left");
+  it("keeps phase strength bounded and assigns distinct tail roles", () => {
     const presentation: TailPresentation = { sequenceId: 1, phase: "retract", progress: 0.5 };
     expect(presentationStrength(presentation)).toBeCloseTo(0.5);
+    expect(presentationStrength({ ...presentation, phase: "sustain" })).toBe(1);
     expect(requiredTailStretch(20, 10)).toBe(1.3);
     expect(requiredTailStretch(5, 10)).toBe(1);
+    expect(CHALK_TAIL_SIDE).not.toBe(POINT_TAIL_SIDE);
+  });
+
+  it("computes point-tail strength targets by phase", () => {
+    const strength = (phase: TailPresentation["phase"], progress: number) => pointTailStrengthTarget({ sequenceId: 1, phase, progress });
+    expect(strength("idle", 1)).toBe(0);
+    expect(strength("point", 0)).toBe(0);
+    expect(strength("point", 0.5)).toBe(0.5);
+    expect(strength("point", 1)).toBe(1);
+    for (const phase of ["hold", "underline", "retract", "sustain"] as const) expect(strength(phase, 0.25)).toBe(1);
+  });
+
+  it("computes underline-tail strength targets by phase", () => {
+    const strength = (phase: TailPresentation["phase"], progress: number) => underlineTailStrengthTarget({ sequenceId: 1, phase, progress });
+    expect(strength("hold", 0)).toBe(0);
+    expect(strength("hold", 0.5)).toBe(0.5);
+    expect(strength("hold", 1)).toBe(1);
+    expect(strength("underline", 0.25)).toBe(1);
+    expect(strength("retract", 0)).toBe(1);
+    expect(strength("retract", 0.25)).toBeCloseTo(0.875);
+    expect(strength("retract", 1)).toBe(0);
+    for (const phase of ["idle", "point", "sustain"] as const) expect(strength(phase, 0.5)).toBe(0);
   });
 
   it("derives monotonic underline progress from the projected tip", () => {

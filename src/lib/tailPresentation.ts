@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import type { ChalkColor } from "./contracts";
 
-export type TailPresentationPhase = "idle" | "point" | "hold" | "underline" | "retract";
+export type TailPresentationPhase = "idle" | "point" | "hold" | "underline" | "retract" | "sustain";
 
 export interface TailPresentation {
   sequenceId: number;
@@ -40,6 +40,10 @@ export const CURRENT_TAIL_BONES = {
   right: Array.from({ length: 12 }, (_, index) => `spine.${String(67 + index).padStart(3, "0")}`),
 } as const;
 
+export const CHALK_TAIL_SIDE = "right" as const;
+export const POINT_TAIL_SIDE: "left" | "right" = CHALK_TAIL_SIDE === "right" ? "left" : "right";
+export const UNDERLINE_TIP_DROP_PX = 2;
+
 export const SEMANTIC_TAIL_BONES = {
   left: Array.from({ length: 12 }, (_, index) => `tail.L.${String(index + 1).padStart(2, "0")}`),
   right: Array.from({ length: 12 }, (_, index) => `tail.R.${String(index + 1).padStart(2, "0")}`),
@@ -60,7 +64,7 @@ export function cueScreenPoint(
   const clamped = Math.max(0, Math.min(1, progress));
   const directionProgress = rtl ? 1 - clamped : clamped;
   out.x = rect.left + rect.width * directionProgress;
-  out.y = rect.top + rect.height + 4;
+  out.y = rect.top + rect.height + UNDERLINE_TIP_DROP_PX;
   return out;
 }
 
@@ -70,17 +74,26 @@ export function tipUnderlineProgress(rect: RectLike, tipX: number, rtl: boolean,
   return Math.max(clamp01(previous), rtl ? 1 - fraction : fraction);
 }
 
-export function chooseNearestTail(leftTip: ScreenPoint, rightTip: ScreenPoint, target: ScreenPoint): "left" | "right" {
-  const distance = (point: ScreenPoint) => Math.hypot(point.x - target.x, point.y - target.y);
-  return distance(leftTip) <= distance(rightTip) ? "left" : "right";
-}
-
 export function presentationStrength(presentation: TailPresentation): number {
   const progress = Math.max(0, Math.min(1, presentation.progress));
   if (presentation.phase === "idle") return 0;
   if (presentation.phase === "point") return easeInOut(progress);
   if (presentation.phase === "retract") return 1 - easeInOut(progress);
+  if (presentation.phase === "sustain") return 1;
   return 1;
+}
+
+export function pointTailStrengthTarget(presentation: TailPresentation): number {
+  if (presentation.phase === "idle") return 0;
+  if (presentation.phase === "point") return easeInOut(clamp01(presentation.progress));
+  return 1;
+}
+
+export function underlineTailStrengthTarget(presentation: TailPresentation): number {
+  if (presentation.phase === "hold") return clamp01(presentation.progress);
+  if (presentation.phase === "underline") return 1;
+  if (presentation.phase === "retract") return 1 - easeInOut(clamp01(presentation.progress));
+  return 0;
 }
 
 export function captureTailRestPose(chain: THREE.Bone[]): TailRestPose {

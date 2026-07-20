@@ -25,6 +25,7 @@ export const TAIL_SPRING = {
     point: { frequency: 3.2, damping: 0.8 },
     underline: { frequency: 6.0, damping: 1.0 },
     retract: { frequency: 2.5, damping: 1.0 },
+    sustain: { frequency: 2.0, damping: 1.1 },
   },
   strength: { frequency: 4.0, damping: 1.0 },
 } as const;
