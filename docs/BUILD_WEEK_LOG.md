@@ -248,3 +248,4 @@
 - Checkpointed Fable's animation/export lane separately as `d0fdc3c`, then added GLTF late-completion guards and complete Three.js model/mixer/material/texture teardown.
 - `pnpm verify` passes with zero Svelte errors or warnings, 135 frontend tests, a successful production build, 110 Rust tests, and warning-free clippy. All five production surface URLs return HTTP 200.
 - Built an arm64 `.app`, `.dmg`, and `.app.zip`; strict code-sign verification passes after ad-hoc signing. Manual paid-network, ScreenCaptureKit permission, multi-display, and second-Mac Gatekeeper checks remain open.
+- Cloned exact pushed R13 commit `e011e37` into a fresh temporary directory, installed with the frozen lockfile, and repeated the complete verification successfully: zero Svelte errors or warnings, 135 frontend tests, production build, 110 Rust tests, and warning-free clippy.

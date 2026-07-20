@@ -22,7 +22,7 @@ Deadline: **Tuesday, July 21, 2026 at 5:00 PM PT**. Target implementation finish
 
 - [x] Direct dependency/license notice generated and reviewed; locked transitive metadata remains reproducible.
 - [x] Secret and sensitive-log source scan passed; the only `sk-` match is the explicit fake unit-test token `sk-test-generation-isolation`.
-- [ ] Exact pushed branch frozen-install/source-build verification from a fresh clone (run after the R13 checkpoint is pushed).
+- [x] Exact pushed R13 commit `e011e37` passed a fresh-clone `pnpm install --frozen-lockfile` and complete `pnpm verify`.
 - [x] Unsigned Apple Silicon `.dmg` built.
 - [x] Unsigned Apple Silicon `.app.zip` built.
 - [x] Arm64 executable verified; app and DMG copies pass strict ad-hoc signature verification.
@@ -34,7 +34,7 @@ Deadline: **Tuesday, July 21, 2026 at 5:00 PM PT**. Target implementation finish
 - Version: `0.1.0`
 - DMG SHA-256: `9c91f905293df92f5629cc22da4e4cde1f8187dca321eb0f931444b326c2ff5b`
 - App ZIP SHA-256: `a397e0817fc4c467f6dd17cf5e930bfa57f59d8d9d3b4d5bec0da400c149dafc`
-- Automated: 135 frontend tests, 110 Rust tests, Svelte check, production build, warning-free Clippy, five-surface route smoke test, arm64 bundle/signature verification.
+- Automated: 135 frontend tests, 110 Rust tests, Svelte check, production build, warning-free Clippy, exact-commit fresh-clone verification, five-surface route smoke test, arm64 bundle/signature verification.
 - Still manual: paid model calls and injected network/rate-limit faults; ScreenCaptureKit denial/revocation/reconnect; physical monitor removal; missing-WebGL device behavior; downloaded-copy Gatekeeper on another Mac/user.
 
 ## Devpost
