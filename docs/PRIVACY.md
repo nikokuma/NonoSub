@@ -2,7 +2,7 @@
 
 ## First-run disclosure
 
-> Your video remains on this device. NonoSub extracts audio locally and sends temporary audio chunks to OpenAI for transcription. In Live Captions, audio from the app, window, or display you choose in Apple's picker is streamed to OpenAI and never saved. Transcript context and your questions are sent to GPT‑5.6 for translation and teaching. OpenAI API data is not used for training by default. Standard Responses requests may be retained for abuse monitoring for up to 30 days even with `store:false`. NonoSub has no account, analytics, subscription, hosted proxy, or cloud session database.
+> Your video remains on this device. NonoSub extracts audio locally and sends temporary audio chunks to OpenAI for transcription. In Live Captions, audio from the app, window, or display you choose in NonoSub's source chooser is streamed to OpenAI and never saved. The chooser is populated from Apple's ScreenCaptureKit shareable-content list. Transcript context and your questions are sent to GPT‑5.6 for translation and teaching. OpenAI API data is not used for training by default. Standard Responses requests may be retained for abuse monitoring for up to 30 days even with `store:false`. NonoSub has no account, analytics, subscription, hosted proxy, or cloud session database.
 
 ## Data inventory
 

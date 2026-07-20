@@ -1,5 +1,14 @@
 # Build Week log
 
+## July 20, 2026 — visible capture chooser and autonomous QA design
+
+- Replaced the protected ScreenCaptureKit content picker with a NonoSub-owned Applications / Windows / Displays chooser.
+- Added searchable, refreshable capture-source enumeration and explicit source selection before a paid realtime session starts.
+- Kept ScreenCaptureKit as the capture backend and excluded NonoSub's own process audio.
+- Added a debug-only launcher entry point for deterministic native acceptance without changing release startup behavior.
+- Defined an autonomous acceptance campaign covering lesson-model quality, board layout, subtitle clause integrity, native capture, file mode, and failure/endurance cases.
+- Added GPT-5.5 `none`, `low`, and `medium` to the lesson bakeoff alongside the current GPT-5.6 deployment.
+
 ## July 13, 2026 — foundation and vertical spine
 
 - Created `/Users/nico/Projects/NonoSub` from the Tauri 2 Svelte/TypeScript template.

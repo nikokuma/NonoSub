@@ -2,7 +2,7 @@
 
 > NonoSub turns foreign-language media into an interactive language lesson while you watch.
 
-NonoSub is a privacy-conscious, menu-bar-first Tauri desktop app for understanding media in another language. Open a local video for diarized, contextual subtitles or listen to another macOS app through Apple's native system-audio picker. Click any finalized line and Nono turns it into a structured language lesson on a floating chalkboard.
+NonoSub is a privacy-conscious, menu-bar-first Tauri desktop app for understanding media in another language. Open a local video for diarized, contextual subtitles or choose a visible macOS application, window, or display for live system-audio captions. Right-click any finalized line and Nono turns it into a structured language lesson on a floating chalkboard.
 
 Built from scratch for OpenAI Build Week 2026 in the Education category using Codex, GPT‑5.6, and `gpt-4o-transcribe-diarize`.
 
@@ -38,7 +38,7 @@ Build Week scope is deliberately narrow:
 
 The repository includes three original, reproducible fixtures: a roughly 34-second two-voice technical clip, a 24-second indirect-refusal teaching clip, and a roughly 58-second English reverse-direction clip. See [`demo/README.md`](demo/README.md) for provenance and FFmpeg build commands.
 
-Live Captions require macOS 14+ and use the Apple ScreenCaptureKit picker. URL downloading, embedded browsing, global media control, accounts, saved transcripts, vocabulary decks, cloud sync, mobile, live diarization, and overlapping-speech separation research are outside Build Week scope.
+Live Captions require macOS 14+ and use ScreenCaptureKit. NonoSub lists Apple's shareable applications, windows, and displays inside its visible launcher, then constructs a native content filter for the user's explicit selection. URL downloading, embedded browsing, accounts, saved transcripts, vocabulary decks, cloud sync, mobile, live diarization, and overlapping-speech separation research are outside Build Week scope.
 
 For the most reliable file-mode speaker continuity, each recurring speaker should appear in the first roughly 30-second chunk used to build internal reference samples. Build Week does not attempt to discover a brand-new speaker late in a file.
 

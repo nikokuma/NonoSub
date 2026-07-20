@@ -12,7 +12,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 vi.mock("@tauri-apps/api/event", () => ({ emit: mocks.emit }));
 
-import { startFileSession, validateVideoPath } from "./sessionLaunch";
+import { startFileSession, startLiveSession, validateVideoPath } from "./sessionLaunch";
 
 describe("session launcher", () => {
   beforeEach(() => {
@@ -60,5 +60,49 @@ describe("session launcher", () => {
       languages: preferences.languages,
       processingMode: "translated",
     });
+  });
+
+  it("passes only the selected native source identifiers into live capture", async () => {
+    mocks.invoke.mockResolvedValue(undefined);
+    const preferences = {
+      style: structuredClone(DEFAULT_STYLE),
+      level: "beginner" as const,
+      languages: { ...DEFAULT_LANGUAGES },
+      sync: { ...DEFAULT_SYNC },
+      processingMode: "translated" as const,
+      onboardingComplete: true,
+      lessonPlacements: {},
+      experimentalExternalPause: false,
+    };
+    const source = { kind: "application" as const, processId: 42 };
+
+    await startLiveSession(preferences, source);
+
+    expect(mocks.invoke).toHaveBeenCalledWith("start_live_capture", {
+      languages: preferences.languages,
+      syncMode: preferences.sync.liveMode,
+      processingMode: preferences.processingMode,
+      source,
+    });
+  });
+
+  it("hides the overlay when the selected live source cannot start", async () => {
+    mocks.invoke.mockImplementation((command: string) => {
+      if (command === "start_live_capture") return Promise.reject(new Error("source vanished"));
+      return Promise.resolve();
+    });
+    const preferences = {
+      style: structuredClone(DEFAULT_STYLE),
+      level: "beginner" as const,
+      languages: { ...DEFAULT_LANGUAGES },
+      sync: { ...DEFAULT_SYNC },
+      processingMode: "translated" as const,
+      onboardingComplete: true,
+      lessonPlacements: {},
+      experimentalExternalPause: false,
+    };
+
+    await expect(startLiveSession(preferences, { kind: "window", windowId: 99 })).rejects.toThrow("source vanished");
+    expect(mocks.invoke).toHaveBeenCalledWith("hide_surface", { surface: "overlay" });
   });
 });

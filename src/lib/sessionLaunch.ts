@@ -1,4 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import type { LiveCaptureSourceSelection } from "./contracts";
 import type { Preferences } from "./preferences";
 
 export interface FileLaunchResult {
@@ -65,17 +66,24 @@ export async function startFileSession(
 
 export async function startLiveSession(
   preferences: Preferences,
+  source: LiveCaptureSourceSelection,
   hooks: LaunchHooks = {},
 ): Promise<void> {
   if (!isTauri()) throw new Error("Live system audio requires the NonoSub macOS app.");
   await cancelAndReplaceSession();
-  hooks.status?.("Choose a browser, window, or display in Apple’s sharing picker…");
+  hooks.status?.("Connecting to the selected audio source…");
   await invoke("open_surface", { surface: "overlay" });
-  await invoke("start_live_capture", {
-    languages: preferences.languages,
-    syncMode: preferences.sync.liveMode,
-    processingMode: preferences.processingMode,
-  });
+  try {
+    await invoke("start_live_capture", {
+      languages: preferences.languages,
+      syncMode: preferences.sync.liveMode,
+      processingMode: preferences.processingMode,
+      source,
+    });
+  } catch (error) {
+    await invoke("hide_surface", { surface: "overlay" }).catch(() => undefined);
+    throw error;
+  }
   hooks.status?.("Listening · live audio is sent to OpenAI and never saved.");
 }
 

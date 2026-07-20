@@ -16,7 +16,7 @@ For the reverse-direction path, set Subtitles to **Japanese** and open `demo/Non
 
 ## Live Captions
 
-Choose **Start Live Captions…** from the menu bar, then select a browser or media application in Apple's picker. NonoSub captures only the selected system audio, excludes its own process audio, and does not write PCM to disk. Live mode intentionally uses one `Live Audio` identity rather than claiming reliable realtime diarization.
+Choose **Start Live Captions…** from the menu bar. NonoSub displays a visible list of shareable applications, windows, and displays; select the browser or media application there and press **Start Captions**. NonoSub captures only the selected system audio, excludes its own process audio, and does not write PCM to disk. Live mode intentionally uses one `Live Audio` identity rather than claiming reliable realtime diarization.
 
 If permission is denied, enable NonoSub under **System Settings → Privacy & Security → Screen & System Audio Recording**, then relaunch. File mode remains available regardless of live-capture permission.
 

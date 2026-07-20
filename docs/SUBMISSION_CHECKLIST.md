@@ -12,7 +12,7 @@ Deadline: **Tuesday, July 21, 2026 at 5:00 PM PT**. Target implementation finish
 - [ ] Historical-line selection pauses playback and answers at all three levels.
 - [ ] All six presets checked on light and dark frames.
 - [ ] Invalid key, inaccessible model, network loss, rate limit, codec error, malformed output, cancellation, restart, and missing GLB checked.
-- [ ] ScreenCaptureKit picker, permission denial, self-audio exclusion, one reconnect, and graceful live stop checked.
+- [ ] ScreenCaptureKit source chooser, permission denial, self-audio exclusion, one reconnect, and graceful live stop checked.
 - [x] Japanese→English and English→Japanese pass in file mode.
 - [x] Japanese→English and English→Japanese live modes pass on the development Mac.
 - [x] Workbench 960×680, lesson 780×620, and overlay 900×240 fit checks pass in fixture QA.

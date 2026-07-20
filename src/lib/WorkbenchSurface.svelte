@@ -8,7 +8,7 @@
   import { applyPreferenceAction, preferencePatchBetween } from "./preferences";
   import { initialSession, loadPreferences, maintainSubscription, savePreferencePatch, subscribePreferences, subscribeSession } from "./runtime";
   import type { PreferencePatch } from "./preferences";
-  import { errorMessage, startFileSession, startLiveSession } from "./sessionLaunch";
+  import { errorMessage, startFileSession } from "./sessionLaunch";
   import SubtitleStylePreview from "./SubtitleStylePreview.svelte";
   import { earlierTranscriptCount, TRANSCRIPT_PAGE_SIZE, visibleTranscriptPage } from "./transcriptPaging";
 
@@ -140,14 +140,11 @@
       mediaMessage = "This API project cannot access realtime translation yet.";
       return;
     }
-    busy = true;
-    mediaMessage = "Choose a browser, window, or display in Apple’s sharing picker…";
     try {
-      await startLiveSession(preferences, { status: (message) => mediaMessage = message });
+      mediaMessage = "Choose the application, window, or display NonoSub should listen to.";
+      await invoke("open_launcher_surface", { mode: "live" });
     } catch (error) {
       mediaMessage = errorMessage(error);
-    } finally {
-      busy = false;
     }
   }
 
@@ -220,7 +217,7 @@
       <div class="intro"><span class="eyebrow">NONOSUB / SETTINGS & TRANSCRIPT</span><h1>Configure quietly.<br><em>Watch without an app.</em></h1><p>This diagnostic view holds setup, styling, language routing, transcript inspection, and recovery. Normal watching stays in the viewer or floating subtitles.</p></div>
       <div class="launch-grid">
         <button class="launch file" onclick={chooseMedia} disabled={busy}><span>LOCAL VIDEO</span><b>Open MP4 or MOV</b><small>Diarized · contextual · submission-ready</small></button>
-        <button class="launch live" onclick={startLive} disabled={busy || !liveReady}><span>LIVE CAPTIONS</span><b>Listen to another app</b><small>Apple system-audio picker · macOS 14+</small></button>
+        <button class="launch live" onclick={startLive} disabled={busy || !liveReady}><span>LIVE CAPTIONS</span><b>Listen to another app</b><small>Choose an application or window · macOS 14+</small></button>
       </div>
       <div class="status-line"><i></i><span>{mediaMessage}</span><b>{session.phase.toUpperCase()}</b></div>
 
@@ -294,7 +291,7 @@
 </div>
 
 {#if onboarding}
-  <div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true"><button class="close" onclick={() => apiReady && (onboarding = false)}>×</button><span class="nono-mark">の</span><span class="eyebrow">WELCOME TO NONOSUB</span><h1>Your media stays yours.</h1><p>Local video never leaves this Mac. Extracted audio goes to OpenAI transcription. For Live Captions, only audio from the source you select in Apple’s picker is streamed to OpenAI. Transcript context and questions go to GPT‑5.6.</p><div class="privacy-grid"><div><b>STAYS LOCAL</b><span>Video file, lesson history, preferences</span></div><div><b>SENT TO OPENAI</b><span>Extracted or selected audio, transcript context, questions</span></div></div><p class="fine">No accounts, analytics, NonoSub cloud, or saved transcript. Your API key lives in the operating-system credential vault and never enters a webview after saving.</p><label>OpenAI API key<input type="password" bind:value={apiKey} placeholder="sk-…" autocomplete="off" /></label><button class="save" onclick={saveApiKey}>Save securely & validate</button>{#if apiMessage}<p class="api-message">{apiMessage}</p>{/if}</section></div>
+  <div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true"><button class="close" onclick={() => apiReady && (onboarding = false)}>×</button><span class="nono-mark">の</span><span class="eyebrow">WELCOME TO NONOSUB</span><h1>Your media stays yours.</h1><p>Local video never leaves this Mac. Extracted audio goes to OpenAI transcription. For Live Captions, only audio from the application, window, or display you select is streamed to OpenAI. Transcript context and questions go to GPT‑5.6.</p><div class="privacy-grid"><div><b>STAYS LOCAL</b><span>Video file, lesson history, preferences</span></div><div><b>SENT TO OPENAI</b><span>Extracted or selected audio, transcript context, questions</span></div></div><p class="fine">No accounts, analytics, NonoSub cloud, or saved transcript. Your API key lives in the operating-system credential vault and never enters a webview after saving.</p><label>OpenAI API key<input type="password" bind:value={apiKey} placeholder="sk-…" autocomplete="off" /></label><button class="save" onclick={saveApiKey}>Save securely & validate</button>{#if apiMessage}<p class="api-message">{apiMessage}</p>{/if}</section></div>
 {/if}
 
 <style>

@@ -26,6 +26,28 @@ export type SubtitlePreset =
 export type AppSurface = "workbench" | "viewer" | "overlay" | "lesson" | "launcher";
 export type LauncherMode = "file" | "live";
 export type LauncherState = "idle" | "hovering" | "preparing" | "starting" | "error";
+export type LiveCaptureSourceKind = "application" | "window" | "display";
+
+export interface LiveCaptureSourceSelection {
+  kind: LiveCaptureSourceKind;
+  processId?: number;
+  windowId?: number;
+  displayId?: number;
+}
+
+export interface LiveCaptureSource extends LiveCaptureSourceSelection {
+  id: string;
+  title: string;
+  detail: string;
+  applicationName?: string;
+  bundleIdentifier?: string;
+}
+
+export interface LiveCaptureSources {
+  applications: LiveCaptureSource[];
+  windows: LiveCaptureSource[];
+  displays: LiveCaptureSource[];
+}
 
 export interface LessonPlacement {
   monitorKey: string;

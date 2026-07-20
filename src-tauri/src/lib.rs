@@ -1959,6 +1959,15 @@ fn get_launcher_mode(state: State<'_, AppState>) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn open_launcher_surface(app: tauri::AppHandle, mode: String) -> Result<(), String> {
+    if !matches!(mode.as_str(), "file" | "live") {
+        return Err("Unknown launcher mode.".into());
+    }
+    show_launcher(&app, &mode);
+    Ok(())
+}
+
+#[tauri::command]
 fn hide_surface(app: tauri::AppHandle, surface: String) -> Result<(), String> {
     let label = surface_label(&surface)?;
     if let Some(window) = app.get_webview_window(label) {
@@ -2039,6 +2048,7 @@ async fn start_live_capture(
     languages: LanguageSettings,
     sync_mode: LiveSyncMode,
     processing_mode: CaptionProcessingMode,
+    source: live::LiveCaptureSourceSelection,
 ) -> Result<(), openai::ApiError> {
     validate_languages(&languages).map_err(|message| service_error(&message))?;
     state.retranslations.cancel()?;
@@ -2054,10 +2064,13 @@ async fn start_live_capture(
     match live::start(
         app.clone(),
         &state.live,
-        key,
-        languages,
-        sync_mode,
-        processing_mode,
+        live::LiveStartOptions {
+            api_key: key,
+            languages,
+            sync_mode,
+            processing_mode,
+            source,
+        },
         run.generation,
     )
     .await
@@ -2107,7 +2120,22 @@ async fn start_live_capture(
     _languages: LanguageSettings,
     _sync_mode: LiveSyncMode,
     _processing_mode: CaptionProcessingMode,
+    _source: serde_json::Value,
 ) -> Result<(), openai::ApiError> {
+    Err(service_error(
+        "Live system-audio captions are available on macOS 14 or later.",
+    ))
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn list_live_capture_sources() -> Result<live::LiveCaptureSources, openai::ApiError> {
+    live::list_capture_sources().await
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn list_live_capture_sources() -> Result<serde_json::Value, openai::ApiError> {
     Err(service_error(
         "Live system-audio captions are available on macOS 14 or later.",
     ))
@@ -2753,7 +2781,20 @@ fn show_launcher(app: &tauri::AppHandle, mode: &str) {
         *current = mode.into();
     }
     let _ = show_surface(app, "launcher");
+    if let Some(window) = app.get_webview_window("launcher") {
+        let (width, height) = launcher_size(mode);
+        let _ = window.set_size(tauri::LogicalSize::new(width, height));
+        let _ = window.center();
+    }
     let _ = app.emit("launcher-action", mode);
+}
+
+fn launcher_size(mode: &str) -> (f64, f64) {
+    if mode == "live" {
+        (720.0, 520.0)
+    } else {
+        (420.0, 190.0)
+    }
 }
 
 fn dispatch_action(app: &tauri::AppHandle, id: &str) {
@@ -2934,6 +2975,10 @@ pub fn run() {
             } else if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
             }
+            #[cfg(debug_assertions)]
+            if std::env::var_os("NONOSUB_SHOW_LIVE_LAUNCHER").is_some() {
+                show_launcher(app.handle(), "live");
+            }
             Ok(())
         })
         .on_menu_event(|app, event| dispatch_action(app, event.id().as_ref()))
@@ -2970,8 +3015,10 @@ pub fn run() {
             update_speaker,
             open_surface,
             get_launcher_mode,
+            open_launcher_surface,
             hide_surface,
             cancel_session,
+            list_live_capture_sources,
             start_live_capture,
             stop_live_capture,
         ])
@@ -3497,6 +3544,8 @@ mod tests {
             assert!(!requires_regular_activation([spec.label]));
         }
         assert_eq!(window_spec("launcher").unwrap().width, 420.0);
+        assert_eq!(launcher_size("file"), (420.0, 190.0));
+        assert_eq!(launcher_size("live"), (720.0, 520.0));
         assert_eq!(window_spec("lesson").unwrap().height, 210.0);
     }
 

@@ -12,13 +12,15 @@ use futures_util::{
     SinkExt, StreamExt,
 };
 use screencapturekit::{
-    async_api::{AsyncSCContentSharingPicker, AsyncSCStream},
+    async_api::{AsyncSCShareableContent, AsyncSCStream},
     cm::CMSampleBufferExt,
-    content_sharing_picker::{
-        SCContentSharingPickerConfiguration, SCContentSharingPickerMode, SCPickerOutcome,
+    shareable_content::SCShareableContent,
+    stream::{
+        configuration::SCStreamConfiguration, content_filter::SCContentFilter,
+        output_type::SCStreamOutputType,
     },
-    stream::{configuration::SCStreamConfiguration, output_type::SCStreamOutputType},
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -54,6 +56,53 @@ const MAX_RETAINED_LIVE_MS: u64 = 120_000;
 type RealtimeSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 type RealtimeWriter = SplitSink<RealtimeSocket, Message>;
 type RealtimeReader = SplitStream<RealtimeSocket>;
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveCaptureSourceKind {
+    Application,
+    Window,
+    Display,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveCaptureSourceSelection {
+    pub kind: LiveCaptureSourceKind,
+    pub process_id: Option<i32>,
+    pub window_id: Option<u32>,
+    pub display_id: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveCaptureSource {
+    pub id: String,
+    pub kind: LiveCaptureSourceKind,
+    pub title: String,
+    pub detail: String,
+    pub application_name: Option<String>,
+    pub bundle_identifier: Option<String>,
+    pub process_id: Option<i32>,
+    pub window_id: Option<u32>,
+    pub display_id: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveCaptureSources {
+    pub applications: Vec<LiveCaptureSource>,
+    pub windows: Vec<LiveCaptureSource>,
+    pub displays: Vec<LiveCaptureSource>,
+}
+
+pub struct LiveStartOptions {
+    pub api_key: String,
+    pub languages: LanguageSettings,
+    pub sync_mode: LiveSyncMode,
+    pub processing_mode: CaptionProcessingMode,
+    pub source: LiveCaptureSourceSelection,
+}
 
 #[derive(Debug)]
 struct RecentEventIds {
@@ -1383,45 +1432,263 @@ fn emit_events(app: &tauri::AppHandle, generation: u64, events: Vec<SessionEvent
     }
 }
 
+fn safe_source_label(value: &str, fallback: &str) -> String {
+    let cleaned = value
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if cleaned.is_empty() {
+        fallback.to_owned()
+    } else {
+        cleaned.chars().take(120).collect()
+    }
+}
+
+fn eligible_window(title: Option<&str>, width: f64, height: f64, layer: i32) -> bool {
+    layer == 0
+        && width >= 160.0
+        && height >= 90.0
+        && title.is_some_and(|title| !title.trim().is_empty())
+}
+
+pub async fn list_capture_sources() -> Result<LiveCaptureSources, ApiError> {
+    let content = AsyncSCShareableContent::create()
+        .with_exclude_desktop_windows(true)
+        .with_on_screen_windows_only(true)
+        .get()
+        .await
+        .map_err(|error| {
+            capture_error(&format!(
+                "NonoSub could not list shareable apps and windows. Check Screen & System Audio Recording permission: {error}"
+            ))
+        })?;
+    Ok(capture_sources_from_content(&content))
+}
+
+fn capture_sources_from_content(content: &SCShareableContent) -> LiveCaptureSources {
+    let current_process = i32::try_from(std::process::id()).unwrap_or_default();
+    let windows = content.windows();
+    let mut visible_window_counts = HashMap::<i32, usize>::new();
+    let mut window_sources = Vec::new();
+
+    for window in &windows {
+        let frame = window.frame();
+        let owner = window.owning_application();
+        let process_id = owner.as_ref().map_or(0, |app| app.process_id());
+        let raw_title = window.title();
+        if process_id == current_process
+            || !eligible_window(
+                raw_title.as_deref(),
+                frame.size.width,
+                frame.size.height,
+                window.window_layer(),
+            )
+        {
+            continue;
+        }
+        *visible_window_counts.entry(process_id).or_default() += 1;
+        let app_name = owner
+            .as_ref()
+            .map(|app| safe_source_label(&app.application_name(), "Application"));
+        let title = safe_source_label(raw_title.as_deref().unwrap_or_default(), "Untitled window");
+        window_sources.push(LiveCaptureSource {
+            id: format!("window:{}", window.window_id()),
+            kind: LiveCaptureSourceKind::Window,
+            title,
+            detail: format!(
+                "{} · {}×{}",
+                app_name.as_deref().unwrap_or("Application"),
+                frame.size.width.round() as i64,
+                frame.size.height.round() as i64
+            ),
+            application_name: app_name,
+            bundle_identifier: owner.as_ref().map(|app| app.bundle_identifier()),
+            process_id: Some(process_id),
+            window_id: Some(window.window_id()),
+            display_id: None,
+        });
+    }
+
+    let mut application_sources = content
+        .applications()
+        .into_iter()
+        .filter(|application| {
+            application.process_id() != current_process
+                && visible_window_counts
+                    .get(&application.process_id())
+                    .copied()
+                    .unwrap_or_default()
+                    > 0
+        })
+        .map(|application| {
+            let count = visible_window_counts
+                .get(&application.process_id())
+                .copied()
+                .unwrap_or_default();
+            let name = safe_source_label(&application.application_name(), "Application");
+            LiveCaptureSource {
+                id: format!("application:{}", application.process_id()),
+                kind: LiveCaptureSourceKind::Application,
+                title: name.clone(),
+                detail: format!("{count} visible window{}", if count == 1 { "" } else { "s" }),
+                application_name: Some(name),
+                bundle_identifier: Some(application.bundle_identifier()),
+                process_id: Some(application.process_id()),
+                window_id: None,
+                display_id: None,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut display_sources = content
+        .displays()
+        .into_iter()
+        .enumerate()
+        .map(|(index, display)| LiveCaptureSource {
+            id: format!("display:{}", display.display_id()),
+            kind: LiveCaptureSourceKind::Display,
+            title: format!("Display {}", index + 1),
+            detail: format!("{}×{}", display.width(), display.height()),
+            application_name: None,
+            bundle_identifier: None,
+            process_id: None,
+            window_id: None,
+            display_id: Some(display.display_id()),
+        })
+        .collect::<Vec<_>>();
+
+    application_sources.sort_by_key(|source| source.title.to_ascii_lowercase());
+    window_sources.sort_by_key(|source| source.title.to_ascii_lowercase());
+    display_sources.sort_by_key(|source| source.title.to_ascii_lowercase());
+    LiveCaptureSources {
+        applications: application_sources,
+        windows: window_sources,
+        displays: display_sources,
+    }
+}
+
+fn intersection_area(
+    first: screencapturekit::cg::CGRect,
+    second: screencapturekit::cg::CGRect,
+) -> f64 {
+    let left = first.origin.x.max(second.origin.x);
+    let top = first.origin.y.max(second.origin.y);
+    let right = (first.origin.x + first.size.width).min(second.origin.x + second.size.width);
+    let bottom = (first.origin.y + first.size.height).min(second.origin.y + second.size.height);
+    (right - left).max(0.0) * (bottom - top).max(0.0)
+}
+
+fn capture_filter_for_selection(
+    content: &SCShareableContent,
+    selection: &LiveCaptureSourceSelection,
+) -> Result<SCContentFilter, ApiError> {
+    match selection.kind {
+        LiveCaptureSourceKind::Window => {
+            let window_id = selection
+                .window_id
+                .ok_or_else(|| capture_error("The selected window is invalid."))?;
+            let windows = content.windows();
+            let window = windows
+                .iter()
+                .find(|window| window.window_id() == window_id && window.is_on_screen())
+                .ok_or_else(|| {
+                    capture_error("That window is no longer available. Refresh the source list.")
+                })?;
+            Ok(SCContentFilter::create().with_window(window).build())
+        }
+        LiveCaptureSourceKind::Display => {
+            let display_id = selection
+                .display_id
+                .ok_or_else(|| capture_error("The selected display is invalid."))?;
+            let displays = content.displays();
+            let display = displays
+                .iter()
+                .find(|display| display.display_id() == display_id)
+                .ok_or_else(|| {
+                    capture_error("That display is no longer available. Refresh the source list.")
+                })?;
+            Ok(SCContentFilter::create()
+                .with_display(display)
+                .with_excluding_windows(&[])
+                .build())
+        }
+        LiveCaptureSourceKind::Application => {
+            let process_id = selection
+                .process_id
+                .ok_or_else(|| capture_error("The selected application is invalid."))?;
+            let applications = content.applications();
+            let application = applications
+                .iter()
+                .find(|application| application.process_id() == process_id)
+                .ok_or_else(|| {
+                    capture_error("That application is no longer available. Refresh the source list.")
+                })?;
+            let app_windows = content
+                .windows()
+                .into_iter()
+                .filter(|window| {
+                    window
+                        .owning_application()
+                        .is_some_and(|owner| owner.process_id() == process_id)
+                })
+                .collect::<Vec<_>>();
+            let displays = content.displays();
+            let display = displays
+                .iter()
+                .max_by(|left, right| {
+                    let left_area = app_windows
+                        .iter()
+                        .map(|window| intersection_area(left.frame(), window.frame()))
+                        .sum::<f64>();
+                    let right_area = app_windows
+                        .iter()
+                        .map(|window| intersection_area(right.frame(), window.frame()))
+                        .sum::<f64>();
+                    left_area.total_cmp(&right_area)
+                })
+                .ok_or_else(|| capture_error("No display is available for that application."))?;
+            Ok(SCContentFilter::create()
+                .with_display(display)
+                .with_including_applications(&[application], &[])
+                .build())
+        }
+    }
+}
+
 pub async fn start(
     app: tauri::AppHandle,
     state: &LiveState,
-    api_key: String,
-    languages: LanguageSettings,
-    sync_mode: LiveSyncMode,
-    processing_mode: CaptionProcessingMode,
+    options: LiveStartOptions,
     generation: u64,
 ) -> Result<(), ApiError> {
+    let LiveStartOptions {
+        api_key,
+        languages,
+        sync_mode,
+        processing_mode,
+        source,
+    } = options;
     let start_lease = state.start_sequence.fetch_add(1, Ordering::Relaxed) + 1;
     abort_previous(state).await;
     let _start_guard = state.start_lock.lock().await;
     ensure_live_start_current(state, start_lease)?;
     state.cancelled.store(false, Ordering::Relaxed);
 
-    let mut picker_config = SCContentSharingPickerConfiguration::new();
-    picker_config.set_allows_changing_selected_content(false);
-    picker_config.set_allowed_picker_modes(&[
-        SCContentSharingPickerMode::SingleDisplay,
-        SCContentSharingPickerMode::SingleApplication,
-        SCContentSharingPickerMode::SingleWindow,
-    ]);
-    let picked = AsyncSCContentSharingPicker::show(&picker_config).await;
+    let content = AsyncSCShareableContent::create()
+        .with_exclude_desktop_windows(true)
+        .with_on_screen_windows_only(true)
+        .get()
+        .await
+        .map_err(|error| {
+            capture_error(&format!(
+                "NonoSub could not access the selected source. Check Screen & System Audio Recording permission: {error}"
+            ))
+        })?;
     ensure_live_start_current(state, start_lease)?;
-    let filter = match picked {
-        SCPickerOutcome::Picked(result) => result.filter(),
-        SCPickerOutcome::Cancelled => {
-            return Err(ApiError {
-                kind: ApiErrorKind::Cancelled,
-                message: "Live caption selection was cancelled.".into(),
-                retryable: false,
-            })
-        }
-        SCPickerOutcome::Error(error) => {
-            return Err(capture_error(&format!(
-                "Apple's capture picker failed: {error}"
-            )))
-        }
-    };
+    let filter = capture_filter_for_selection(&content, &source)?;
 
     let config = SCStreamConfiguration::new()
         .with_captures_audio(true)
@@ -3038,6 +3305,44 @@ mod tests {
         assert!(ids.insert("four"));
         assert_eq!(ids.order.iter().cloned().collect::<Vec<_>>(), ["two", "three", "four"]);
         assert!(ids.insert("one"), "an evicted event can be accepted in a later epoch window");
+    }
+
+    #[test]
+    fn source_chooser_hides_tiny_untitled_and_non_content_windows() {
+        assert!(eligible_window(Some("Japanese livestream"), 1280.0, 720.0, 0));
+        assert!(!eligible_window(Some(""), 1280.0, 720.0, 0));
+        assert!(!eligible_window(Some("Menu"), 80.0, 40.0, 0));
+        assert!(!eligible_window(Some("Overlay"), 1280.0, 720.0, 3));
+    }
+
+    #[test]
+    fn application_source_prefers_the_display_with_the_largest_visible_area() {
+        let first = screencapturekit::cg::CGRect::new(0.0, 0.0, 1000.0, 800.0);
+        let second = screencapturekit::cg::CGRect::new(1000.0, 0.0, 1000.0, 800.0);
+        let mostly_second = screencapturekit::cg::CGRect::new(900.0, 100.0, 900.0, 600.0);
+        assert!(intersection_area(second, mostly_second) > intersection_area(first, mostly_second));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires a logged-in macOS session and Screen & System Audio Recording permission"]
+    async fn native_capture_source_enumeration_returns_a_selectable_source() {
+        let sources = list_capture_sources()
+            .await
+            .expect("ScreenCaptureKit should enumerate visible content");
+        assert!(
+            !sources.applications.is_empty()
+                || !sources.windows.is_empty()
+                || !sources.displays.is_empty(),
+            "at least one capture source should be available"
+        );
+        assert!(
+            sources
+                .applications
+                .iter()
+                .chain(&sources.windows)
+                .all(|source| source.process_id != Some(std::process::id() as i32)),
+            "NonoSub must not offer itself as a capture source"
+        );
     }
 
     #[test]
