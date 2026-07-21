@@ -170,6 +170,7 @@ export type BoardDemoKind = "none" | "sentence_breakdown" | "omitted_meaning" | 
 export type ChalkColor = "white" | "baby_blue" | "yellow" | "pink";
 export type ChalkMark = "none" | "box" | "bracket" | "strike";
 export type TailCue = "none" | "point" | "underline";
+export type LessonGesture = "neutral" | "thumbs_up" | "point_user" | "point_self" | "cheer" | "heart_touch";
 
 export interface ChalkPhrase {
   text: string;
@@ -201,7 +202,7 @@ export interface BoardDemo {
 export interface TeachingMoment {
   title: string;
   speechBubble: string;
-  gesture?: string;
+  gesture: LessonGesture;
   sourceFocus: SourceFocus;
   boardSections: BoardSection[];
   demonstration: BoardDemo;

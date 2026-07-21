@@ -293,6 +293,7 @@
 ## July 21 — Dual live-translation engines
 
 - Preserved Realtime — Fast as the default live path and added an isolated Transcript-Locked — Accurate engine using `gpt-realtime-whisper` plus an ordered, eight-slot `gpt-5.6-luna` Responses worker.
+- Repaired Accurate-mode startup by connecting with the Realtime transcription intent while keeping `gpt-realtime-whisper` in the input-transcription configuration. Verified the production handshake against OpenAI. Lesson Structured Outputs now require one authored Nono body gesture per teaching moment, and NonoSub repairs missing or duplicate cable-tail cues to exactly one safe cue before rendering.
 - Pinned immutable source clauses to capture timestamps, reconnect epochs, item IDs, segment IDs, and source hashes. Accurate results cannot mutate a replaced session or revised source.
 - Added terminal SSE validation, bounded dialogue context and retry history, cancellation-safe worker shutdown, source-only queue/failure fallback, transcript retry actions, and exact Unicode-decimal sequence locking to prevent mismatches such as `12 → eleven` or `12 → 11`.
 - Kept live speaker identity deliberately at one `Live Audio` label; file diarization and every existing file/lesson/subtitle path remain unchanged.

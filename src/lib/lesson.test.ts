@@ -18,6 +18,7 @@ describe("progressive chalkboard lessons", () => {
     for (const moment of FIXTURE_LESSON.moments) {
       expect(moment.title.trim()).not.toBe("");
       expect(moment.speechBubble.trim()).not.toBe("");
+      expect(["neutral", "thumbs_up", "point_user", "point_self", "cheer", "heart_touch"]).toContain(moment.gesture);
       expect(moment.boardSections.length).toBeLessThanOrEqual(2);
       expect(moment.boardSections.every((section) => section.lines.length <= 3)).toBe(true);
       expect(moment.demonstration.items.length).toBeLessThanOrEqual(4);

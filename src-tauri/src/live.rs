@@ -45,8 +45,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 const REALTIME_TRANSLATION_URL: &str =
     "wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate";
-const REALTIME_TRANSCRIPTION_URL: &str =
-    "wss://api.openai.com/v1/realtime?model=gpt-realtime-whisper";
+const REALTIME_TRANSCRIPTION_URL: &str = "wss://api.openai.com/v1/realtime?intent=transcription";
 const REALTIME_CONFIGURATION_TIMEOUT: Duration = Duration::from_secs(8);
 const SEND_SAMPLES: usize = 2_400;
 const MAX_LUNA_PENDING_CLAUSES: usize = 8;
@@ -3093,8 +3092,13 @@ fn validate_session_updated(
         }
         expect("/audio/input/transcription/model", "gpt-realtime-whisper")
             .ok_or_else(|| configuration_mismatch("realtime transcription model"))?;
-        expect("/audio/input/transcription/delay", "low")
-            .ok_or_else(|| configuration_mismatch("low transcription delay"))?;
+        if session
+            .pointer("/audio/input/transcription/delay")
+            .and_then(Value::as_str)
+            .is_some_and(|delay| delay != "low")
+        {
+            return Err(configuration_mismatch("low transcription delay"));
+        }
         if languages.source != "auto" {
             expect(
                 "/audio/input/transcription/language",
@@ -4104,6 +4108,21 @@ mod tests {
                 .is_ok()
         );
 
+        let mut omitted_optional_delay = valid.clone();
+        omitted_optional_delay["audio"]["input"]["transcription"]
+            .as_object_mut()
+            .expect("transcription object")
+            .remove("delay");
+        assert!(
+            validate_session_updated(
+                &omitted_optional_delay,
+                &languages,
+                &CaptionProcessingMode::OriginalOnly,
+            )
+            .is_ok(),
+            "OpenAI accepts the requested delay but does not currently echo it"
+        );
+
         let mut missing_hint = valid;
         missing_hint["audio"]["input"]["transcription"]
             .as_object_mut()
@@ -4557,5 +4576,28 @@ mod tests {
             "OpenAI rejected the request (insufficient_quota).",
             true,
         )));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "opens one authenticated realtime transcription connection; set NONOSUB_LIVE_TEST_API_KEY explicitly"]
+    async fn realtime_transcription_handshake_accepts_production_configuration() {
+        assert!(REALTIME_TRANSCRIPTION_URL.contains("intent=transcription"));
+        let api_key = std::env::var("NONOSUB_LIVE_TEST_API_KEY")
+            .expect("set NONOSUB_LIVE_TEST_API_KEY for this live integration test");
+        let languages = LanguageSettings {
+            source: "auto".into(),
+            target: "en".into(),
+            explanation: "en".into(),
+        };
+        let (mut writer, _reader) = connect_realtime(
+            &api_key,
+            &languages,
+            &CaptionProcessingMode::OriginalOnly,
+            1,
+            0,
+        )
+        .await
+        .expect("the production realtime transcription handshake should succeed");
+        let _ = writer.send(Message::Close(None)).await;
     }
 }

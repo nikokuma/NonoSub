@@ -308,6 +308,18 @@ pub enum BoardDemoKind {
     MiniDialogue,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NonoGesture {
+    #[default]
+    Neutral,
+    ThumbsUp,
+    PointUser,
+    PointSelf,
+    Cheer,
+    HeartTouch,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BoardDemoItem {
@@ -332,6 +344,8 @@ pub struct BoardDemo {
 pub struct TeachingMoment {
     pub title: String,
     pub speech_bubble: String,
+    #[serde(default)]
+    pub gesture: NonoGesture,
     pub source_focus: SourceFocus,
     pub board_sections: Vec<BoardSection>,
     pub demonstration: BoardDemo,
