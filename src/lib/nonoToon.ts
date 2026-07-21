@@ -17,7 +17,7 @@ export type NonoMood = (typeof NONO_MOODS)[number];
 export type NonoExpression = "squint";
 export type NonoMaterialRole = "skin" | "face" | "hair" | "tail" | "cloth" | "eye" | "mouth" | "squint" | "metal" | "accent" | "unknown";
 
-type NonoOutlineRole = Extract<NonoMaterialRole, "skin" | "face" | "hair" | "tail" | "cloth" | "mouth" | "metal" | "accent">;
+type NonoOutlineRole = Extract<NonoMaterialRole, "skin" | "face" | "hair" | "tail" | "cloth" | "metal" | "accent">;
 
 export const NONO_OUTLINE_CONFIG: Record<NonoOutlineRole, { color: number; width: number }> = {
   skin: { color: 0x3a2028, width: 0.006 },
@@ -25,7 +25,6 @@ export const NONO_OUTLINE_CONFIG: Record<NonoOutlineRole, { color: number; width
   hair: { color: 0x0e2f38, width: 0.008 },
   tail: { color: 0x0a1226, width: 0.006 },
   cloth: { color: 0x14141c, width: 0.007 },
-  mouth: { color: 0x4a1420, width: 0.002 },
   metal: { color: 0x23262e, width: 0.004 },
   accent: { color: 0x4a1e33, width: 0.004 },
 };
@@ -67,7 +66,12 @@ const SHADE_TINTS: Record<Exclude<NonoMaterialRole, "unknown">, number> = {
 export function inferNonoMaterialRole(materialName: string, objectName = ""): NonoMaterialRole {
   const name = `${materialName} ${objectName}`.toLowerCase();
   if (/squint/.test(name)) return "squint";
-  if (/mouth|lips?/.test(name)) return "mouth";
+  // "clip" contains "lip" — hairclips must never fall into the mouth role.
+  if (/clip/.test(name)) return "hair";
+  // The sculpted lip ring renders as part of the face (flat ramp, face tint);
+  // painting or shading it separately reads as lipstick. Only the cavity is "mouth".
+  if (/lips/.test(name)) return "face";
+  if (/mouth/.test(name)) return "mouth";
   if (/eye|iris|pupil|moon|shine/.test(name)) return "eye";
   if (/face/.test(name)) return "face";
   if (/body|skin/.test(name)) return "skin";
@@ -140,13 +144,15 @@ export function applyNonoMaterials(model: THREE.Object3D, variant: NonoShaderVar
     });
     object.material = Array.isArray(object.material) ? next : next[0];
   });
+  // The lip ring runs as role "face" (flat ramp + face tint) but its source
+  // material has no texture — borrow the face texture so it vanishes into skin.
   const faceMap = replaced.find((material) => (
     material instanceof THREE.MeshToonMaterial
     && /face_base/i.test(material.name)
     && material.map
   )) as THREE.MeshToonMaterial | undefined;
   for (const material of replaced) {
-    if (!(material instanceof THREE.MeshToonMaterial) || !/lips/i.test(material.name)) continue;
+    if (!(material instanceof THREE.MeshToonMaterial) || !/lips/i.test(material.name) || /clip/i.test(material.name)) continue;
     material.map = faceMap?.map ?? null;
     material.color.set(faceMap?.map ? 0xffffff : 0xf6ddd3);
     material.emissive.set(0x000000);
@@ -164,6 +170,8 @@ export function createNonoOutlines(model: THREE.Object3D): THREE.Object3D[] {
     if (!(object instanceof THREE.Mesh) || object.name === "Nono_Squint" || object.userData.nonoOutline) return;
     const materials = Array.isArray(object.material) ? object.material : [object.material];
     if (materials.length === 0 || materials.some((material) => material.transparent)) return;
+    // A hull around the sculpted lip ring traces lip contours — lipstick look.
+    if (materials.some((material) => /lips/i.test(material.name) && !/clip/i.test(material.name))) return;
     const roles = materials.map((material) => inferNonoMaterialRole(material.name, object.name));
     const role = roles[0];
     if (!isNonoOutlineRole(role) || roles.some((candidate) => candidate !== role)) return;

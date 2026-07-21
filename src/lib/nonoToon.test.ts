@@ -19,13 +19,15 @@ import {
 describe("Nono toon materials", () => {
   it("maps stable semantic and legacy names to material roles", () => {
     expect(inferNonoMaterialRole("Nono_Hair")).toBe("hair");
+    expect(inferNonoMaterialRole("Nono_Hair_Clip_L")).toBe("hair");
+    expect(inferNonoMaterialRole("Nono_Lips")).toBe("face");
+    expect(inferNonoMaterialRole("Nono_Mouth")).toBe("mouth");
     expect(inferNonoMaterialRole("Material.001", "Nono_Hair_Long")).toBe("hair");
     expect(inferNonoMaterialRole("Nono_TailCable")).toBe("tail");
     expect(inferNonoMaterialRole("TeacherJacket_P5_Pin_Rim_PBR")).toBe("metal");
     expect(inferNonoMaterialRole("Nono_Shoes_AccentNo")).toBe("cloth");
     expect(inferNonoMaterialRole("Nono_Socks_PinkAccent")).toBe("cloth");
     expect(inferNonoMaterialRole("Nono_Mouth")).toBe("mouth");
-    expect(inferNonoMaterialRole("Nono_Lips")).toBe("mouth");
     expect(inferNonoMaterialRole("Nono_Squint_Black")).toBe("squint");
     expect(inferNonoMaterialRole("mystery")).toBe("unknown");
   });
@@ -114,7 +116,7 @@ describe("Nono toon materials", () => {
     squintSource.dispose();
   });
 
-  it("renders lips with the textured face material treatment and no gloss", () => {
+  it("blends lips into the face: face role, face texture, flat face ramp", () => {
     const faceTexture = new THREE.Texture();
     const faceSource = new THREE.MeshStandardMaterial({ color: 0xffffff, map: faceTexture });
     faceSource.name = "Nono_Face_Base";
@@ -130,11 +132,11 @@ describe("Nono toon materials", () => {
     applyNonoMaterials(model, "toon");
     const face = faceMesh.material as unknown as THREE.MeshToonMaterial;
     const lips = lipsMesh.material as unknown as THREE.MeshToonMaterial;
-    expect(face.map).toBe(faceTexture);
     expect(lips.map).toBe(faceTexture);
     expect(lips.color.getHex()).toBe(0xffffff);
+    // Same flat face ramp — a different ramp would shade the lip ring as a strip.
+    expect(lips.gradientMap).toBe(face.gradientMap);
     expect(lips.emissive.getHex()).toBe(0x000000);
-    expect(lips.emissiveIntensity).toBe(0);
     expect(lips.userData.nonoSpecularStrength).toBe(0);
 
     face.dispose();
@@ -198,25 +200,24 @@ describe("Nono toon materials", () => {
     geometry.dispose();
   });
 
-  it("adds the thin maroon mouth outline while sharing facial morph influences", () => {
+  it("does not outline the mouth or lips so the mouth stays one flat shape", () => {
     const geometry = new THREE.BoxGeometry();
-    geometry.morphAttributes.position = [geometry.getAttribute("position").clone()];
-    const material = new THREE.MeshBasicMaterial({ color: 0x9e383d });
-    material.name = "Nono_Mouth";
-    const source = new THREE.Mesh(geometry, material);
-    source.name = "Nono_Head_Mouth";
-    source.updateMorphTargets();
+    const cavityMaterial = new THREE.MeshBasicMaterial({ color: 0x9e383d });
+    cavityMaterial.name = "Nono_Mouth";
+    const cavity = new THREE.Mesh(geometry, cavityMaterial);
+    cavity.name = "Nono_Head_Mouth";
+    const lipsMaterial = new THREE.MeshBasicMaterial({ color: 0x9e383d });
+    lipsMaterial.name = "Nono_Lips";
+    const lips = new THREE.Mesh(geometry, lipsMaterial);
+    lips.name = "Nono_Head_Lips";
     const scene = new THREE.Scene();
-    scene.add(source);
+    scene.add(cavity, lips);
 
-    const [outline] = createNonoOutlines(scene) as THREE.Mesh[];
-    expect(outline).toBeDefined();
-    expect((outline.material as THREE.MeshBasicMaterial).color.getHex()).toBe(NONO_OUTLINE_CONFIG.mouth.color);
-    expect(NONO_OUTLINE_CONFIG.mouth.width).toBe(0.002);
-    expect(outline.morphTargetInfluences).toBe(source.morphTargetInfluences);
+    const outlines = createNonoOutlines(scene);
+    expect(outlines).toHaveLength(0);
 
-    (outline.material as THREE.Material).dispose();
-    material.dispose();
+    cavityMaterial.dispose();
+    lipsMaterial.dispose();
     geometry.dispose();
   });
 

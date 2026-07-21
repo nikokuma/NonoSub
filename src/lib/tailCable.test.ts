@@ -9,6 +9,8 @@ import {
   distributeStretch,
   fitChainToPolyline,
   presentationTargetOffset,
+  resolveTailRouteVectors,
+  selectTailRouteKind,
   TAIL_TUNING,
 } from "./tailCable";
 import { captureTailRestPose, restoreTailRestPose } from "./tailPresentation";
@@ -210,25 +212,76 @@ describe("tail cable shaping", () => {
     expect(distributeStretch(rest, 1)).toEqual(rest);
   });
 
-  it("pins protected joints and smoothly increases guide influence", () => {
+  it("keeps the root fixed and smoothly turns the first teaching joints", () => {
     const rest = Array.from({ length: 12 }, (_, index) => new THREE.Vector3(index, 0, 0));
     const curve = Array.from({ length: 12 }, (_, index) => new THREE.Vector3(index, index, 0));
     const out = rest.map(() => new THREE.Vector3());
     blendGuidePolyline(rest, curve, 0, out);
     out.forEach((point, index) => expect(point.equals(rest[index])).toBe(true));
     blendGuidePolyline(rest, curve, 1, out);
-    for (let index = 0; index < TAIL_TUNING.protectedJoints; index += 1) {
-      expect(out[index].equals(rest[index])).toBe(true);
-    }
-    for (let index = TAIL_TUNING.rampEnd; index < out.length; index += 1) {
+    expect(out[0].equals(rest[0])).toBe(true);
+    for (let index = TAIL_TUNING.teachingGuideInfluence.length - 1; index < out.length; index += 1) {
       expect(out[index].equals(curve[index])).toBe(true);
     }
     let previousInfluence = 0;
-    for (let index = TAIL_TUNING.protectedJoints; index <= TAIL_TUNING.rampEnd; index += 1) {
+    for (let index = 1; index < TAIL_TUNING.teachingGuideInfluence.length; index += 1) {
       const influence = out[index].y / curve[index].y;
+      expect(influence).toBeCloseTo(TAIL_TUNING.teachingGuideInfluence[index]);
       expect(influence).toBeGreaterThanOrEqual(previousInfluence);
       previousInfluence = influence;
     }
+  });
+
+  it("routes an outward-resting tail behind the body without projecting farther outward", () => {
+    const root = new THREE.Vector3();
+    const target = new THREE.Vector3(-1, 0.18, 0);
+    const targetDirection = target.clone().sub(root).normalize();
+    const restDirection = new THREE.Vector3(1, 0.15, 0).normalize();
+    const cameraForward = new THREE.Vector3(0, 0, -1);
+    const departure = new THREE.Vector3();
+    const slack = new THREE.Vector3();
+    const kind = selectTailRouteKind(restDirection, targetDirection);
+    expect(kind).toBe("behind_body");
+    resolveTailRouteVectors(kind, targetDirection, cameraForward, departure, slack);
+
+    expect(departure.x).toBeLessThan(0);
+    expect(departure.z).toBeLessThan(0);
+    expect(slack.equals(cameraForward)).toBe(true);
+    const curve = buildCableCurve({
+      root,
+      baseTangent: departure,
+      target,
+      tipTangent: new THREE.Vector3(1, 0, 0),
+      chainLength: 1.5,
+      bulgeDirection: slack,
+      sagDirection: DOWN,
+    });
+    for (let index = 0; index <= TAIL_TUNING.lutSamples; index += 1) {
+      expect(curve.points[index * 3]).toBeLessThanOrEqual(1e-6);
+    }
+  });
+
+  it("uses a direct board route when the authored tail already faces its target", () => {
+    const targetDirection = new THREE.Vector3(-1, 0.2, 0).normalize();
+    const restDirection = new THREE.Vector3(-1, 0.1, 0).normalize();
+    const departure = new THREE.Vector3();
+    const slack = new THREE.Vector3();
+    const cameraForward = new THREE.Vector3(0, 0, -1);
+    const kind = selectTailRouteKind(restDirection, targetDirection);
+    expect(kind).toBe("direct");
+    resolveTailRouteVectors(kind, targetDirection, cameraForward, departure, slack);
+    expect(departure.distanceTo(targetDirection)).toBeLessThan(1e-8);
+    expect(slack.equals(cameraForward)).toBe(true);
+  });
+
+  it("falls back to finite direct route vectors for degenerate inputs", () => {
+    const departure = new THREE.Vector3();
+    const slack = new THREE.Vector3();
+    expect(selectTailRouteKind(new THREE.Vector3(), new THREE.Vector3())).toBe("direct");
+    resolveTailRouteVectors("behind_body", new THREE.Vector3(), new THREE.Vector3(), departure, slack);
+    expect([departure.x, departure.y, departure.z, slack.x, slack.y, slack.z].every(Number.isFinite)).toBe(true);
+    expect(departure.length()).toBeCloseTo(1);
+    expect(slack.length()).toBeCloseTo(1);
   });
 });
 

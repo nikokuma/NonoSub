@@ -10,8 +10,10 @@ export const TAIL_TUNING = {
   slackTolerance: 0.01,
   slackIterations: 3,
   lutSamples: 64,
-  protectedJoints: 3,
-  rampEnd: 6,
+  teachingGuideInfluence: [0, 0.55, 0.85, 1],
+  behindBodyDeparture: 0.68,
+  behindBodyTargetBias: 0.32,
+  behindBodyThreshold: 0.15,
   stretchMax: 1.3,
   stretchStartSegment: 3,
   followThrough: 0.02,
@@ -29,6 +31,8 @@ export const TAIL_TUNING = {
     workingSuppression: 0.7,
   },
 } as const;
+
+export type TailRouteKind = "direct" | "behind_body";
 
 export interface CableCurve {
   p0: THREE.Vector3;
@@ -215,15 +219,46 @@ export function blendGuidePolyline(
 ): void {
   const count = Math.min(restJoints.length, curveJoints.length, out.length);
   const clampedStrength = THREE.MathUtils.clamp(Number.isFinite(strength) ? strength : 0, 0, 1);
-  const rampSpan = Math.max(1, TAIL_TUNING.rampEnd - (TAIL_TUNING.protectedJoints - 1));
   for (let index = 0; index < count; index += 1) {
-    const ramp = index < TAIL_TUNING.protectedJoints
-      ? 0
-      : index >= TAIL_TUNING.rampEnd
-        ? 1
-        : smoothstep((index - (TAIL_TUNING.protectedJoints - 1)) / rampSpan);
+    const ramp = TAIL_TUNING.teachingGuideInfluence[Math.min(index, TAIL_TUNING.teachingGuideInfluence.length - 1)];
     out[index].copy(restJoints[index]).lerp(curveJoints[index], clampedStrength * ramp);
   }
+}
+
+export function selectTailRouteKind(
+  restDirection: THREE.Vector3,
+  targetDirection: THREE.Vector3,
+): TailRouteKind {
+  if (restDirection.lengthSq() <= 1e-12 || targetDirection.lengthSq() <= 1e-12) return "direct";
+  _routeRest.copy(restDirection).normalize();
+  _routeTarget.copy(targetDirection).normalize();
+  return _routeRest.dot(_routeTarget) < TAIL_TUNING.behindBodyThreshold ? "behind_body" : "direct";
+}
+
+export function resolveTailRouteVectors(
+  kind: TailRouteKind,
+  targetDirection: THREE.Vector3,
+  cameraForward: THREE.Vector3,
+  departureOut: THREE.Vector3,
+  slackOut: THREE.Vector3,
+): void {
+  _routeTarget.copy(targetDirection);
+  if (_routeTarget.lengthSq() <= 1e-12) _routeTarget.set(1, 0, 0);
+  else _routeTarget.normalize();
+
+  _routeCamera.copy(cameraForward);
+  if (_routeCamera.lengthSq() <= 1e-12) stableLocalLateral(_routeTarget, _routeCamera);
+  else _routeCamera.normalize();
+
+  slackOut.copy(_routeCamera);
+  if (kind === "behind_body") {
+    departureOut.copy(_routeCamera).multiplyScalar(TAIL_TUNING.behindBodyDeparture)
+      .addScaledVector(_routeTarget, TAIL_TUNING.behindBodyTargetBias);
+    if (departureOut.lengthSq() <= 1e-12) departureOut.copy(_routeTarget);
+    else departureOut.normalize();
+    return;
+  }
+  departureOut.copy(_routeTarget);
 }
 
 export function applyTravelingWave(
@@ -384,3 +419,6 @@ const _boneWorldQuaternion = new THREE.Quaternion();
 const _parentWorldQuaternion = new THREE.Quaternion();
 const _desiredWorldQuaternion = new THREE.Quaternion();
 const _delta = new THREE.Quaternion();
+const _routeRest = new THREE.Vector3();
+const _routeTarget = new THREE.Vector3();
+const _routeCamera = new THREE.Vector3();

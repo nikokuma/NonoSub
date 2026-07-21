@@ -25,9 +25,12 @@
     distributeStretch,
     fitChainToPolyline,
     presentationTargetOffset,
+    resolveTailRouteVectors,
+    selectTailRouteKind,
     TAIL_TUNING,
     type CableCurve,
     type CableCurveInput,
+    type TailRouteKind,
   } from "./tailCable";
   import {
     createTailDynamicsState,
@@ -100,6 +103,8 @@
     bulgeDirection: THREE.Vector3;
     curve: CableCurve;
     curveInput: CableCurveInput;
+    routeSequenceId: number;
+    routeKind: TailRouteKind;
     segmentLateral: (index: number) => THREE.Vector3;
   }
 
@@ -403,6 +408,10 @@
         rightBottom.y - modelBodyBounds.min.y * scale,
         -bodyCenter.z * scale,
       );
+      if (tailCableBuffers) {
+        tailCableBuffers.left.routeSequenceId = -1;
+        tailCableBuffers.right.routeSequenceId = -1;
+      }
       viewportSignature = `${viewport.x}:${viewport.y}:${viewport.width}:${viewport.height}:${viewport.bottom}`;
     }
 
@@ -458,7 +467,10 @@
     const lashBlink = morphBinding(lashMesh, "Blink");
     const smallSmile = morphBinding(headMesh, "SmallSmile");
     const bigSmile = morphBinding(headMesh, "BigSmile");
-    let smallSmileTarget = 0;
+    // SmallSmile is Nono's resting face: it closes the modeled-open mouth into a
+    // smile, so the cavity/lip strips never show as an open gap. BigSmile replaces
+    // it during cheer.
+    let smallSmileTarget = 1;
     let bigSmileTarget = 0;
     let squintRequested = false;
     let squintActive = false;
@@ -478,7 +490,7 @@
 
     const controller: FaceController = {
       setMood(nextMood) {
-        smallSmileTarget = nextMood === "thumbs_up" ? 1 : 0;
+        smallSmileTarget = nextMood === "cheer" ? 0 : 1;
         bigSmileTarget = nextMood === "cheer" ? 1 : 0;
       },
       setSquint(active, nowMs) {
@@ -821,13 +833,18 @@
       canvas,
     );
     _cameraForward.set(0, 0, -1).applyQuaternion(camera.getWorldQuaternion(_cameraQuaternion)).normalize();
-    _chord.subVectors(buffers.target, root).normalize();
-    buffers.bulgeDirection.crossVectors(_chord, _cameraForward);
-    if (buffers.bulgeDirection.lengthSq() < 1e-10) buffers.bulgeDirection.set(side === "left" ? -1 : 1, 0, 0);
-    else buffers.bulgeDirection.normalize();
-    if ((side === "left" && buffers.bulgeDirection.x > 0) || (side === "right" && buffers.bulgeDirection.x < 0)) {
-      buffers.bulgeDirection.negate();
+    _routeTargetDirection.subVectors(state.lastRawTarget, root).normalize();
+    if (buffers.routeSequenceId !== presentation.sequenceId) {
+      buffers.routeKind = selectTailRouteKind(buffers.baseTangent, _routeTargetDirection);
+      buffers.routeSequenceId = presentation.sequenceId;
     }
+    resolveTailRouteVectors(
+      buffers.routeKind,
+      _routeTargetDirection,
+      _cameraForward,
+      buffers.baseTangent,
+      buffers.bulgeDirection,
+    );
 
     buildCableCurve(buffers.curveInput, buffers.curve);
     if (buffers.curve.degenerate) {
@@ -958,6 +975,8 @@
         bulgeDirection,
         sagDirection: WORLD_DOWN,
       },
+      routeSequenceId: -1,
+      routeKind: "direct",
       segmentLateral: (index) => laterals[Math.min(index, laterals.length - 1)],
     };
     return buffers;
@@ -1066,7 +1085,7 @@
   const _projectedTipPosition = new THREE.Vector3();
   const _cameraForward = new THREE.Vector3();
   const _cameraQuaternion = new THREE.Quaternion();
-  const _chord = new THREE.Vector3();
+  const _routeTargetDirection = new THREE.Vector3();
   const _restSegment = new THREE.Vector3();
   const _tipWorldA = new THREE.Vector3();
   const _tipWorldB = new THREE.Vector3();
