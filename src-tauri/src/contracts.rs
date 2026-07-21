@@ -33,17 +33,12 @@ pub enum SessionMode {
     Live,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LiveSyncMode {
+    #[default]
     Coordinated,
     FastSource,
-}
-
-impl Default for LiveSyncMode {
-    fn default() -> Self {
-        Self::Coordinated
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -170,6 +165,10 @@ pub enum SessionEvent {
     },
     LiveSyncChanged {
         sync: LiveSyncState,
+    },
+    LiveAudioGap {
+        start_ms: u64,
+        end_ms: u64,
     },
     LessonSelected {
         segment_id: Option<String>,

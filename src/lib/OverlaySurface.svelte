@@ -21,6 +21,9 @@
   let fitTimer: ReturnType<typeof setTimeout> | undefined;
   let suppressPlacementUntil = 0;
   let connectionIssue = $state("");
+  let gapNotice = $state("");
+  let shownGapMessage = "";
+  let gapNoticeTimer: ReturnType<typeof setTimeout> | undefined;
   const fixturePreset = typeof window !== "undefined" && !isTauri()
     ? parseFixturePreset(new URLSearchParams(window.location.search).get("preset"))
     : undefined;
@@ -67,6 +70,16 @@
   });
   const displayedSegment = $derived(captions[0] ?? waitingSegment);
   const displayedStyle = $derived(captions.length > 0 ? activeStyle : waitingStyle);
+  const latestAudioGap = $derived(session.errors.findLast((error) => error.code === "live_audio_gap"));
+
+  $effect(() => {
+    const message = latestAudioGap?.message ?? "";
+    if (!message || message === shownGapMessage) return;
+    shownGapMessage = message;
+    gapNotice = message;
+    if (gapNoticeTimer) clearTimeout(gapNoticeTimer);
+    gapNoticeTimer = setTimeout(() => gapNotice = "", 4_000);
+  });
 
   function parseFixturePreset(value: string | null): SubtitlePreset | undefined {
     return value && ["clean", "classic-outline", "yellow-drop", "fallout", "momento", "wired"].includes(value)
@@ -113,6 +126,7 @@
       cleanup.push(() => {
         contentObserver.disconnect();
         if (fitTimer) clearTimeout(fitTimer);
+        if (gapNoticeTimer) clearTimeout(gapNoticeTimer);
       });
     }
     return () => cleanup.forEach((stop) => stop());
@@ -255,13 +269,17 @@
   role="group"
   aria-label="Live subtitle overlay. Drag to reposition; right-click to ask Nono."
 >
-  {#if arranging}<div class="grip" aria-hidden="true">⠿ DRAG NONOSUB</div>{/if}
+  {#if arranging}
+    <div class="grip" aria-hidden="true">⠿ DRAG NONOSUB</div>
+    <button class="stop-live" onclick={(event) => { event.stopPropagation(); void invoke("end_session", { reason: "user_stop" }); }}>Stop Live</button>
+  {/if}
   <div class="caption-host" bind:this={captionHost}>
     <LiveSubtitleStack segment={displayedSegment} speaker={displayedSegment.speakerId ? session.speakers[displayedSegment.speakerId] : undefined} style={displayedStyle} sync={session.liveSync} liveMode={preferences.sync.liveMode} processingMode={session.processingMode} />
+    {#if gapNotice}<div class="gap-notice">{gapNotice}</div>{/if}
     {#if session.fatalError}<div class="error">{session.fatalError}</div>{/if}
   </div>
 </div>
 
 <style>
-  .overlay-shell{position:fixed;inset:0;display:grid;place-content:center;background:transparent;padding:30px 20px;cursor:grab;touch-action:none}.caption-host{width:100%;min-width:0;max-height:180px;overflow:visible;display:grid;place-items:center}.overlay-shell.dragging{cursor:grabbing}.overlay-shell.hidden{opacity:0;pointer-events:none}.overlay-shell.arranging{border:1px dashed #71e7df88;background:#0710161f}.overlay-shell.fixture-backdrop{background:linear-gradient(105deg,#d9e8ec 0 48%,#263b4b 48% 52%,#101421 52%)}.grip{position:absolute;left:50%;top:4px;transform:translateX(-50%);border:1px solid #6de8df66;background:#08121bd9;color:#77e8df;border-radius:10px;padding:4px 10px;font-size:8px;letter-spacing:.14em;pointer-events:none}.error{margin-top:6px;background:#280e18e8;color:#ffafd1;padding:5px 10px;border-radius:5px;font-size:8px}
+  .overlay-shell{position:fixed;inset:0;display:grid;place-content:center;background:transparent;padding:30px 20px;cursor:grab;touch-action:none}.caption-host{width:100%;min-width:0;max-height:180px;overflow:visible;display:grid;place-items:center}.overlay-shell.dragging{cursor:grabbing}.overlay-shell.hidden{opacity:0;pointer-events:none}.overlay-shell.arranging{border:1px dashed #71e7df88;background:#0710161f}.overlay-shell.fixture-backdrop{background:linear-gradient(105deg,#d9e8ec 0 48%,#263b4b 48% 52%,#101421 52%)}.grip{position:absolute;left:50%;top:4px;transform:translateX(-50%);border:1px solid #6de8df66;background:#08121bd9;color:#77e8df;border-radius:10px;padding:4px 10px;font-size:8px;letter-spacing:.14em;pointer-events:none}.stop-live{position:absolute;right:8px;top:5px;z-index:5;border:1px solid #ff82ad88;background:#2b0a17e8;color:#ffd3e3;border-radius:8px;padding:4px 9px;font-size:8px;cursor:pointer}.gap-notice{margin-top:4px;padding:3px 7px;border-radius:5px;background:#25160ddd;color:#ffc787;font-size:7px}.error{margin-top:6px;background:#280e18e8;color:#ffafd1;padding:5px 10px;border-radius:5px;font-size:8px}
 </style>

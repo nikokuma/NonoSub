@@ -269,3 +269,14 @@
 - Allowed failed same-target file retranslations to create a fresh request lease while continuing to suppress duplicates that are still running.
 - Added lesson-schema headroom plus complete-sentence validation for speech bubbles and ambiguity notes, and made constructor-time WebGL failure activate the existing text-safe lesson fallback.
 - Full verification passes with zero Svelte errors or warnings, 144 frontend tests, a successful production build, 116 Rust tests passing with one native permission test ignored, and warning-free clippy.
+
+## July 21 — Final reliability and submission repair
+
+- Unified Stop, replacement, cancellation, fatal cleanup, and Quit behind one idempotent session-ending path. Viewer media is explicitly paused, detached, and reset before compact surfaces hide, and an authoritative snapshot reset prevents ended-session state from returning through a late event.
+- Added canonical live-capture lifecycle state and a persistent tray/menu indicator so capture remains visible and stoppable even when the subtitle overlay is hidden. Reconnect gaps are now clause boundaries, appear briefly on the overlay, and remain in transcript diagnostics.
+- Replaced optimistic API readiness with validation-first, non-secret capability metadata. Candidate keys must pass GPT-5.6 and file-transcription checks before replacing a working Keychain credential; removal is explicit and startup remains Keychain-free.
+- Bounded and hardened Ask Nono inputs in both Rust and Svelte: 800-character questions, 12-message/6,000-character prior threads, and 80-segment/16,000-character nearby context. Tutor instructions now identify every media-derived field as untrusted quoted data.
+- Made media preparation cancellable across managed HEVC conversion, packet decoding, and chunk creation. Added early four-hour rejection where metadata permits, partial-output cleanup, and a 750 ms source/proxy duration guard.
+- Strictly allowlisted preference fields, fonts, palettes, colors, language codes, geometry, and numeric ranges; lesson placement history is capped at eight displays.
+- Pinned Rust 1.97.1 locally and in GitHub Actions and fixed its Clippy findings without suppressions. Updated release documentation to state the verified platform, model-qualified language support, adaptive delay, last-caption retention, and deferred media-quality limitations.
+- Full verification passes with zero Svelte errors or warnings, 155 frontend tests, a successful production build, 120 Rust tests passing with one native permission test ignored, and warning-free Clippy.

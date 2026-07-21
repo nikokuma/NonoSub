@@ -39,6 +39,16 @@
     if (isTauri()) {
       void invoke<LauncherMode>("get_launcher_mode").then((next) => setMode(next));
       void listen<LauncherMode>("launcher-action", ({ payload }) => setMode(payload)).then((unlisten) => cleanup.push(unlisten));
+      void listen<{ generation: number; phase: string }>("media-preparation-progress", ({ payload }) => {
+        if (!running || mode !== "file") return;
+        message = ({
+          inspecting: "Inspecting the selected video…",
+          converting_video: "Preparing compatible video playback…",
+          decoding_audio: "Decoding audio locally…",
+          creating_chunks: "Creating secure transcription chunks…",
+          ready: "Media preparation complete.",
+        } as Record<string, string>)[payload.phase] ?? message;
+      }).then((unlisten) => cleanup.push(unlisten));
       const launcherWindow = getCurrentWindow();
       void launcherWindow.onDragDropEvent(({ payload }) => {
         if (mode !== "file" || running) return;
@@ -161,6 +171,12 @@
     if (!running && isTauri()) await invoke("hide_surface", { surface: "launcher" });
   }
 
+  async function cancelPreparation() {
+    if (!isTauri() || !running || mode !== "file") return;
+    message = "Cancelling media preparation…";
+    await invoke("cancel_media_preparation").catch(() => undefined);
+  }
+
   async function openSettings() {
     if (!isTauri()) return;
     await invoke("open_surface", { surface: "workbench" });
@@ -183,6 +199,7 @@
         {#if launchState === "error" && retryPath}<button onclick={() => retryPath && launchFile(retryPath)} disabled={running}>Retry</button>{/if}
         {#if launchState === "error"}<button onclick={openSettings}>Open Settings</button>{/if}
         {#if !running}<button onclick={close}>Cancel</button>{/if}
+        {#if running}<button onclick={cancelPreparation}>Cancel preparation</button>{/if}
         {#if running}<i aria-label="Working"></i>{/if}
       </div>
     </section>

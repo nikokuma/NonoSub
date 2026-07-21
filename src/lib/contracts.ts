@@ -5,6 +5,8 @@ export type SegmentStatus = "pending" | "complete" | "failed" | "skipped";
 export type SessionMode = "file" | "live";
 export type LiveSyncMode = "coordinated" | "fast_source";
 export type LiveSyncStatus = "steady" | "catching_up" | "degraded";
+export type LiveCaptureLifecycle = "inactive" | "starting" | "active" | "reconnecting" | "stopping" | "failed";
+export type EndSessionReason = "user_stop" | "replacement" | "quit" | "fatal_error";
 export type SessionPhase =
   | "idle"
   | "preparing"
@@ -93,6 +95,18 @@ export interface LiveSyncState {
   observedLagMs: number;
   status: LiveSyncStatus;
   visibleSegmentId?: string;
+}
+
+export interface LiveCaptureStatus {
+  sessionId: string;
+  lifecycle: LiveCaptureLifecycle;
+  startedAtMs?: number;
+  sourceLabel?: string;
+}
+
+export interface SessionEnding {
+  sessionId: string;
+  reason: EndSessionReason;
 }
 
 export interface SubtitleSegment {
@@ -227,6 +241,7 @@ export type SessionEvent =
   | { type: "speaker_discovered"; speaker: SpeakerProfile }
   | { type: "coverage_changed"; readyThroughMs: number }
   | { type: "live_sync_changed"; sync: LiveSyncState }
+  | { type: "live_audio_gap"; startMs: number; endMs: number }
   | { type: "lesson_selected"; segmentId?: string }
   | { type: "recoverable_error"; error: RecoverableError }
   | { type: "fatal_error"; message: string }
@@ -260,6 +275,19 @@ export interface SessionState {
   media?: PreparedMediaInfo;
 }
 
+export type CapabilityAvailability = "available" | "unavailable" | "unknown";
+
+export interface ApiConfigurationStatus {
+  configured: boolean;
+  validatedAt?: number;
+  validationSchema: number;
+  languageModel: CapabilityAvailability;
+  fileTranscription: CapabilityAvailability;
+  realtimeTranslation: CapabilityAvailability;
+  realtimeOriginalOnly: CapabilityAvailability;
+}
+
+/** @deprecated Use ApiConfigurationStatus. */
 export interface ModelReadiness {
   file: boolean;
   live: boolean;

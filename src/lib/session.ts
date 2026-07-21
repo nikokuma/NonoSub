@@ -83,6 +83,14 @@ export function reduceSession(state: SessionState, event: SessionEvent): Session
           visibleSegmentId: event.sync.visibleSegmentId ?? state.liveSync?.visibleSegmentId,
         },
       };
+    case "live_audio_gap":
+      return {
+        ...state,
+        errors: [...state.errors, {
+          code: "live_audio_gap",
+          message: `Live audio was unavailable for ${Math.max(0, event.endMs - event.startMs)} ms.`,
+        }].slice(-MAX_RECOVERABLE_ERRORS),
+      };
     case "lesson_selected":
       return { ...state, selectedSegmentId: event.segmentId };
     case "recoverable_error":

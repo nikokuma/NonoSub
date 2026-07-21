@@ -3,7 +3,7 @@
   import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import type { LessonClosedContext, LessonOpenContext, SessionState } from "./contracts";
+  import type { LessonClosedContext, LessonOpenContext, SessionEnding, SessionState } from "./contracts";
   import { activeSegments, canResumeForCoverage, formatTime, shouldPauseForCoverage, subtitleTimelineTime } from "./session";
   import { effectiveStyle } from "./preferences";
   import { initialSession, loadPreferences, maintainSubscription, savePreferencePatch, subscribePreferences, subscribeSession } from "./runtime";
@@ -63,6 +63,22 @@
       }).then((unlisten) => cleanup.push(unlisten));
       void listen<LessonOpenContext>("lesson-composer-opened", ({ payload }) => {
         openLessonPause(payload);
+      }).then((unlisten) => cleanup.push(unlisten));
+      void listen<SessionEnding>("session-ending", ({ payload }) => {
+        if (payload.sessionId !== session.sessionId) return;
+        playbackRevision += 1;
+        pauseLease = undefined;
+        const current = currentVideo();
+        if (current) {
+          current.pause();
+          current.removeAttribute("src");
+          current.load();
+        }
+        activeMediaInstanceId = "";
+        currentMs = 0;
+        durationMs = 0;
+        playing = false;
+        catchingUp = false;
       }).then((unlisten) => cleanup.push(unlisten));
     }
     activity();

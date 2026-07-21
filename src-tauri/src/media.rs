@@ -1,4 +1,8 @@
-use std::{fs::File, path::Path};
+use std::{
+    fs::File,
+    path::Path,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use symphonia::core::{
     audio::sample::Sample,
@@ -121,7 +125,43 @@ pub fn needs_macos_playback_proxy(path: &Path) -> Result<bool, String> {
         .is_some_and(|parameters| parameters.codec == CODEC_ID_HEVC))
 }
 
+#[cfg(test)]
 pub fn decode_to_mono_16k(path: &Path) -> Result<DecodedAudio, String> {
+    decode_to_mono_16k_cancellable(path, &AtomicBool::new(false))
+}
+
+pub fn declared_duration_ms(path: &Path) -> Result<Option<u64>, String> {
+    let file = File::open(path).map_err(|error| format!("Could not inspect the video: {error}"))?;
+    let source = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
+        hint.with_extension(extension);
+    }
+    let format = symphonia::default::get_probe()
+        .probe(&hint, source, FormatOptions::default(), MetadataOptions::default())
+        .map_err(|error| format!("Unsupported or unreadable media container: {error}"))?;
+    let Some(track) = format.default_track(TrackType::Audio) else {
+        return Ok(None);
+    };
+    let Some(duration) = track.duration else {
+        return Ok(None);
+    };
+    let Some(time_base) = track.time_base else {
+        return Ok(None);
+    };
+    Ok(Some(
+        duration
+            .get()
+            .saturating_mul(u64::from(time_base.numer.get()))
+            .saturating_mul(1_000)
+            / u64::from(time_base.denom.get()),
+    ))
+}
+
+pub fn decode_to_mono_16k_cancellable(
+    path: &Path,
+    cancelled: &AtomicBool,
+) -> Result<DecodedAudio, String> {
     let file = File::open(path).map_err(|error| format!("Could not open the video: {error}"))?;
     let source = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
@@ -158,6 +198,9 @@ pub fn decode_to_mono_16k(path: &Path) -> Result<DecodedAudio, String> {
     let mut decoded_frames = 0_u64;
 
     loop {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err("Media preparation was cancelled.".into());
+        }
         let packet = match format.next_packet() {
             Ok(Some(packet)) => packet,
             Ok(None) => break,
@@ -193,6 +236,9 @@ pub fn decode_to_mono_16k(path: &Path) -> Result<DecodedAudio, String> {
         let mut interleaved = vec![f32::MID; decoded.samples_interleaved()];
         decoded.copy_to_slice_interleaved(&mut interleaved);
         for frame in interleaved.chunks_exact(channels) {
+            if decoded_frames.is_multiple_of(8_192) && cancelled.load(Ordering::Relaxed) {
+                return Err("Media preparation was cancelled.".into());
+            }
             decoded_frames = decoded_frames.saturating_add(1);
             ensure_duration_limit(decoded_frames, source_rate)?;
             resampler.push(frame.iter().sum::<f32>() / channels as f32);

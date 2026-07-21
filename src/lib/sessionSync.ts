@@ -6,6 +6,7 @@ export class SessionEventCoordinator {
   private readonly queue: SequencedSessionEvent[] = [];
   private drainPromise?: Promise<void>;
   private stopped = false;
+  private replacementVersion = 0;
 
   constructor(
     private readonly refresh: () => Promise<SessionState>,
@@ -25,6 +26,14 @@ export class SessionEventCoordinator {
     if (this.stopped) return;
     this.queue.push(envelope);
     if (this.current) void this.flush();
+  }
+
+  replace(snapshot: SessionState): void {
+    if (this.stopped) return;
+    this.replacementVersion += 1;
+    this.queue.length = 0;
+    this.current = snapshot;
+    this.publish(snapshot);
   }
 
   async flush(): Promise<void> {
@@ -48,8 +57,10 @@ export class SessionEventCoordinator {
   private async drain(): Promise<void> {
     while (this.queue.length > 0 && this.current && !this.stopped) {
       const envelope = this.queue.shift()!;
+      const replacementVersion = this.replacementVersion;
       const next = await reconcileSessionEnvelope(this.current, envelope, this.refresh);
       if (this.stopped) return;
+      if (replacementVersion !== this.replacementVersion) continue;
       if (next !== this.current) {
         this.current = next;
         this.publish(next);

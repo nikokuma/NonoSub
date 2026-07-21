@@ -31,7 +31,7 @@ open /Applications/NonoSub.app
 
 ## Source build
 
-Requirements: Apple Silicon macOS, Node.js 20+, pnpm 10+, stable Rust, and Xcode command-line tools.
+Requirements: Apple Silicon macOS 14+, Node.js 20+, pnpm 10+, Rust 1.97.1 (pinned by `rust-toolchain.toml`), and Xcode command-line tools.
 
 ```bash
 pnpm install --frozen-lockfile

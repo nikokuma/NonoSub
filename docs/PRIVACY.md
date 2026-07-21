@@ -14,7 +14,7 @@
 | Transcript context | GPT‑5.6 Responses API | Current app memory; request uses `store:false` |
 | Tutor question/thread | GPT‑5.6 Responses API | Current app memory; request uses `store:false` |
 | OpenAI API key | OS credential vault | Until user removes it |
-| API-key configured marker | Local app settings | Boolean presence only; contains no key material |
+| API configuration marker | Local app settings | Non-secret capability results, validation timestamp/schema, and configured state; contains no key material |
 | Subtitle/language/learner preferences | Local webview storage | Until app data is cleared |
 
 Debug builds may optionally receive `OPENAI_API_KEY` from their parent process to avoid repeated macOS prompts while an ad-hoc binary is changing. That fallback is compiled out of release builds, is consumed only by Rust, and still never crosses into a webview.

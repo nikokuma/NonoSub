@@ -1,5 +1,10 @@
 import { DEFAULT_LANGUAGES, DEFAULT_STYLE, DEFAULT_SYNC, type CaptionProcessingMode, type LanguageSettings, type LearnerLevel, type LessonPlacement, type SpeakerProfile, type StyleSettings, type SubtitleSegment, type SyncSettings } from "./contracts";
 
+export const SUPPORTED_SUBTITLE_FONTS = [
+  "Inter", "Avenir Next Condensed", "DotGothic16", "Share Tech Mono", "Klee One",
+  "Arial", "Helvetica", "Hiragino Sans", "Noto Sans",
+] as const;
+
 export interface Preferences {
   style: StyleSettings;
   level: LearnerLevel;
@@ -117,7 +122,9 @@ export function parsePreferences(serialized: string): Preferences | undefined {
       style: {
         ...DEFAULT_STYLE,
         preset: preset as StyleSettings["preset"],
-        fontFamily: safeText(style.fontFamily, DEFAULT_STYLE.fontFamily, 80),
+        fontFamily: typeof style.fontFamily === "string" && SUPPORTED_SUBTITLE_FONTS.includes(style.fontFamily as typeof SUPPORTED_SUBTITLE_FONTS[number])
+          ? style.fontFamily
+          : DEFAULT_STYLE.fontFamily,
         fontSize: finiteClamp(style.fontSize, DEFAULT_STYLE.fontSize, 14, 72),
         backgroundOpacity: finiteClamp(style.backgroundOpacity, DEFAULT_STYLE.backgroundOpacity, 0, 0.9),
         effect: ["none", "outline", "shadow"].includes(style.effect ?? "")
@@ -150,7 +157,7 @@ export function parsePreferences(serialized: string): Preferences | undefined {
 function parseLessonPlacements(value: unknown): Record<string, LessonPlacement> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const placements: Record<string, LessonPlacement> = {};
-  for (const [key, candidate] of Object.entries(value)) {
+  for (const [key, candidate] of Object.entries(value).slice(-8)) {
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
     const placement = candidate as Partial<LessonPlacement>;
     if (!Number.isFinite(placement.x) || !Number.isFinite(placement.y)) continue;
@@ -223,12 +230,6 @@ function clamp(value: number, minimum: number, maximum: number): number {
 
 function finiteClamp(value: unknown, fallback: number, minimum: number, maximum: number): number {
   return typeof value === "number" && Number.isFinite(value) ? clamp(value, minimum, maximum) : fallback;
-}
-
-function safeText(value: unknown, fallback: string, maximumLength: number): string {
-  if (typeof value !== "string") return fallback;
-  const normalized = value.replace(/[\u0000-\u001f\u007f]/gu, "").trim().slice(0, maximumLength);
-  return normalized || fallback;
 }
 
 function validLanguage(value: unknown, allowAuto: boolean): string | undefined {

@@ -85,6 +85,21 @@ describe("multi-window session synchronization", () => {
     expect(published.at(-1)?.phase).toBe("ready");
   });
 
+  it("replaces visible state authoritatively when a session ends", async () => {
+    const published: SessionState[] = [];
+    const coordinator = new SessionEventCoordinator(
+      async () => snapshot("session-1", 5, "playing"),
+      (state) => published.push(state),
+    );
+    await coordinator.initialize(snapshot("session-1", 5, "playing"));
+    coordinator.enqueue(phaseEvent("session-1", 6, "complete"));
+    coordinator.replace(snapshot("idle", 0, "idle"));
+    await coordinator.flush();
+
+    expect(published.at(-1)?.sessionId).toBe("idle");
+    expect(published.at(-1)?.phase).toBe("idle");
+  });
+
   it("rejects a late snapshot that would move the same session backward", () => {
     expect(isSnapshotAtLeastAsFresh(snapshot("session-1", 8), snapshot("session-1", 7))).toBe(false);
     expect(isSnapshotAtLeastAsFresh(snapshot("session-1", 8), snapshot("session-1", 8))).toBe(true);

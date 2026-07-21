@@ -31,14 +31,15 @@ Japanese→English and English→Japanese file analysis, structured tutoring, HE
 Build Week scope is deliberately narrow:
 
 - local `.mp4` or `.mov` files;
-- AAC audio;
-- any speech language supported by the selected models, with Auto source detection by default;
-- any configured target/explanation language;
-- Apple Silicon macOS is the only verified release target.
+- the default decodable AAC audio track (automatic track selection only);
+- speech and target languages supported by the selected OpenAI models, with Auto source detection by default;
+- Apple Silicon macOS 14+ as the verified release target.
 
 The repository includes three original, reproducible fixtures: a roughly 34-second two-voice technical clip, a 24-second indirect-refusal teaching clip, and a roughly 58-second English reverse-direction clip. See [`demo/README.md`](demo/README.md) for provenance and FFmpeg build commands.
 
 Live Captions require macOS 14+ and use ScreenCaptureKit. NonoSub lists Apple's shareable applications, windows, and displays inside its visible launcher, then constructs a native content filter for the user's explicit selection. URL downloading, embedded browsing, accounts, saved transcripts, vocabulary decks, cloud sync, mobile, live diarization, and overlapping-speech separation research are outside Build Week scope.
+
+Build Week media limitations are explicit: NonoSub does not ingest embedded subtitle tracks; it automatically uses the container's default decodable audio track, averages multichannel audio to mono, and uses a stateful linear file resampler. Very long diarized turns use estimated timing when split for readability. HEVC playback uses a macOS proxy and is rejected if its declared duration differs from the source by more than 750 ms. Live captions use adaptive Coordinated delay by default, and the last readable caption intentionally remains visible until its replacement or an explicit Stop.
 
 For the most reliable file-mode speaker continuity, each recurring speaker should appear in the first roughly 30-second chunk used to build internal reference samples. Build Week does not attempt to discover a brand-new speaker late in a file.
 

@@ -197,6 +197,45 @@ struct RealtimeServerError {
     client_event_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RealtimeFaultClass {
+    Reconnectable,
+    Degraded,
+    Terminal,
+}
+
+fn classify_realtime_error(error: &RealtimeServerError) -> RealtimeFaultClass {
+    let fingerprint = format!(
+        "{} {} {}",
+        error.kind.as_deref().unwrap_or_default(),
+        error.code.as_deref().unwrap_or_default(),
+        error.message
+    )
+    .to_ascii_lowercase();
+    if [
+        "authentication",
+        "invalid_api_key",
+        "model_not_found",
+        "model_unavailable",
+        "insufficient_quota",
+        "billing",
+        "permission_denied",
+        "invalid_request",
+    ]
+    .iter()
+    .any(|needle| fingerprint.contains(needle))
+    {
+        RealtimeFaultClass::Terminal
+    } else if ["timeout", "temporarily", "service_unavailable", "connection"]
+        .iter()
+        .any(|needle| fingerprint.contains(needle))
+    {
+        RealtimeFaultClass::Reconnectable
+    } else {
+        RealtimeFaultClass::Degraded
+    }
+}
+
 #[derive(Debug, Default)]
 struct ReconnectAllowance {
     used: bool,
@@ -613,10 +652,7 @@ impl CaptionCoordinator {
     }
 
     fn flush_pairable_translations(&mut self, events: &mut Vec<SessionEvent>) {
-        loop {
-            let Some(clause_index) = self.unpaired_translation_clauses.front().copied() else {
-                break;
-            };
+        while let Some(clause_index) = self.unpaired_translation_clauses.front().copied() {
             let group_id = self.translation_clauses[clause_index].group_id;
             let unit_index = if let Some(base_unit) = self.translation_group_units.get(&group_id) {
                 Some(self.next_translation_continuation(
@@ -1822,6 +1858,7 @@ pub async fn start(
         let mut close_started = None;
         let mut closed = false;
         let mut reconnect = ReconnectAllowance::default();
+        let mut repeated_degraded: Option<(String, u8)> = None;
 
         'capture: loop {
             if task_cancelled.load(Ordering::Relaxed) && !closing {
@@ -1894,7 +1931,7 @@ pub async fn start(
                                         if !sent {
                                             let captured_samples_24k = captured_input_samples_48k / 2;
                                             let capture_ms = capture_clock_ms(captured_samples_24k);
-                                            close_for_transmission_gap(original_only, &app, generation, &mut transcription, &mut coordinator, capture_ms);
+                                            close_for_transmission_gap(original_only, &app, generation, &mut transcription, &mut coordinator, capture_ms, transmission.last_capture_ms());
                                             if reconnect.claim(closing) {
                                                 let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
                                                 pcm.clear();
@@ -1943,7 +1980,7 @@ pub async fn start(
                             let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
                             let captured_samples_24k = captured_input_samples_48k / 2;
                             let capture_ms = capture_clock_ms(captured_samples_24k);
-                            close_for_transmission_gap(original_only, &app, generation, &mut transcription, &mut coordinator, capture_ms);
+                            close_for_transmission_gap(original_only, &app, generation, &mut transcription, &mut coordinator, capture_ms, transmission.last_capture_ms());
                             pcm.clear();
                             resampler = Pcm24Resampler::default();
                             pcm_front_capture_sample = captured_samples_24k;
@@ -1993,7 +2030,7 @@ pub async fn start(
                                     let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
                                     let captured_samples_24k = captured_input_samples_48k / 2;
                                     let capture_ms = capture_clock_ms(captured_samples_24k);
-                                    close_for_transmission_gap(original_only, &app, generation, &mut transcription, &mut coordinator, capture_ms);
+                                    close_for_transmission_gap(original_only, &app, generation, &mut transcription, &mut coordinator, capture_ms, transmission.last_capture_ms());
                                     pcm.clear();
                                     resampler = Pcm24Resampler::default();
                                     pcm_front_capture_sample = captured_samples_24k;
@@ -2009,7 +2046,40 @@ pub async fn start(
                                 emit_recoverable(&app, generation, "live_disconnected", "Live captions closed unexpectedly and the automatic reconnect did not succeed.");
                                 break 'capture;
                             }
-                            RealtimeEvent::Error(error) => emit_recoverable(&app, generation, "realtime_error", &error.message),
+                            RealtimeEvent::Error(error) => match classify_realtime_error(&error) {
+                                RealtimeFaultClass::Terminal => {
+                                    let _ = record_event_for_generation(
+                                        &app,
+                                        generation,
+                                        SessionEvent::FatalError {
+                                            message: format!("Live captions stopped: {}", error.message),
+                                        },
+                                    );
+                                    break 'capture;
+                                }
+                                RealtimeFaultClass::Reconnectable => {
+                                    emit_recoverable(&app, generation, "realtime_reconnectable", &error.message);
+                                }
+                                RealtimeFaultClass::Degraded => {
+                                    let fingerprint = format!("{:?}:{:?}:{}", error.kind, error.code, error.message);
+                                    let count = repeated_degraded
+                                        .as_ref()
+                                        .filter(|(previous, _)| previous == &fingerprint)
+                                        .map_or(1, |(_, count)| count.saturating_add(1));
+                                    repeated_degraded = Some((fingerprint, count));
+                                    if count >= 3 {
+                                        let _ = record_event_for_generation(
+                                            &app,
+                                            generation,
+                                            SessionEvent::FatalError {
+                                                message: format!("Live captions stopped after repeated realtime errors: {}", error.message),
+                                            },
+                                        );
+                                        break 'capture;
+                                    }
+                                    emit_recoverable(&app, generation, "realtime_degraded", &error.message);
+                                }
+                            },
                             RealtimeEvent::SessionCreated(_)
                             | RealtimeEvent::SessionUpdated(_)
                             | RealtimeEvent::Ignored => {}
@@ -2020,7 +2090,7 @@ pub async fn start(
                                 let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
                                 let captured_samples_24k = captured_input_samples_48k / 2;
                                 let capture_ms = capture_clock_ms(captured_samples_24k);
-                                close_for_transmission_gap(original_only, &app, generation, &mut transcription, &mut coordinator, capture_ms);
+                                close_for_transmission_gap(original_only, &app, generation, &mut transcription, &mut coordinator, capture_ms, transmission.last_capture_ms());
                                 pcm.clear();
                                 resampler = Pcm24Resampler::default();
                                 pcm_front_capture_sample = captured_samples_24k;
@@ -2049,7 +2119,7 @@ pub async fn start(
                                 let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
                                 let captured_samples_24k = captured_input_samples_48k / 2;
                                 let capture_ms = capture_clock_ms(captured_samples_24k);
-                                close_for_transmission_gap(original_only, &app, generation, &mut transcription, &mut coordinator, capture_ms);
+                                close_for_transmission_gap(original_only, &app, generation, &mut transcription, &mut coordinator, capture_ms, transmission.last_capture_ms());
                                 pcm.clear();
                                 resampler = Pcm24Resampler::default();
                                 pcm_front_capture_sample = captured_samples_24k;
@@ -2166,6 +2236,13 @@ impl TransmissionTimeline {
         });
         samples_24k_to_ms(capture_sample.saturating_sub(self.epoch_capture_start))
     }
+
+    fn last_capture_ms(&self) -> u64 {
+        self.spans
+            .back()
+            .map(|span| samples_24k_to_ms(span.capture_end))
+            .unwrap_or_else(|| samples_24k_to_ms(self.epoch_capture_start))
+    }
 }
 
 fn samples_24k_to_ms(samples: u64) -> u64 {
@@ -2205,11 +2282,22 @@ fn close_for_transmission_gap(
     transcription: &mut TranscriptionCoordinator,
     coordinator: &mut CaptionCoordinator,
     capture_clock_ms: u64,
+    gap_start_ms: u64,
 ) {
     if original_only {
         emit_events(app, generation, transcription.finish(capture_clock_ms));
     } else {
         emit_events(app, generation, coordinator.begin_epoch(capture_clock_ms));
+    }
+    if capture_clock_ms > gap_start_ms {
+        let _ = record_event_for_generation(
+            app,
+            generation,
+            SessionEvent::LiveAudioGap {
+                start_ms: gap_start_ms,
+                end_ms: capture_clock_ms,
+            },
+        );
     }
 }
 
@@ -3659,5 +3747,18 @@ mod tests {
         assert!(coordinator.drafts.len() <= MAX_RETAINED_LIVE_UNITS);
         assert!(coordinator.source_clauses.len() <= MAX_RETAINED_LIVE_UNITS);
         assert!(coordinator.translation_clauses.len() <= MAX_RETAINED_LIVE_UNITS);
+    }
+
+    #[test]
+    fn realtime_faults_distinguish_terminal_and_transient_errors() {
+        let error = |code: &str, message: &str| RealtimeServerError {
+            message: message.into(),
+            kind: None,
+            code: Some(code.into()),
+            client_event_id: None,
+        };
+        assert_eq!(classify_realtime_error(&error("invalid_api_key", "bad key")), RealtimeFaultClass::Terminal);
+        assert_eq!(classify_realtime_error(&error("service_unavailable", "temporary")), RealtimeFaultClass::Reconnectable);
+        assert_eq!(classify_realtime_error(&error("bad_audio", "one frame was unusable")), RealtimeFaultClass::Degraded);
     }
 }

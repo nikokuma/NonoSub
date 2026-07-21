@@ -25,12 +25,7 @@ export function validateVideoPath(path: string): string | undefined {
 
 export async function cancelAndReplaceSession(): Promise<void> {
   if (!isTauri()) return;
-  await invoke("cancel_session");
-  await Promise.all([
-    invoke("hide_surface", { surface: "viewer" }),
-    invoke("hide_surface", { surface: "overlay" }),
-    invoke("hide_surface", { surface: "lesson" }),
-  ]);
+  await invoke("end_session", { reason: "replacement" });
 }
 
 export async function startFileSession(

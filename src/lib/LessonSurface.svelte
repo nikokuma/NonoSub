@@ -200,11 +200,26 @@
 
   async function ask(question: string) {
     if (!selected || !question.trim() || loading) return;
+    const normalizedQuestion = question.trim();
+    if (Array.from(normalizedQuestion).length > 800) {
+      error = "Questions for Nono can be at most 800 characters.";
+      mode = "error";
+      return;
+    }
     cancelCueSequence();
     const requestSelectionId = openContext.selectionId;
     const requestId = ++requestGeneration;
     const eraseExistingBoard = Boolean(currentMoment);
-    const userMessage: LessonMessage = { id: crypto.randomUUID(), role: "user", text: question.trim() };
+    const priorThread: Array<{ role: "user" | "assistant"; text: string }> = [];
+    let remainingThreadCharacters = 6_000;
+    for (const message of messages.slice().reverse()) {
+      if (priorThread.length >= 12 || remainingThreadCharacters === 0) break;
+      const text = Array.from(message.text.trim()).slice(0, remainingThreadCharacters).join("");
+      if (!text) continue;
+      remainingThreadCharacters -= Array.from(text).length;
+      priorThread.unshift({ role: message.role, text });
+    }
+    const userMessage: LessonMessage = { id: crypto.randomUUID(), role: "user", text: normalizedQuestion };
     messages = capLessonMessages([...messages, userMessage]);
     loading = true;
     error = "";
@@ -215,9 +230,9 @@
       const request: Promise<LessonCard> = isTauri()
         ? invoke<LessonCard>("request_lesson", {
             selectionId: requestSelectionId,
-            question: question.trim(),
+            question: normalizedQuestion,
             learnerLevel: preferences.level,
-            thread: messages.slice(-12).map(({ role, text }) => ({ role, text })),
+            thread: priorThread,
           })
         : Promise.resolve(FIXTURE_LESSON);
       const eraseTransition = eraseExistingBoard
@@ -350,15 +365,15 @@
     const geometry = monitorGeometry(monitor);
     const lessonWindow = getCurrentWindow();
     const [position, size] = await Promise.all([lessonWindow.outerPosition(), lessonWindow.outerSize()]);
-    preferences.lessonPlacements = {
-      ...preferences.lessonPlacements,
-      [geometry.key]: normalizeLessonPlacement(geometry, {
+    const nextPlacements = { ...preferences.lessonPlacements };
+    delete nextPlacements[geometry.key];
+    nextPlacements[geometry.key] = normalizeLessonPlacement(geometry, {
         x: position.x,
         y: position.y,
         width: size.width,
         height: size.height,
-      }),
-    };
+      });
+    preferences.lessonPlacements = Object.fromEntries(Object.entries(nextPlacements).slice(-8));
     preferences = await savePreferencePatch({
       lessonPlacements: { [geometry.key]: preferences.lessonPlacements[geometry.key] },
     });

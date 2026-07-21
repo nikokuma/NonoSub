@@ -193,4 +193,20 @@ describe("local preferences and tutor context", () => {
     expect(renamed.a.displayName).not.toContain("\u0000");
     expect(renamed.a.displayName.length).toBe(48);
   });
+
+  it("allowlists subtitle fonts and retains at most eight monitor placements", () => {
+    const lessonPlacements = Object.fromEntries(Array.from({ length: 11 }, (_, index) => [
+      `display-${index}`,
+      { monitorKey: `display-${index}`, x: 0.5, y: 0.5 },
+    ]));
+    const parsed = parsePreferences(JSON.stringify({
+      level: "beginner",
+      languages: DEFAULT_LANGUAGES,
+      style: { ...DEFAULT_STYLE, fontFamily: "Comic Sans MS; color:red" },
+      lessonPlacements,
+    }));
+    expect(parsed?.style.fontFamily).toBe(DEFAULT_STYLE.fontFamily);
+    expect(Object.keys(parsed?.lessonPlacements ?? {})).toHaveLength(8);
+    expect(parsed?.lessonPlacements["display-0"]).toBeUndefined();
+  });
 });

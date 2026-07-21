@@ -2,7 +2,7 @@
 
 ## Trust boundary
 
-The Tauri webviews never receive a stored API key. The onboarding value goes directly to a Rust command, is written to the operating-system credential vault, is cleared from UI state, and is never returned. A separate local marker stores only that setup completed; startup and status checks use that marker and never open Keychain. This prevents changing ad-hoc development builds from blocking launch behind a macOS password sheet. Rust constructs every later OpenAI request. Debug builds may read `OPENAI_API_KEY` from their process environment for local automation; release builds compile out that fallback.
+The Tauri webviews never receive a stored API key. A candidate onboarding key goes directly to Rust and is validated before it can replace the working credential in the operating-system vault. A separate local marker stores only non-secret capability results, validation time/schema, and configured state; startup reads that marker and never opens Keychain. Old markers are configured-but-unvalidated rather than ready. Rust constructs every later OpenAI request. Debug builds may read `OPENAI_API_KEY` from their process environment for local automation; release builds compile out that fallback.
 
 Rust owns credentials, scoped media access, decoding, temporary audio, ScreenCaptureKit, OpenAI HTTP/WebSocket traffic, retries, cancellation, cleanup, and the canonical session. Svelte owns video playback, the four visual surfaces, transcript/lesson interactions, and non-sensitive preferences.
 

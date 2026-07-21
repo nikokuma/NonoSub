@@ -115,15 +115,18 @@ export async function subscribeSession(
   const refresh = () => invoke<SessionState>("get_session_snapshot");
   const coordinator = new SessionEventCoordinator(refresh, update);
   const unlisten = await listen<SequencedSessionEvent>("session-event", ({ payload }) => coordinator.enqueue(payload));
+  const unlistenReset = await listen<SessionState>("session-reset-snapshot", ({ payload }) => coordinator.replace(payload));
   try {
     await coordinator.initialize(await refresh());
     return () => {
       coordinator.stop();
       unlisten();
+      unlistenReset();
     };
   } catch (error) {
     coordinator.stop();
     unlisten();
+    unlistenReset();
     throw error;
   }
 }

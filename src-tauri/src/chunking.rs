@@ -1,4 +1,8 @@
-use std::{ops::Range, path::PathBuf};
+use std::{
+    ops::Range,
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use crate::media::{write_wav, DecodedAudio};
 
@@ -59,14 +63,26 @@ fn mean_square(samples: &[i16], range: Range<usize>) -> u128 {
         / slice.len() as u128
 }
 
+#[cfg(test)]
 pub fn create_chunks(
     audio: &DecodedAudio,
     directory: &std::path::Path,
+) -> Result<Vec<AudioChunk>, String> {
+    create_chunks_cancellable(audio, directory, &AtomicBool::new(false))
+}
+
+pub fn create_chunks_cancellable(
+    audio: &DecodedAudio,
+    directory: &std::path::Path,
+    cancelled: &AtomicBool,
 ) -> Result<Vec<AudioChunk>, String> {
     let rate = audio.sample_rate as usize;
     let mut chunks = Vec::new();
     let mut start = 0usize;
     while start < audio.samples.len() {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err("Media preparation was cancelled.".into());
+        }
         let target_seconds = if chunks.is_empty() {
             FIRST_TARGET_SECONDS
         } else {
