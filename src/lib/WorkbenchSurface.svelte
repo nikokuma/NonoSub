@@ -22,7 +22,18 @@
   let session = $state<SessionState>(initialSession());
   let preferences = $state(loadPreferences());
   let apiReady = $state(false);
-  let liveReady = $state(false);
+  let apiStatus = $state<ApiConfigurationStatus>();
+  let liveReady = $derived.by(() => {
+    if (!apiStatus?.configured) return false;
+    if (preferences.processingMode === "original_only") {
+      return apiStatus.realtimeOriginalOnly !== "unavailable";
+    }
+    if (preferences.sync.translationEngine === "transcript_locked") {
+      return apiStatus.realtimeOriginalOnly !== "unavailable"
+        && apiStatus.liveTextTranslation !== "unavailable";
+    }
+    return apiStatus.realtimeTranslation !== "unavailable";
+  });
   let apiKey = $state("");
   let apiMessage = $state("");
   let mediaMessage = $state("Choose a local video or listen to another app.");
@@ -78,9 +89,9 @@
     ));
     if (isTauri()) {
       void invoke<ApiConfigurationStatus>("api_key_status").then((status) => {
+        apiStatus = status;
         onboarding = !status.configured;
         apiReady = status.languageModel === "available" && status.fileTranscription === "available";
-        liveReady = status.realtimeTranslation === "available";
       });
       void listen<string>("tray-action", ({ payload }) => {
         if (payload === "languages") document.querySelector<HTMLElement>("#languages")?.focus();
@@ -137,7 +148,9 @@
       return;
     }
     if (!liveReady) {
-      mediaMessage = "This API project cannot access realtime translation yet.";
+      mediaMessage = preferences.sync.translationEngine === "transcript_locked"
+        ? "Accurate live captions need realtime transcription and GPT‑5.6 Luna access."
+        : "This API project cannot access realtime translation yet.";
       return;
     }
     try {
@@ -163,13 +176,15 @@
     try {
       apiMessage = "Checking GPT‑5.6, diarized transcription, and realtime translation…";
       const readiness = await invoke<ApiConfigurationStatus>("save_api_key", { apiKey: apiKey.trim() });
+      apiStatus = readiness;
       apiReady = readiness.languageModel === "available" && readiness.fileTranscription === "available";
-      liveReady = readiness.realtimeTranslation === "available";
       apiKey = "";
       preferences.onboardingComplete = true;
       await persist({ onboardingComplete: true });
       onboarding = false;
-      apiMessage = liveReady ? "All models are ready." : "File mode is ready. Live translation is unavailable for this project.";
+      apiMessage = readiness.realtimeTranslation === "available"
+        ? "File and Realtime live captions are ready. Accurate mode validates Luna when first used."
+        : "File mode is ready. Other live engines validate when first used.";
       if (isTauri()) window.setTimeout(() => void invoke("hide_surface", { surface: "workbench" }), 700);
     } catch (error) { apiMessage = errorMessage(error); }
   }
@@ -178,8 +193,8 @@
     if (!isTauri()) return;
     try {
       await invoke("remove_api_key");
+      apiStatus = undefined;
       apiReady = false;
-      liveReady = false;
       preferences.onboardingComplete = false;
       await persist({ onboardingComplete: false });
       onboarding = true;
@@ -200,7 +215,9 @@
     mediaMessage = "Retrying this subtitle translation…";
     try {
       await invoke("retry_translation", { segmentId: segment.id });
-      mediaMessage = "Translation recovered.";
+      mediaMessage = session.mode === "live"
+        ? "Retry queued; the source stays visible while Luna translates."
+        : "Translation recovered.";
     } catch (error) {
       mediaMessage = errorMessage(error);
     } finally {
@@ -247,7 +264,7 @@
         <p class="language-note">Display changes what you see. Caption processing controls whether NonoSub requests a translation. Original-only subtitles remain clickable for translation, language, and culture questions.</p>
         <label class="external-pause"><input type="checkbox" bind:checked={preferences.experimentalExternalPause} onchange={updateExternalPause} /> Experimental: pause external media when Ask Nono opens</label>
         <p class="external-note">Best effort. macOS may require Accessibility permission and does not guarantee which media app receives the play/pause key.</p>
-        {#if session.mode && session.phase !== "complete" && session.processingMode !== preferences.processingMode}<p class="next-session">Processing change applies to the next session.</p>{/if}
+        {#if session.mode && session.phase !== "complete" && (session.processingMode !== preferences.processingMode || (session.mode === "live" && session.liveTranslationEngine !== preferences.sync.translationEngine))}<p class="next-session">Processing or engine changes apply to the next session.</p>{/if}
       </section>
 
       <section class="styles">
@@ -291,7 +308,7 @@
             <button class="transcript-line" onclick={() => selectLine(segment)} disabled={segment.isProvisional}>
               <time>{formatTime(segment.startMs)}</time><div><strong style={`color:${speaker?.color ?? "#79e9cb"}`}>{speaker?.displayName ?? (segment.origin === "live" ? "Live Audio" : "Speaker")}</strong><p>{segment.sourceText}</p>{#if session.processingMode !== "original_only"}<span>{segment.translationText ?? (segment.translationStatus === "failed" ? "Translation unavailable · source shown" : "Translating…")}</span>{/if}</div>
             </button>
-            {#if session.mode === "file" && session.processingMode === "translated" && segment.translationStatus === "failed"}
+            {#if session.processingMode === "translated" && segment.translationStatus === "failed" && (session.mode === "file" || session.liveTranslationEngine === "transcript_locked")}
               <button class="retry-translation" onclick={() => retryTranslation(segment)} disabled={Boolean(retryingTranslationId)}>{retryingTranslationId === segment.id ? "Retrying…" : "Retry translation"}</button>
             {/if}
           </div>

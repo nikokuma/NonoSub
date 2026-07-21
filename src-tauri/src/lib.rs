@@ -732,8 +732,11 @@ async fn save_api_key(
     }
     let client = openai::OpenAiClient::new(trimmed.to_owned())?;
     client.validate_model_access().await?;
-    let live = client
+    let live_translation = client
         .model_accessible(openai::REALTIME_TRANSLATION_MODEL)
+        .await;
+    let live_transcription = client
+        .model_accessible(openai::REALTIME_TRANSCRIPTION_MODEL)
         .await;
     let status = ApiConfigurationStatus {
         configured: true,
@@ -744,12 +747,12 @@ async fn save_api_key(
         validation_schema: API_VALIDATION_SCHEMA,
         language_model: CapabilityAvailability::Available,
         file_transcription: CapabilityAvailability::Available,
-        realtime_translation: if live {
+        realtime_translation: if live_translation {
             CapabilityAvailability::Available
         } else {
             CapabilityAvailability::Unavailable
         },
-        realtime_original_only: if live {
+        realtime_original_only: if live_transcription {
             CapabilityAvailability::Available
         } else {
             CapabilityAvailability::Unavailable
@@ -775,8 +778,11 @@ async fn validate_model_access(
         }
         return Err(error);
     }
-    let live = client
+    let live_translation = client
         .model_accessible(openai::REALTIME_TRANSLATION_MODEL)
+        .await;
+    let live_transcription = client
+        .model_accessible(openai::REALTIME_TRANSCRIPTION_MODEL)
         .await;
     let status = ApiConfigurationStatus {
         configured: true,
@@ -787,8 +793,16 @@ async fn validate_model_access(
         validation_schema: API_VALIDATION_SCHEMA,
         language_model: CapabilityAvailability::Available,
         file_transcription: CapabilityAvailability::Available,
-        realtime_translation: if live { CapabilityAvailability::Available } else { CapabilityAvailability::Unavailable },
-        realtime_original_only: if live { CapabilityAvailability::Available } else { CapabilityAvailability::Unavailable },
+        realtime_translation: if live_translation {
+            CapabilityAvailability::Available
+        } else {
+            CapabilityAvailability::Unavailable
+        },
+        realtime_original_only: if live_transcription {
+            CapabilityAvailability::Available
+        } else {
+            CapabilityAvailability::Unavailable
+        },
         live_text_translation: CapabilityAvailability::Unknown,
     };
     write_api_key_marker(&app, &status).map_err(|message| service_error(&message))?;
@@ -874,8 +888,14 @@ fn validate_preferences(preferences: &serde_json::Value) -> Result<(), String> {
         .as_object()
         .ok_or("Preferences must be a JSON object.")?;
     let allowed_root = [
-        "level", "style", "languages", "sync", "processingMode", "onboardingComplete",
-        "lessonPlacements", "experimentalExternalPause",
+        "level",
+        "style",
+        "languages",
+        "sync",
+        "processingMode",
+        "onboardingComplete",
+        "lessonPlacements",
+        "experimentalExternalPause",
     ];
     if root.keys().any(|key| !allowed_root.contains(&key.as_str())) {
         return Err("Preferences contain an unknown field.".into());
@@ -898,16 +918,38 @@ fn validate_preferences(preferences: &serde_json::Value) -> Result<(), String> {
         .and_then(serde_json::Value::as_object)
         .ok_or("Subtitle settings are missing.")?;
     let allowed_style = [
-        "preset", "position", "overlayPosition", "overlayWidth", "fontFamily", "fontSize",
-        "backgroundOpacity", "effect", "displayMode", "showSpeakerNames", "wiredColors",
+        "preset",
+        "position",
+        "overlayPosition",
+        "overlayWidth",
+        "fontFamily",
+        "fontSize",
+        "backgroundOpacity",
+        "effect",
+        "displayMode",
+        "showSpeakerNames",
+        "wiredColors",
         "arcadeColors",
     ];
-    if style.keys().any(|key| !allowed_style.contains(&key.as_str())) {
+    if style
+        .keys()
+        .any(|key| !allowed_style.contains(&key.as_str()))
+    {
         return Err("Subtitle settings contain an unknown field.".into());
     }
     if !matches!(
         style.get("fontFamily").and_then(serde_json::Value::as_str),
-        Some("Inter" | "Avenir Next Condensed" | "DotGothic16" | "Share Tech Mono" | "Klee One" | "Arial" | "Helvetica" | "Hiragino Sans" | "Noto Sans")
+        Some(
+            "Inter"
+                | "Avenir Next Condensed"
+                | "DotGothic16"
+                | "Share Tech Mono"
+                | "Klee One"
+                | "Arial"
+                | "Helvetica"
+                | "Hiragino Sans"
+                | "Noto Sans"
+        )
     ) {
         return Err("Subtitle font is unsupported.".into());
     }
@@ -960,30 +1002,33 @@ fn validate_preferences(preferences: &serde_json::Value) -> Result<(), String> {
                 .keys()
                 .any(|key| !allowed_keys.contains(&key.as_str()))
             || palette
-            .values()
-            .any(|value| value.as_str().is_none_or(|color| !valid_hex_color(color)))
+                .values()
+                .any(|value| value.as_str().is_none_or(|color| !valid_hex_color(color)))
         {
             return Err("Subtitle palette is invalid.".into());
         }
     }
     if !matches!(
-        root.get("processingMode").and_then(serde_json::Value::as_str),
+        root.get("processingMode")
+            .and_then(serde_json::Value::as_str),
         Some("translated" | "original_only")
-    ) || !matches!(root.get("onboardingComplete"), Some(serde_json::Value::Bool(_)))
-        || !matches!(root.get("experimentalExternalPause"), Some(serde_json::Value::Bool(_)))
-        || !matches!(
-            preferences
-                .pointer("/sync/liveMode")
-                .and_then(serde_json::Value::as_str),
-            Some("coordinated" | "fast_source")
-        )
-        || !matches!(
-            preferences
-                .pointer("/sync/translationEngine")
-                .and_then(serde_json::Value::as_str),
-            Some("realtime" | "transcript_locked")
-        )
-    {
+    ) || !matches!(
+        root.get("onboardingComplete"),
+        Some(serde_json::Value::Bool(_))
+    ) || !matches!(
+        root.get("experimentalExternalPause"),
+        Some(serde_json::Value::Bool(_))
+    ) || !matches!(
+        preferences
+            .pointer("/sync/liveMode")
+            .and_then(serde_json::Value::as_str),
+        Some("coordinated" | "fast_source")
+    ) || !matches!(
+        preferences
+            .pointer("/sync/translationEngine")
+            .and_then(serde_json::Value::as_str),
+        Some("realtime" | "transcript_locked")
+    ) {
         return Err("General preferences are invalid.".into());
     }
     let placements = root
@@ -994,7 +1039,9 @@ fn validate_preferences(preferences: &serde_json::Value) -> Result<(), String> {
         return Err("Too many lesson monitor placements were stored.".into());
     }
     for placement in placements.values() {
-        let placement = placement.as_object().ok_or("Lesson placement is invalid.")?;
+        let placement = placement
+            .as_object()
+            .ok_or("Lesson placement is invalid.")?;
         if placement
             .get("monitorKey")
             .is_some_and(|value| value.as_str().is_none_or(str::is_empty))
@@ -1144,10 +1191,10 @@ async fn prepare_media(
         let converted = tauri::async_runtime::spawn_blocking(move || {
             create_macos_playback_proxy(&source, &cancelled)
         })
-                .await
-                .map_err(|error| {
-                    format!("Video compatibility preparation stopped unexpectedly: {error}")
-                })??;
+        .await
+        .map_err(|error| {
+            format!("Video compatibility preparation stopped unexpectedly: {error}")
+        })??;
         (converted.1.clone(), Some(converted.0))
     } else {
         (canonical.clone(), None)
@@ -1394,10 +1441,15 @@ async fn start_analysis(
             .prepared_session
             .lock()
             .map_err(|_| service_error("Prepared audio state is unavailable."))?;
-        if guard.as_ref().is_none_or(|session| session.generation != generation) {
+        if guard
+            .as_ref()
+            .is_none_or(|session| session.generation != generation)
+        {
             return Err(service_error("Prepare audio before starting analysis."));
         }
-        guard.take().ok_or_else(|| service_error("Prepare audio before starting analysis."))?
+        guard
+            .take()
+            .ok_or_else(|| service_error("Prepare audio before starting analysis."))?
     };
     let audio = Arc::clone(&prepared.audio);
     let chunks = prepared.chunks.clone();
@@ -1448,6 +1500,22 @@ async fn retry_translation(
     state: State<'_, AppState>,
     segment_id: String,
 ) -> Result<(), openai::ApiError> {
+    let live_accurate = {
+        let snapshot = state
+            .canonical
+            .lock()
+            .map_err(|_| service_error("Session state is unavailable."))?;
+        snapshot.mode == Some(SessionMode::Live)
+            && snapshot.live_translation_engine == Some(LiveTranslationEngine::TranscriptLocked)
+    };
+    if live_accurate {
+        #[cfg(target_os = "macos")]
+        return live::retry_translation(&state.live, segment_id).await;
+        #[cfg(not(target_os = "macos"))]
+        return Err(service_error(
+            "Accurate live translation is available only on macOS.",
+        ));
+    }
     let generation = {
         let active = state
             .runs
@@ -1578,7 +1646,10 @@ fn canonical_lesson_context(
         ..usize::min(segments.len(), selected_index + following_limit + 1)]
         .to_vec();
     while context.len() > 80 {
-        if context.first().is_some_and(|segment| segment.id != selected_id) {
+        if context
+            .first()
+            .is_some_and(|segment| segment.id != selected_id)
+        {
             context.remove(0);
         } else {
             context.pop();
@@ -1590,7 +1661,10 @@ fn canonical_lesson_context(
         > MAX_LESSON_CONTEXT_CHARS
         && context.len() > 1
     {
-        if context.first().is_some_and(|segment| segment.id != selected_id) {
+        if context
+            .first()
+            .is_some_and(|segment| segment.id != selected_id)
+        {
             context.remove(0);
         } else {
             context.pop();
@@ -1745,7 +1819,9 @@ async fn request_lesson(
         return Err(service_error("Ask Nono a question first."));
     }
     if normalized_question.chars().count() > MAX_LESSON_QUESTION_CHARS {
-        return Err(service_error("Questions for Nono can be at most 800 characters."));
+        return Err(service_error(
+            "Questions for Nono can be at most 800 characters.",
+        ));
     }
     let thread = bounded_lesson_thread(thread);
     let material = current_lesson_material(state.inner(), selection_id)?;
@@ -2573,12 +2649,14 @@ async fn start_live_capture(
         Some(translation_engine.clone()),
     )?;
     let session_id = current_session_id(state.inner());
-    let source_label = Some(match source.kind {
-        live::LiveCaptureSourceKind::Application => "Application audio",
-        live::LiveCaptureSourceKind::Window => "Window audio",
-        live::LiveCaptureSourceKind::Display => "Display audio",
-    }
-    .to_string());
+    let source_label = Some(
+        match source.kind {
+            live::LiveCaptureSourceKind::Application => "Application audio",
+            live::LiveCaptureSourceKind::Window => "Window audio",
+            live::LiveCaptureSourceKind::Display => "Display audio",
+        }
+        .to_string(),
+    );
     let _ = set_live_capture_status(
         &app,
         LiveCaptureStatus {
@@ -2603,13 +2681,8 @@ async fn start_live_capture(
             return Err(error);
         }
     };
-    if let Err(error) = ensure_live_api_capability(
-        &app,
-        &key,
-        &processing_mode,
-        &translation_engine,
-    )
-    .await
+    if let Err(error) =
+        ensure_live_api_capability(&app, &key, &processing_mode, &translation_engine).await
     {
         let _ = set_live_capture_status(
             &app,
@@ -2865,7 +2938,11 @@ pub(crate) fn record_event_for_generation(
             _ => None,
         };
         if let Some(lifecycle) = lifecycle {
-            if let Ok(current) = state.live_capture_status.lock().map(|status| status.clone()) {
+            if let Ok(current) = state
+                .live_capture_status
+                .lock()
+                .map(|status| status.clone())
+            {
                 if current.session_id == lesson_session_id && current.lifecycle != lifecycle {
                     let _ = set_live_capture_status(
                         app,
@@ -2879,7 +2956,11 @@ pub(crate) fn record_event_for_generation(
         }
     }
     if let SessionEvent::FatalError { .. } = &lesson_event {
-        if let Ok(current) = state.live_capture_status.lock().map(|status| status.clone()) {
+        if let Ok(current) = state
+            .live_capture_status
+            .lock()
+            .map(|status| status.clone())
+        {
             if current.session_id == lesson_session_id {
                 let _ = set_live_capture_status(
                     app,
@@ -3417,10 +3498,20 @@ fn build_tray_menu<R: tauri::Runtime>(
         LiveCaptureLifecycle::Failed => "○ LIVE · FAILED".to_string(),
         LiveCaptureLifecycle::Inactive => "○ LIVE · INACTIVE".to_string(),
     };
-    let live_active = !matches!(status.lifecycle, LiveCaptureLifecycle::Inactive | LiveCaptureLifecycle::Failed);
+    let live_active = !matches!(
+        status.lifecycle,
+        LiveCaptureLifecycle::Inactive | LiveCaptureLifecycle::Failed
+    );
     let mut builder = MenuBuilder::new(app)
         .text("live_status", live_label)
-        .text("stop_session", if live_active { "Stop Live Capture" } else { "Stop Current Session" })
+        .text(
+            "stop_session",
+            if live_active {
+                "Stop Live Capture"
+            } else {
+                "Stop Current Session"
+            },
+        )
         .separator()
         .text("open_video", "Open Video…")
         .text("start_live", "Start Live Captions…")
@@ -4633,7 +4724,15 @@ mod tests {
         });
         let bounded = bounded_lesson_thread(input);
         assert!(bounded.len() <= MAX_LESSON_REQUEST_THREAD_MESSAGES);
-        assert!(bounded.iter().all(|message| matches!(message.role.as_str(), "user" | "assistant")));
-        assert!(bounded.iter().map(|message| message.text.chars().count()).sum::<usize>() <= MAX_LESSON_THREAD_CHARS);
+        assert!(bounded
+            .iter()
+            .all(|message| matches!(message.role.as_str(), "user" | "assistant")));
+        assert!(
+            bounded
+                .iter()
+                .map(|message| message.text.chars().count())
+                .sum::<usize>()
+                <= MAX_LESSON_THREAD_CHARS
+        );
     }
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EMPTY_SESSION } from "./contracts";
+import { EMPTY_SESSION, type SessionState } from "./contracts";
 import { FIXTURE_EVENTS, FIXTURE_SEGMENTS } from "./fixtures";
 import { activeSegments, applySequencedEvent, canResumeForCoverage, latestLiveSegments, reduceSession, shouldPauseForCoverage, subtitleTimelineTime, visibleLiveSegments } from "./session";
 
@@ -150,6 +150,82 @@ describe("session contract", () => {
   it("reduces canonical live sync updates", () => {
     const sync = { targetDelayMs: 3_100, observedLagMs: 2_500, status: "catching_up" as const, visibleSegmentId: "live-2" };
     expect(reduceSession(EMPTY_SESSION, { type: "live_sync_changed", sync }).liveSync).toEqual(sync);
+  });
+
+  it("pins the selected live translation engine to the active session", () => {
+    const state = reduceSession(EMPTY_SESSION, {
+      type: "session_reset",
+      mode: "live",
+      languages: { source: "ja", target: "en", explanation: "en" },
+      processingMode: "translated",
+      liveTranslationEngine: "transcript_locked",
+    });
+    expect(state.liveTranslationEngine).toBe("transcript_locked");
+    const next = reduceSession(state, { type: "phase_changed", phase: "ready" });
+    expect(next.liveTranslationEngine).toBe("transcript_locked");
+  });
+
+  it("retains the previous caption while an Accurate clause awaits validation", () => {
+    const previous = { ...FIXTURE_SEGMENTS[0], id: "live-1", origin: "live" as const };
+    const pending = {
+      ...FIXTURE_SEGMENTS[1],
+      id: "live-2",
+      origin: "live" as const,
+      isProvisional: false,
+      transcriptionStatus: "complete" as const,
+      translationText: undefined,
+      translationStatus: "pending" as const,
+    };
+    let state: SessionState = { ...EMPTY_SESSION, segments: [previous] };
+    state = reduceSession(state, {
+      type: "live_sync_changed",
+      sync: { targetDelayMs: 2_500, observedLagMs: 1_800, status: "steady", visibleSegmentId: previous.id },
+    });
+    state = reduceSession(state, { type: "transcript_finalized", segment: pending });
+    expect(visibleLiveSegments(state.segments, state.liveSync, "coordinated")).toEqual([previous]);
+
+    state = reduceSession(state, {
+      type: "translation_finalized",
+      segmentId: pending.id,
+      translationText: "A validated translation.",
+    });
+    state = reduceSession(state, {
+      type: "live_sync_changed",
+      sync: { targetDelayMs: 2_900, observedLagMs: 2_300, status: "steady", visibleSegmentId: pending.id },
+    });
+    expect(visibleLiveSegments(state.segments, state.liveSync, "coordinated")[0]).toMatchObject({
+      id: pending.id,
+      sourceText: pending.sourceText,
+      translationText: "A validated translation.",
+      translationStatus: "complete",
+    });
+  });
+
+  it("keeps the same Fast Source segment when its validated target arrives", () => {
+    const pending = {
+      ...FIXTURE_SEGMENTS[0],
+      id: "live-accurate-fast",
+      origin: "live" as const,
+      isProvisional: true,
+      transcriptionStatus: "pending" as const,
+      translationText: undefined,
+      translationStatus: "pending" as const,
+    };
+    let state: SessionState = { ...EMPTY_SESSION, segments: [pending] };
+    state = reduceSession(state, {
+      type: "live_sync_changed",
+      sync: { targetDelayMs: 0, observedLagMs: 0, status: "steady", visibleSegmentId: pending.id },
+    });
+    expect(visibleLiveSegments(state.segments, state.liveSync, "fast_source")[0]?.id).toBe(pending.id);
+    state = reduceSession(state, {
+      type: "translation_finalized",
+      segmentId: pending.id,
+      translationText: "Validated target.",
+    });
+    expect(visibleLiveSegments(state.segments, state.liveSync, "fast_source")[0]).toMatchObject({
+      id: pending.id,
+      translationText: "Validated target.",
+    });
   });
 
   it("retains the last released live caption when a catch-up event omits visibility", () => {

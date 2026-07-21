@@ -4,7 +4,10 @@ use crate::{
         LiveTranslationEngine, RecoverableError, SegmentStatus, SessionEvent, SessionMode,
         SubtitleSegment,
     },
-    openai::{ApiError, ApiErrorKind},
+    openai::{
+        ApiError, ApiErrorKind, LiveDialoguePair, LiveTranslationEffort, LiveTranslationResult,
+        OpenAiClient,
+    },
     record_event_for_generation,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -25,12 +28,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    hash::{Hash, Hasher},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
 };
+use tokio::sync::mpsc;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{client::IntoClientRequest, Error as WebSocketError, Message},
@@ -44,6 +49,11 @@ const REALTIME_TRANSCRIPTION_URL: &str =
     "wss://api.openai.com/v1/realtime?model=gpt-realtime-whisper";
 const REALTIME_CONFIGURATION_TIMEOUT: Duration = Duration::from_secs(8);
 const SEND_SAMPLES: usize = 2_400;
+const MAX_LUNA_PENDING_CLAUSES: usize = 8;
+const MAX_RETRYABLE_LUNA_CLAUSES: usize = 32;
+const MAX_LUNA_CONTEXT_PAIRS: usize = 12;
+const MAX_LUNA_CONTEXT_CHARS: usize = 6_000;
+const LUNA_TRANSLATION_EFFORT: LiveTranslationEffort = LiveTranslationEffort::None;
 const TERMINAL_QUIET_MS: u64 = 350;
 const IDLE_CLAUSE_MS: u64 = 1_200;
 const MAX_ALIGNED_CLAUSE_MS: u64 = 8_000;
@@ -154,6 +164,7 @@ struct ActiveLiveRun {
     _start_id: u64,
     cancelled: Arc<AtomicBool>,
     task: tauri::async_runtime::JoinHandle<()>,
+    retry_translation: Option<mpsc::Sender<String>>,
 }
 
 #[derive(Debug, Default)]
@@ -228,9 +239,14 @@ fn classify_realtime_error(error: &RealtimeServerError) -> RealtimeFaultClass {
     .any(|needle| fingerprint.contains(needle))
     {
         RealtimeFaultClass::Terminal
-    } else if ["timeout", "temporarily", "service_unavailable", "connection"]
-        .iter()
-        .any(|needle| fingerprint.contains(needle))
+    } else if [
+        "timeout",
+        "temporarily",
+        "service_unavailable",
+        "connection",
+    ]
+    .iter()
+    .any(|needle| fingerprint.contains(needle))
     {
         RealtimeFaultClass::Reconnectable
     } else {
@@ -294,8 +310,7 @@ impl TextClause {
 
     fn should_rotate_source_before(&self, aligned_ms: u64, capture_clock_ms: u64) -> bool {
         self.should_rotate_before(aligned_ms, capture_clock_ms)
-            || (self.timed
-                && aligned_ms.saturating_sub(self.end_ms) >= SOURCE_ALIGNED_GAP_MS)
+            || (self.timed && aligned_ms.saturating_sub(self.end_ms) >= SOURCE_ALIGNED_GAP_MS)
     }
 
     fn reached_hard_boundary(&self, capture_clock_ms: u64) -> bool {
@@ -1009,12 +1024,9 @@ impl CaptionCoordinator {
             let index = self.active_source_clause.expect("active source clause");
             self.close_source_clause(index, capture_clock_ms, &mut events);
         }
-        if self
-            .active_translation_clause
-            .is_some_and(|index| {
-                self.translation_clauses[index].should_close_translation(capture_clock_ms)
-            })
-        {
+        if self.active_translation_clause.is_some_and(|index| {
+            self.translation_clauses[index].should_close_translation(capture_clock_ms)
+        }) {
             let index = self
                 .active_translation_clause
                 .expect("active translation clause");
@@ -1233,17 +1245,201 @@ impl CaptionCoordinator {
 struct PendingTranscription {
     segment: SubtitleSegment,
     last_at_ms: u64,
+    capture_timed: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone)]
+struct FinalizedSourceClause {
+    source_item_id: String,
+    source_hash: String,
+    segment: SubtitleSegment,
+}
+
+#[derive(Debug, Clone)]
+struct LunaTranslationJob {
+    generation: u64,
+    session_id: String,
+    clause: FinalizedSourceClause,
+    source_language: String,
+    target_language: String,
+}
+
+#[derive(Debug)]
+enum LunaWorkerEvent {
+    Completed {
+        job: LunaTranslationJob,
+        result: LiveTranslationResult,
+    },
+    Failed {
+        job: LunaTranslationJob,
+        error: ApiError,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct PendingLunaClause {
+    source_item_id: String,
+    source_hash: String,
+    finalized_at_ms: u64,
+    fallback_shown: bool,
+    job: LunaTranslationJob,
+}
+
+async fn run_luna_worker(
+    client: OpenAiClient,
+    mut jobs: mpsc::Receiver<LunaTranslationJob>,
+    results: mpsc::Sender<LunaWorkerEvent>,
+) {
+    let mut context = VecDeque::<LiveDialoguePair>::new();
+    while let Some(job) = jobs.recv().await {
+        let bounded_context = context.iter().cloned().collect::<Vec<_>>();
+        let first = client
+            .translate_live_clause(
+                &job.clause.segment.source_text,
+                &job.source_language,
+                &job.target_language,
+                &bounded_context,
+                LUNA_TRANSLATION_EFFORT,
+            )
+            .await;
+        let result = match first {
+            Err(error) if should_retry_luna(&error) => {
+                client
+                    .translate_live_clause(
+                        &job.clause.segment.source_text,
+                        &job.source_language,
+                        &job.target_language,
+                        &bounded_context,
+                        LiveTranslationEffort::Low,
+                    )
+                    .await
+            }
+            other => other,
+        };
+        let event = match result {
+            Ok(result) => {
+                context.push_back(LiveDialoguePair {
+                    source: job.clause.segment.source_text.clone(),
+                    translation: result.text.clone(),
+                });
+                trim_luna_context(&mut context);
+                LunaWorkerEvent::Completed { job, result }
+            }
+            Err(error) => LunaWorkerEvent::Failed { job, error },
+        };
+        if results.send(event).await.is_err() {
+            break;
+        }
+    }
+}
+
+fn should_retry_luna(error: &ApiError) -> bool {
+    error.retryable
+        && !matches!(
+            error.kind,
+            ApiErrorKind::Authentication | ApiErrorKind::ModelUnavailable | ApiErrorKind::Cancelled
+        )
+        && !error
+            .message
+            .to_ascii_lowercase()
+            .contains("insufficient_quota")
+}
+
+fn trim_luna_context(context: &mut VecDeque<LiveDialoguePair>) {
+    while context.len() > MAX_LUNA_CONTEXT_PAIRS
+        || context
+            .iter()
+            .map(|pair| pair.source.chars().count() + pair.translation.chars().count())
+            .sum::<usize>()
+            > MAX_LUNA_CONTEXT_CHARS
+    {
+        context.pop_front();
+    }
+}
+
+fn realtime_processing_mode_for(
+    processing_mode: &CaptionProcessingMode,
+    translation_engine: &LiveTranslationEngine,
+) -> CaptionProcessingMode {
+    if processing_mode == &CaptionProcessingMode::Translated
+        && translation_engine == &LiveTranslationEngine::TranscriptLocked
+    {
+        CaptionProcessingMode::OriginalOnly
+    } else {
+        processing_mode.clone()
+    }
+}
+
+fn source_hash(value: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn luna_job_matches(
+    pending: &HashMap<String, PendingLunaClause>,
+    generation: u64,
+    job: &LunaTranslationJob,
+) -> bool {
+    job.generation == generation
+        && job.session_id == format!("session-{generation}")
+        && pending.get(&job.clause.segment.id).is_some_and(|clause| {
+            clause.source_item_id == job.clause.source_item_id
+                && clause.source_hash == job.clause.source_hash
+        })
+}
+
+fn remember_failed_luna_job(
+    jobs: &mut HashMap<String, LunaTranslationJob>,
+    order: &mut VecDeque<String>,
+    job: LunaTranslationJob,
+) {
+    let segment_id = job.clause.segment.id.clone();
+    if jobs.insert(segment_id.clone(), job).is_none() {
+        order.push_back(segment_id);
+    }
+    while order.len() > MAX_RETRYABLE_LUNA_CLAUSES {
+        if let Some(expired) = order.pop_front() {
+            jobs.remove(&expired);
+        }
+    }
+}
+
+#[derive(Debug)]
 struct TranscriptionCoordinator {
     segments: HashMap<String, PendingTranscription>,
     seen_event_ids: RecentEventIds,
     completed_item_ids: RecentEventIds,
     next_segment: u64,
+    epoch: u64,
+    translation_status: SegmentStatus,
+    show_provisional: bool,
+    committed_spans: VecDeque<(u64, u64)>,
+}
+
+impl Default for TranscriptionCoordinator {
+    fn default() -> Self {
+        Self {
+            segments: HashMap::new(),
+            seen_event_ids: RecentEventIds::default(),
+            completed_item_ids: RecentEventIds::default(),
+            next_segment: 0,
+            epoch: 0,
+            translation_status: SegmentStatus::Skipped,
+            show_provisional: true,
+            committed_spans: VecDeque::new(),
+        }
+    }
 }
 
 impl TranscriptionCoordinator {
+    fn new(translation_status: SegmentStatus, show_provisional: bool) -> Self {
+        Self {
+            translation_status,
+            show_provisional,
+            ..Self::default()
+        }
+    }
     fn accept(&mut self, event_id: &Option<String>) -> bool {
         match event_id {
             Some(id) if !id.is_empty() => self.seen_event_ids.insert(id),
@@ -1251,23 +1447,40 @@ impl TranscriptionCoordinator {
         }
     }
 
+    fn register_committed_span(&mut self, start_sample: u64, end_sample: u64) {
+        self.committed_spans.push_back((
+            samples_24k_to_ms(start_sample),
+            samples_24k_to_ms(end_sample),
+        ));
+        while self.committed_spans.len() > MAX_RETAINED_LIVE_UNITS {
+            self.committed_spans.pop_front();
+        }
+    }
+
     fn segment_mut(&mut self, item_id: &str, capture_clock_ms: u64) -> &mut PendingTranscription {
+        let span = (!self.segments.contains_key(item_id))
+            .then(|| self.committed_spans.pop_front())
+            .flatten();
         self.segments.entry(item_id.to_owned()).or_insert_with(|| {
             self.next_segment += 1;
+            let capture_timed = span.is_some();
+            let (start_ms, end_ms) =
+                span.unwrap_or((capture_clock_ms, capture_clock_ms.saturating_add(250)));
             PendingTranscription {
                 last_at_ms: capture_clock_ms,
+                capture_timed,
                 segment: SubtitleSegment {
                     id: format!("live-original-{}", self.next_segment),
                     origin: SessionMode::Live,
-                    start_ms: capture_clock_ms,
-                    end_ms: capture_clock_ms.saturating_add(250),
+                    start_ms,
+                    end_ms: end_ms.max(start_ms.saturating_add(250)),
                     source_text: String::new(),
                     translation_text: None,
                     ambiguity_note: None,
                     speaker_id: Some("live-audio".into()),
                     is_provisional: true,
                     transcription_status: SegmentStatus::Pending,
-                    translation_status: SegmentStatus::Skipped,
+                    translation_status: self.translation_status.clone(),
                 },
             }
         })
@@ -1297,17 +1510,21 @@ impl TranscriptionCoordinator {
         if self.completed_item_ids.contains(&item_id) {
             return Vec::new();
         }
+        let show_provisional = self.show_provisional;
         let pending = self.segment_mut(&item_id, capture_clock_ms);
         pending.last_at_ms = capture_clock_ms;
         let segment = &mut pending.segment;
         segment.source_text.push_str(&text);
-        segment.end_ms = capture_clock_ms.max(segment.start_ms.saturating_add(250));
-        vec![
-            SessionEvent::CaptionUpserted {
-                segment: segment.clone(),
-            },
-            Self::sync(segment.id.clone()),
-        ]
+        if !pending.capture_timed {
+            segment.end_ms = capture_clock_ms.max(segment.start_ms.saturating_add(250));
+        }
+        let mut events = vec![SessionEvent::CaptionUpserted {
+            segment: segment.clone(),
+        }];
+        if show_provisional {
+            events.push(Self::sync(segment.id.clone()));
+        }
+        events
     }
 
     fn on_done(
@@ -1317,11 +1534,22 @@ impl TranscriptionCoordinator {
         text: String,
         capture_clock_ms: u64,
     ) -> Vec<SessionEvent> {
+        self.on_done_with_clause(item_id, event_id, text, capture_clock_ms)
+            .0
+    }
+
+    fn on_done_with_clause(
+        &mut self,
+        item_id: String,
+        event_id: Option<String>,
+        text: String,
+        capture_clock_ms: u64,
+    ) -> (Vec<SessionEvent>, Option<FinalizedSourceClause>) {
         if !self.accept(&event_id) {
-            return Vec::new();
+            return (Vec::new(), None);
         }
         if self.completed_item_ids.contains(&item_id) {
-            return Vec::new();
+            return (Vec::new(), None);
         }
         let pending = self.segment_mut(&item_id, capture_clock_ms);
         pending.last_at_ms = capture_clock_ms;
@@ -1332,19 +1560,27 @@ impl TranscriptionCoordinator {
         if segment.source_text.trim().is_empty() {
             self.segments.remove(&item_id);
             self.completed_item_ids.insert(&item_id);
-            return Vec::new();
+            return (Vec::new(), None);
         }
-        segment.end_ms = capture_clock_ms.max(segment.start_ms.saturating_add(250));
+        if !pending.capture_timed {
+            segment.end_ms = capture_clock_ms.max(segment.start_ms.saturating_add(250));
+        }
         segment.is_provisional = false;
         segment.transcription_status = SegmentStatus::Complete;
         let finalized = segment.clone();
         let sync_id = finalized.id.clone();
+        let clause = FinalizedSourceClause {
+            source_item_id: format!("{}:{item_id}", self.epoch),
+            source_hash: source_hash(&finalized.source_text),
+            segment: finalized.clone(),
+        };
         self.segments.remove(&item_id);
         self.completed_item_ids.insert(&item_id);
-        vec![
-            SessionEvent::TranscriptFinalized { segment: finalized },
-            Self::sync(sync_id),
-        ]
+        let mut events = vec![SessionEvent::TranscriptFinalized { segment: finalized }];
+        if self.translation_status == SegmentStatus::Skipped || self.show_provisional {
+            events.push(Self::sync(sync_id));
+        }
+        (events, Some(clause))
     }
 
     fn finish(&mut self, capture_clock_ms: u64) -> Vec<SessionEvent> {
@@ -1357,12 +1593,20 @@ impl TranscriptionCoordinator {
             segment.end_ms = capture_clock_ms.max(segment.start_ms.saturating_add(250));
             segment.is_provisional = false;
             segment.transcription_status = SegmentStatus::Complete;
+            if self.translation_status == SegmentStatus::Pending {
+                segment.translation_status = SegmentStatus::Failed;
+            }
             events.push(SessionEvent::TranscriptFinalized {
                 segment: segment.clone(),
             });
+            if self.translation_status == SegmentStatus::Pending {
+                events.push(Self::sync(segment.id.clone()));
+            }
         }
         self.seen_event_ids.clear();
         self.completed_item_ids.clear();
+        self.committed_spans.clear();
+        self.epoch = self.epoch.saturating_add(1);
         events
     }
 
@@ -1405,7 +1649,7 @@ impl TranscriptionCoordinator {
 #[derive(Debug)]
 enum TranscriptionAudioAction {
     Append(CapturedPcm),
-    Commit,
+    Commit { start_sample: u64, end_sample: u64 },
 }
 
 #[derive(Debug, Clone)]
@@ -1423,6 +1667,8 @@ struct SpeechCommitter {
     quiet_frames: usize,
     buffered_frames: usize,
     noise_floor: f64,
+    active_start_sample: Option<u64>,
+    active_end_sample: u64,
 }
 
 impl Default for SpeechCommitter {
@@ -1434,6 +1680,8 @@ impl Default for SpeechCommitter {
             quiet_frames: 0,
             buffered_frames: 0,
             noise_floor: 120.0,
+            active_start_sample: None,
+            active_end_sample: 0,
         }
     }
 }
@@ -1458,6 +1706,12 @@ impl SpeechCommitter {
                 self.active = true;
                 self.quiet_frames = 0;
                 self.buffered_frames = self.preroll.len();
+                self.active_start_sample =
+                    self.preroll.front().map(|frame| frame.capture_start_sample);
+                self.active_end_sample = self
+                    .preroll
+                    .back()
+                    .map_or(0, |frame| frame.capture_end_sample);
                 for frame in self.preroll.drain(..) {
                     actions.push(TranscriptionAudioAction::Append(frame));
                 }
@@ -1466,23 +1720,33 @@ impl SpeechCommitter {
         }
 
         self.buffered_frames += 1;
+        self.active_end_sample = frame.capture_end_sample;
         self.quiet_frames = if speech { 0 } else { self.quiet_frames + 1 };
         actions.push(TranscriptionAudioAction::Append(frame));
         if (self.quiet_frames >= 4 && self.buffered_frames >= 6) || self.buffered_frames >= 30 {
-            actions.push(TranscriptionAudioAction::Commit);
+            actions.push(TranscriptionAudioAction::Commit {
+                start_sample: self.active_start_sample.unwrap_or(self.active_end_sample),
+                end_sample: self.active_end_sample,
+            });
             self.active = false;
             self.speech_frames = 0;
             self.quiet_frames = 0;
             self.buffered_frames = 0;
             self.preroll.clear();
+            self.active_start_sample = None;
         }
         actions
     }
 
-    fn finish(&mut self) -> bool {
-        let should_commit = self.active && self.buffered_frames > 0;
+    fn finish(&mut self) -> Option<(u64, u64)> {
+        let span = (self.active && self.buffered_frames > 0).then(|| {
+            (
+                self.active_start_sample.unwrap_or(self.active_end_sample),
+                self.active_end_sample,
+            )
+        });
         *self = Self::default();
-        should_commit
+        span
     }
 }
 
@@ -1659,7 +1923,10 @@ fn capture_sources_from_content(content: &SCShareableContent) -> LiveCaptureSour
                 id: format!("application:{}", application.process_id()),
                 kind: LiveCaptureSourceKind::Application,
                 title: name.clone(),
-                detail: format!("{count} visible window{}", if count == 1 { "" } else { "s" }),
+                detail: format!(
+                    "{count} visible window{}",
+                    if count == 1 { "" } else { "s" }
+                ),
                 application_name: Some(name),
                 bundle_identifier: Some(application.bundle_identifier()),
                 process_id: Some(application.process_id()),
@@ -1750,7 +2017,9 @@ fn capture_filter_for_selection(
                 .iter()
                 .find(|application| application.process_id() == process_id)
                 .ok_or_else(|| {
-                    capture_error("That application is no longer available. Refresh the source list.")
+                    capture_error(
+                        "That application is no longer available. Refresh the source list.",
+                    )
                 })?;
             let app_windows = content
                 .windows()
@@ -1798,10 +2067,13 @@ pub async fn start(
         processing_mode,
         source,
     } = options;
-    // Phase-one routing deliberately preserves the proven realtime transport for both choices.
-    // The value is nevertheless captured in canonical state so a running session cannot change
-    // when preferences are edited.
-    let _selected_translation_engine = translation_engine;
+    let transcript_locked = processing_mode == CaptionProcessingMode::Translated
+        && translation_engine == LiveTranslationEngine::TranscriptLocked;
+    let realtime_processing_mode =
+        realtime_processing_mode_for(&processing_mode, &translation_engine);
+    let luna_client = transcript_locked
+        .then(|| OpenAiClient::new(api_key.clone()))
+        .transpose()?;
     let start_lease = state.start_sequence.fetch_add(1, Ordering::SeqCst) + 1;
     let _start_guard = state.start_lock.lock().await;
     abort_previous(state).await;
@@ -1827,8 +2099,14 @@ pub async fn start(
         .with_excludes_current_process_audio(true);
     let stream = AsyncSCStream::new(&filter, &config, 8, SCStreamOutputType::Audio);
 
-    let (mut writer, mut reader) =
-        connect_realtime(&api_key, &languages, &processing_mode, generation, 0).await?;
+    let (mut writer, mut reader) = connect_realtime(
+        &api_key,
+        &languages,
+        &realtime_processing_mode,
+        generation,
+        0,
+    )
+    .await?;
     ensure_live_start_current(state, start_lease)?;
 
     stream.start_capture().await.map_err(|error| {
@@ -1848,16 +2126,33 @@ pub async fn start(
 
     let cancelled = Arc::new(AtomicBool::new(false));
     let task_cancelled = Arc::clone(&cancelled);
+    let (retry_translation, mut retry_translation_receiver) = mpsc::channel::<String>(8);
+    let active_retry_translation = transcript_locked.then_some(retry_translation);
     let task = tauri::async_runtime::spawn(async move {
         let original_only = processing_mode == CaptionProcessingMode::OriginalOnly;
+        let transcription_transport = original_only || transcript_locked;
         let mut pcm = Vec::<i16>::with_capacity(SEND_SAMPLES * 2);
         let mut resampler = Pcm24Resampler::default();
         let mut captured_input_samples_48k = 0_u64;
         let mut pcm_front_capture_sample = 0_u64;
         let mut transmission = TransmissionTimeline::default();
         transmission.begin_epoch(0);
-        let mut coordinator = CaptionCoordinator::new(sync_mode);
-        let mut transcription = TranscriptionCoordinator::default();
+        let fast_source = sync_mode == LiveSyncMode::FastSource;
+        let mut coordinator = CaptionCoordinator::new(sync_mode.clone());
+        let mut transcription = if transcript_locked {
+            TranscriptionCoordinator::new(SegmentStatus::Pending, fast_source)
+        } else {
+            TranscriptionCoordinator::default()
+        };
+        let (luna_jobs, luna_job_receiver) = mpsc::channel(MAX_LUNA_PENDING_CLAUSES);
+        let (luna_results, mut luna_result_receiver) = mpsc::channel(MAX_LUNA_PENDING_CLAUSES);
+        let luna_task = luna_client.map(|client| {
+            tauri::async_runtime::spawn(run_luna_worker(client, luna_job_receiver, luna_results))
+        });
+        let mut pending_luna = HashMap::<String, PendingLunaClause>::new();
+        let mut failed_luna = HashMap::<String, LunaTranslationJob>::new();
+        let mut failed_luna_order = VecDeque::<String>::new();
+        let mut luna_worker_available = transcript_locked;
         let mut speech_committer = SpeechCommitter::default();
         let mut ready = false;
         let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -1871,10 +2166,11 @@ pub async fn start(
             if task_cancelled.load(Ordering::Relaxed) && !closing {
                 closing = true;
                 close_started = Some(Instant::now());
-                let close_event = if original_only {
-                    speech_committer
-                        .finish()
-                        .then(|| json!({ "type": "input_audio_buffer.commit" }))
+                let close_event = if transcription_transport {
+                    speech_committer.finish().map(|(start_sample, end_sample)| {
+                        transcription.register_committed_span(start_sample, end_sample);
+                        json!({ "type": "input_audio_buffer.commit" })
+                    })
                 } else {
                     Some(json!({ "type": "session.close" }))
                 };
@@ -1912,39 +2208,46 @@ pub async fn start(
                                         samples,
                                     };
                                     pcm_front_capture_sample = frame.capture_end_sample;
-                                    let actions = if original_only {
+                                    let actions = if transcription_transport {
                                         speech_committer.push(frame)
                                     } else {
                                         vec![TranscriptionAudioAction::Append(frame)]
                                     };
                                     for action in actions {
-                                        let (event, frame) = match action {
+                                        let (event, frame, committed_span) = match action {
                                             TranscriptionAudioAction::Append(frame) => {
                                                 let mut bytes = Vec::with_capacity(frame.samples.len() * 2);
                                                 for sample in &frame.samples { bytes.extend_from_slice(&sample.to_le_bytes()); }
                                                 (json!({
-                                                    "type": if original_only { "input_audio_buffer.append" } else { "session.input_audio_buffer.append" },
+                                                    "type": if transcription_transport { "input_audio_buffer.append" } else { "session.input_audio_buffer.append" },
                                                     "audio": BASE64.encode(bytes)
-                                                }), Some(frame))
+                                                }), Some(frame), None)
                                             }
-                                            TranscriptionAudioAction::Commit => (json!({ "type": "input_audio_buffer.commit" }), None),
+                                            TranscriptionAudioAction::Commit { start_sample, end_sample } => (
+                                                json!({ "type": "input_audio_buffer.commit" }),
+                                                None,
+                                                Some((start_sample, end_sample)),
+                                            ),
                                         };
                                         let sent = send_realtime(&mut writer, event).await;
                                         if sent {
                                             if let Some(frame) = frame.as_ref() {
                                                 transmission.record(frame);
                                             }
+                                            if let Some((start_sample, end_sample)) = committed_span {
+                                                transcription.register_committed_span(start_sample, end_sample);
+                                            }
                                         }
                                         if !sent {
                                             let captured_samples_24k = captured_input_samples_48k / 2;
                                             let capture_ms = capture_clock_ms(captured_samples_24k);
-                                            close_for_transmission_gap(original_only, &app, generation, &mut transcription, &mut coordinator, capture_ms, transmission.last_capture_ms());
+                                            close_for_transmission_gap(transcription_transport, &app, generation, &mut transcription, &mut coordinator, capture_ms, transmission.last_capture_ms());
                                             if reconnect.claim(closing) {
                                                 let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
                                                 pcm.clear();
                                                 resampler = Pcm24Resampler::default();
                                                 pcm_front_capture_sample = captured_samples_24k;
-                                                if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &processing_mode, generation, 1).await {
+                                                if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &realtime_processing_mode, generation, 1).await {
                                                     writer = next_writer;
                                                     reader = next_reader;
                                                     transmission.begin_epoch(captured_samples_24k);
@@ -1987,11 +2290,11 @@ pub async fn start(
                             let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
                             let captured_samples_24k = captured_input_samples_48k / 2;
                             let capture_ms = capture_clock_ms(captured_samples_24k);
-                            close_for_transmission_gap(original_only, &app, generation, &mut transcription, &mut coordinator, capture_ms, transmission.last_capture_ms());
+                            close_for_transmission_gap(transcription_transport, &app, generation, &mut transcription, &mut coordinator, capture_ms, transmission.last_capture_ms());
                             pcm.clear();
                             resampler = Pcm24Resampler::default();
                             pcm_front_capture_sample = captured_samples_24k;
-                            if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &processing_mode, generation, 1).await {
+                            if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &realtime_processing_mode, generation, 1).await {
                                 writer = next_writer;
                                 reader = next_reader;
                                 transmission.begin_epoch(captured_samples_24k);
@@ -2029,7 +2332,74 @@ pub async fn start(
                                 emit_events(&app, generation, transcription.on_delta(item_id, event_id, text, capture_clock_ms(captured_input_samples_48k / 2)));
                             }
                             RealtimeEvent::TranscriptionDone { item_id, event_id, text } => {
-                                emit_events(&app, generation, transcription.on_done(item_id, event_id, text, capture_clock_ms(captured_input_samples_48k / 2)));
+                                let capture_ms = capture_clock_ms(captured_input_samples_48k / 2);
+                                if transcript_locked {
+                                    let (events, clause) = transcription.on_done_with_clause(
+                                        item_id,
+                                        event_id,
+                                        text,
+                                        capture_ms,
+                                    );
+                                    emit_events(&app, generation, events);
+                                    if let Some(clause) = clause {
+                                        let job = LunaTranslationJob {
+                                            generation,
+                                            session_id: format!("session-{generation}"),
+                                            source_language: languages.source.clone(),
+                                            target_language: languages.target.clone(),
+                                            clause: clause.clone(),
+                                        };
+                                        pending_luna.insert(
+                                            clause.segment.id.clone(),
+                                            PendingLunaClause {
+                                                source_item_id: clause.source_item_id.clone(),
+                                                source_hash: clause.source_hash.clone(),
+                                                finalized_at_ms: capture_ms,
+                                                fallback_shown: false,
+                                                job: job.clone(),
+                                            },
+                                        );
+                                        if let Err(error) = luna_jobs.try_send(job) {
+                                            let (job, code, message) = match error {
+                                                mpsc::error::TrySendError::Full(job) => (
+                                                    job,
+                                                    "live_translation_queue_full",
+                                                    "Accurate translation fell behind; the complete source caption is still available.",
+                                                ),
+                                                mpsc::error::TrySendError::Closed(job) => (
+                                                    job,
+                                                    "live_translation_worker_stopped",
+                                                    "Accurate translation stopped; the complete source caption is still available.",
+                                                ),
+                                            };
+                                            pending_luna.remove(&job.clause.segment.id);
+                                            remember_failed_luna_job(
+                                                &mut failed_luna,
+                                                &mut failed_luna_order,
+                                                job.clone(),
+                                            );
+                                            let mut failed = job.clause.segment;
+                                            failed.translation_status = SegmentStatus::Failed;
+                                            emit_events(&app, generation, vec![
+                                                SessionEvent::CaptionUpserted { segment: failed.clone() },
+                                                TranscriptionCoordinator::sync(failed.id.clone()),
+                                                SessionEvent::RecoverableError {
+                                                    error: RecoverableError {
+                                                        code: code.into(),
+                                                        message: message.into(),
+                                                        segment_id: Some(failed.id),
+                                                    },
+                                                },
+                                            ]);
+                                        }
+                                    }
+                                } else {
+                                    emit_events(
+                                        &app,
+                                        generation,
+                                        transcription.on_done(item_id, event_id, text, capture_ms),
+                                    );
+                                }
                             }
                             RealtimeEvent::Closed if closing => closed = true,
                             RealtimeEvent::Closed => {
@@ -2037,11 +2407,11 @@ pub async fn start(
                                     let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
                                     let captured_samples_24k = captured_input_samples_48k / 2;
                                     let capture_ms = capture_clock_ms(captured_samples_24k);
-                                    close_for_transmission_gap(original_only, &app, generation, &mut transcription, &mut coordinator, capture_ms, transmission.last_capture_ms());
+                                    close_for_transmission_gap(transcription_transport, &app, generation, &mut transcription, &mut coordinator, capture_ms, transmission.last_capture_ms());
                                     pcm.clear();
                                     resampler = Pcm24Resampler::default();
                                     pcm_front_capture_sample = captured_samples_24k;
-                                    if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &processing_mode, generation, 1).await {
+                                    if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &realtime_processing_mode, generation, 1).await {
                                         writer = next_writer;
                                         reader = next_reader;
                                         transmission.begin_epoch(captured_samples_24k);
@@ -2097,11 +2467,11 @@ pub async fn start(
                                 let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
                                 let captured_samples_24k = captured_input_samples_48k / 2;
                                 let capture_ms = capture_clock_ms(captured_samples_24k);
-                                close_for_transmission_gap(original_only, &app, generation, &mut transcription, &mut coordinator, capture_ms, transmission.last_capture_ms());
+                                close_for_transmission_gap(transcription_transport, &app, generation, &mut transcription, &mut coordinator, capture_ms, transmission.last_capture_ms());
                                 pcm.clear();
                                 resampler = Pcm24Resampler::default();
                                 pcm_front_capture_sample = captured_samples_24k;
-                                if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &processing_mode, generation, 1).await {
+                                if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &realtime_processing_mode, generation, 1).await {
                                     writer = next_writer;
                                     reader = next_reader;
                                     transmission.begin_epoch(captured_samples_24k);
@@ -2126,11 +2496,11 @@ pub async fn start(
                                 let _ = record_event_for_generation(&app, generation, SessionEvent::PhaseChanged { phase: "reconnecting".into() });
                                 let captured_samples_24k = captured_input_samples_48k / 2;
                                 let capture_ms = capture_clock_ms(captured_samples_24k);
-                                close_for_transmission_gap(original_only, &app, generation, &mut transcription, &mut coordinator, capture_ms, transmission.last_capture_ms());
+                                close_for_transmission_gap(transcription_transport, &app, generation, &mut transcription, &mut coordinator, capture_ms, transmission.last_capture_ms());
                                 pcm.clear();
                                 resampler = Pcm24Resampler::default();
                                 pcm_front_capture_sample = captured_samples_24k;
-                                if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &processing_mode, generation, 1).await {
+                                if let Ok((next_writer, next_reader)) = connect_realtime(&api_key, &languages, &realtime_processing_mode, generation, 1).await {
                                     writer = next_writer;
                                     reader = next_reader;
                                     transmission.begin_epoch(captured_samples_24k);
@@ -2144,10 +2514,169 @@ pub async fn start(
                         }
                     }
                 }
+                result = luna_result_receiver.recv(), if luna_worker_available && !closing => {
+                    let Some(result) = result else {
+                        luna_worker_available = false;
+                        let pending_ids = pending_luna.keys().cloned().collect::<Vec<_>>();
+                        for segment_id in pending_ids {
+                            let Some(pending) = pending_luna.remove(&segment_id) else {
+                                continue;
+                            };
+                            let mut failed = pending.job.clause.segment.clone();
+                            failed.translation_status = SegmentStatus::Failed;
+                            remember_failed_luna_job(
+                                &mut failed_luna,
+                                &mut failed_luna_order,
+                                pending.job,
+                            );
+                            emit_events(&app, generation, vec![
+                                SessionEvent::CaptionUpserted { segment: failed },
+                                SessionEvent::LiveSyncChanged {
+                                    sync: LiveSyncState {
+                                        target_delay_ms: 6_000,
+                                        observed_lag_ms: 6_000,
+                                        status: LiveSyncStatus::Degraded,
+                                        visible_segment_id: Some(segment_id.clone()),
+                                    },
+                                },
+                                SessionEvent::RecoverableError {
+                                    error: RecoverableError {
+                                        code: "live_translation_worker_stopped".into(),
+                                        message: "Accurate translation stopped; the complete source caption is still available.".into(),
+                                        segment_id: Some(segment_id),
+                                    },
+                                },
+                            ]);
+                        }
+                        emit_recoverable(
+                            &app,
+                            generation,
+                            "live_translation_worker_stopped",
+                            "Accurate translation stopped; source captions remain available.",
+                        );
+                        continue;
+                    };
+                    match result {
+                        LunaWorkerEvent::Completed { job, result } => {
+                            if !luna_job_matches(&pending_luna, generation, &job) {
+                                continue;
+                            }
+                            pending_luna.remove(&job.clause.segment.id);
+                            let delay = result.completion_ms.clamp(1_500, 6_000);
+                            emit_events(&app, generation, vec![
+                                SessionEvent::TranslationFinalized {
+                                    segment_id: job.clause.segment.id.clone(),
+                                    translation_text: result.text,
+                                    ambiguity_note: None,
+                                },
+                                SessionEvent::LiveSyncChanged {
+                                    sync: LiveSyncState {
+                                        target_delay_ms: delay,
+                                        observed_lag_ms: result.completion_ms,
+                                        status: LiveSyncStatus::Steady,
+                                        visible_segment_id: Some(job.clause.segment.id),
+                                    },
+                                },
+                            ]);
+                        }
+                        LunaWorkerEvent::Failed { job, error } => {
+                            if !luna_job_matches(&pending_luna, generation, &job) {
+                                continue;
+                            }
+                            pending_luna.remove(&job.clause.segment.id);
+                            remember_failed_luna_job(
+                                &mut failed_luna,
+                                &mut failed_luna_order,
+                                job.clone(),
+                            );
+                            let mut failed = job.clause.segment;
+                            failed.translation_status = SegmentStatus::Failed;
+                            emit_events(&app, generation, vec![
+                                SessionEvent::CaptionUpserted { segment: failed.clone() },
+                                TranscriptionCoordinator::sync(failed.id.clone()),
+                                SessionEvent::RecoverableError {
+                                    error: RecoverableError {
+                                        code: "live_text_translation_failed".into(),
+                                        message: error.message,
+                                        segment_id: Some(failed.id),
+                                    },
+                                },
+                            ]);
+                        }
+                    }
+                }
+                retry_segment_id = retry_translation_receiver.recv(), if transcript_locked && !closing => {
+                    let Some(segment_id) = retry_segment_id else { continue; };
+                    let Some(job) = failed_luna.remove(&segment_id) else {
+                        emit_recoverable(
+                            &app,
+                            generation,
+                            "live_translation_retry_unavailable",
+                            "That live caption is no longer available to retry.",
+                        );
+                        continue;
+                    };
+                    failed_luna_order.retain(|candidate| candidate != &segment_id);
+                    pending_luna.insert(
+                        segment_id.clone(),
+                        PendingLunaClause {
+                            source_item_id: job.clause.source_item_id.clone(),
+                            source_hash: job.clause.source_hash.clone(),
+                            finalized_at_ms: capture_clock_ms(captured_input_samples_48k / 2),
+                            fallback_shown: fast_source,
+                            job: job.clone(),
+                        },
+                    );
+                    emit_events(&app, generation, vec![SessionEvent::CaptionUpserted {
+                        segment: job.clause.segment.clone(),
+                    }]);
+                    if let Err(error) = luna_jobs.try_send(job) {
+                        let job = error.into_inner();
+                        pending_luna.remove(&segment_id);
+                        remember_failed_luna_job(
+                            &mut failed_luna,
+                            &mut failed_luna_order,
+                            job.clone(),
+                        );
+                        let mut failed = job.clause.segment;
+                        failed.translation_status = SegmentStatus::Failed;
+                        emit_events(&app, generation, vec![
+                            SessionEvent::CaptionUpserted { segment: failed },
+                            SessionEvent::RecoverableError {
+                                error: RecoverableError {
+                                    code: "live_translation_retry_unavailable".into(),
+                                    message: "Accurate translation could not restart yet.".into(),
+                                    segment_id: Some(segment_id),
+                                },
+                            },
+                        ]);
+                    }
+                }
                 _ = tick.tick() => {
                     let capture_ms = capture_clock_ms(captured_input_samples_48k / 2);
-                    if original_only {
+                    if transcription_transport {
                         emit_events(&app, generation, transcription.prune(capture_ms));
+                        if transcript_locked && sync_mode == LiveSyncMode::Coordinated {
+                            let fallback = pending_luna
+                                .iter_mut()
+                                .filter(|(_, pending)| !pending.fallback_shown
+                                    && capture_ms.saturating_sub(pending.finalized_at_ms) >= SOURCE_FALLBACK_MS)
+                                .map(|(segment_id, pending)| {
+                                    pending.fallback_shown = true;
+                                    segment_id.clone()
+                                })
+                                .next();
+                            if let Some(segment_id) = fallback {
+                                emit_events(&app, generation, vec![SessionEvent::LiveSyncChanged {
+                                    sync: LiveSyncState {
+                                        target_delay_ms: 6_000,
+                                        observed_lag_ms: capture_ms,
+                                        status: LiveSyncStatus::Degraded,
+                                        visible_segment_id: Some(segment_id),
+                                    },
+                                }]);
+                            }
+                        }
                     } else {
                         emit_events(&app, generation, coordinator.tick(capture_ms));
                     }
@@ -2155,7 +2684,7 @@ pub async fn start(
             }
         }
 
-        if original_only {
+        if transcription_transport {
             emit_events(
                 &app,
                 generation,
@@ -2167,6 +2696,11 @@ pub async fn start(
                 generation,
                 coordinator.finish(capture_clock_ms(captured_input_samples_48k / 2)),
             );
+        }
+        drop(luna_jobs);
+        if let Some(task) = luna_task {
+            task.abort();
+            let _ = task.await;
         }
         let _ = stream.stop_capture().await;
         let _ = record_event_for_generation(&app, generation, SessionEvent::Complete);
@@ -2185,6 +2719,7 @@ pub async fn start(
         _start_id: start_lease,
         cancelled,
         task,
+        retry_translation: active_retry_translation,
     });
     Ok(())
 }
@@ -2317,6 +2852,20 @@ pub fn stop(state: &LiveState) {
     }
 }
 
+pub async fn retry_translation(state: &LiveState, segment_id: String) -> Result<(), ApiError> {
+    let sender = state
+        .active
+        .lock()
+        .map_err(|_| capture_error("Live task state is unavailable."))?
+        .as_ref()
+        .and_then(|run| run.retry_translation.clone())
+        .ok_or_else(|| capture_error("Accurate live translation is not active."))?;
+    sender
+        .send(segment_id)
+        .await
+        .map_err(|_| capture_error("Accurate live translation has already stopped."))
+}
+
 fn ensure_live_start_current(state: &LiveState, lease: u64) -> Result<(), ApiError> {
     if state.start_sequence.load(Ordering::SeqCst) == lease {
         Ok(())
@@ -2407,15 +2956,27 @@ async fn wait_for_session_created(socket: &mut RealtimeSocket) -> Result<(), Api
                 .next()
                 .await
                 .ok_or_else(|| network_error("Realtime captions closed before session.created."))?
-                .map_err(|error| network_error(&format!("Realtime captions failed before session.created: {error}")))?;
+                .map_err(|error| {
+                    network_error(&format!(
+                        "Realtime captions failed before session.created: {error}"
+                    ))
+                })?;
             match message {
                 Message::Ping(payload) => {
                     socket.send(Message::Pong(payload)).await.map_err(|error| {
-                        network_error(&format!("Realtime captions could not answer a ping: {error}"))
+                        network_error(&format!(
+                            "Realtime captions could not answer a ping: {error}"
+                        ))
                     })?;
                 }
-                Message::Text(text) => return validate_session_created_event(parse_realtime_event(&text)),
-                Message::Close(_) => return Err(network_error("Realtime captions closed before session.created.")),
+                Message::Text(text) => {
+                    return validate_session_created_event(parse_realtime_event(&text))
+                }
+                Message::Close(_) => {
+                    return Err(network_error(
+                        "Realtime captions closed before session.created.",
+                    ))
+                }
                 _ => {}
             }
         }
@@ -2454,12 +3015,18 @@ async fn wait_for_session_updated(
             let text = match message {
                 Message::Ping(payload) => {
                     socket.send(Message::Pong(payload)).await.map_err(|error| {
-                        network_error(&format!("Realtime captions could not answer a ping: {error}"))
+                        network_error(&format!(
+                            "Realtime captions could not answer a ping: {error}"
+                        ))
                     })?;
                     continue;
                 }
                 Message::Text(text) => text,
-                Message::Close(_) => return Err(network_error("Realtime captions closed before session.updated.")),
+                Message::Close(_) => {
+                    return Err(network_error(
+                        "Realtime captions closed before session.updated.",
+                    ))
+                }
                 _ => continue,
             };
             if validate_session_update_event(
@@ -2878,6 +3445,7 @@ mod tests {
             _start_id: first,
             cancelled: Arc::clone(&first_cancelled),
             task: first_task,
+            retry_translation: None,
         });
 
         let second = state.start_sequence.fetch_add(1, Ordering::SeqCst) + 1;
@@ -2900,6 +3468,7 @@ mod tests {
             _start_id: second,
             cancelled: Arc::clone(&second_cancelled),
             task: second_task,
+            retry_translation: None,
         });
         assert!(!second_cancelled.load(Ordering::Relaxed));
         abort_previous(&state).await;
@@ -3019,10 +3588,7 @@ mod tests {
     fn coordinated_mode_does_not_seal_a_fragment_during_transcription_stall() {
         let mut coordinator = CaptionCoordinator::new(LiveSyncMode::Coordinated);
         coordinator.on_source(timed("s1", "私", Some(0)), 1_000);
-        coordinator.on_translation(
-            timed("t1", "I seek a peaceful life.", Some(0)),
-            1_100,
-        );
+        coordinator.on_translation(timed("t1", "I seek a peaceful life.", Some(0)), 1_100);
 
         // An absence of source deltas is model-output latency, not proof of an
         // audio/sentence boundary. The completed target must remain queued.
@@ -3669,7 +4235,7 @@ mod tests {
             committed |= committer
                 .push(frame(vec![0; SEND_SAMPLES]))
                 .iter()
-                .any(|action| matches!(action, TranscriptionAudioAction::Commit));
+                .any(|action| matches!(action, TranscriptionAudioAction::Commit { .. }));
         }
         assert!(committed);
     }
@@ -3685,13 +4251,24 @@ mod tests {
         assert!(ids.insert("three"));
         assert!(!ids.insert("three"));
         assert!(ids.insert("four"));
-        assert_eq!(ids.order.iter().cloned().collect::<Vec<_>>(), ["two", "three", "four"]);
-        assert!(ids.insert("one"), "an evicted event can be accepted in a later epoch window");
+        assert_eq!(
+            ids.order.iter().cloned().collect::<Vec<_>>(),
+            ["two", "three", "four"]
+        );
+        assert!(
+            ids.insert("one"),
+            "an evicted event can be accepted in a later epoch window"
+        );
     }
 
     #[test]
     fn source_chooser_hides_tiny_untitled_and_non_content_windows() {
-        assert!(eligible_window(Some("Japanese livestream"), 1280.0, 720.0, 0));
+        assert!(eligible_window(
+            Some("Japanese livestream"),
+            1280.0,
+            720.0,
+            0
+        ));
         assert!(!eligible_window(Some(""), 1280.0, 720.0, 0));
         assert!(!eligible_window(Some("Menu"), 80.0, 40.0, 0));
         assert!(!eligible_window(Some("Overlay"), 1280.0, 720.0, 3));
@@ -3764,8 +4341,221 @@ mod tests {
             code: Some(code.into()),
             client_event_id: None,
         };
-        assert_eq!(classify_realtime_error(&error("invalid_api_key", "bad key")), RealtimeFaultClass::Terminal);
-        assert_eq!(classify_realtime_error(&error("service_unavailable", "temporary")), RealtimeFaultClass::Reconnectable);
-        assert_eq!(classify_realtime_error(&error("bad_audio", "one frame was unusable")), RealtimeFaultClass::Degraded);
+        assert_eq!(
+            classify_realtime_error(&error("invalid_api_key", "bad key")),
+            RealtimeFaultClass::Terminal
+        );
+        assert_eq!(
+            classify_realtime_error(&error("service_unavailable", "temporary")),
+            RealtimeFaultClass::Reconnectable
+        );
+        assert_eq!(
+            classify_realtime_error(&error("bad_audio", "one frame was unusable")),
+            RealtimeFaultClass::Degraded
+        );
+    }
+
+    fn luna_test_job(index: usize) -> LunaTranslationJob {
+        let source = format!("source {index}");
+        LunaTranslationJob {
+            generation: 7,
+            session_id: "session-7".into(),
+            source_language: "en".into(),
+            target_language: "ja".into(),
+            clause: FinalizedSourceClause {
+                source_item_id: format!("0:item-{index}"),
+                source_hash: source_hash(&source),
+                segment: SubtitleSegment {
+                    id: format!("live-original-{index}"),
+                    origin: SessionMode::Live,
+                    start_ms: index as u64 * 1_000,
+                    end_ms: index as u64 * 1_000 + 900,
+                    source_text: source,
+                    translation_text: None,
+                    ambiguity_note: None,
+                    speaker_id: Some("live-audio".into()),
+                    is_provisional: false,
+                    transcription_status: SegmentStatus::Complete,
+                    translation_status: SegmentStatus::Pending,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn luna_queue_and_retry_history_are_bounded() {
+        let (sender, _receiver) = mpsc::channel(MAX_LUNA_PENDING_CLAUSES);
+        for index in 0..MAX_LUNA_PENDING_CLAUSES {
+            sender.try_send(luna_test_job(index)).unwrap();
+        }
+        assert!(matches!(
+            sender.try_send(luna_test_job(99)),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+
+        let mut failed = HashMap::new();
+        let mut order = VecDeque::new();
+        for index in 0..(MAX_RETRYABLE_LUNA_CLAUSES + 10) {
+            remember_failed_luna_job(&mut failed, &mut order, luna_test_job(index));
+        }
+        assert_eq!(failed.len(), MAX_RETRYABLE_LUNA_CLAUSES);
+        assert_eq!(order.len(), MAX_RETRYABLE_LUNA_CLAUSES);
+        assert!(!failed.contains_key("live-original-0"));
+    }
+
+    #[test]
+    fn luna_results_require_generation_session_item_hash_and_segment_identity() {
+        let job = luna_test_job(1);
+        let mut pending = HashMap::new();
+        pending.insert(
+            job.clause.segment.id.clone(),
+            PendingLunaClause {
+                source_item_id: job.clause.source_item_id.clone(),
+                source_hash: job.clause.source_hash.clone(),
+                finalized_at_ms: 1_000,
+                fallback_shown: false,
+                job: job.clone(),
+            },
+        );
+        assert!(luna_job_matches(&pending, 7, &job));
+        assert!(!luna_job_matches(&pending, 8, &job));
+        let mut stale = job;
+        stale.clause.source_hash = source_hash("changed");
+        assert!(!luna_job_matches(&pending, 7, &stale));
+    }
+
+    #[test]
+    fn transcript_locked_routes_to_whisper_without_changing_original_only() {
+        assert_eq!(
+            realtime_processing_mode_for(
+                &CaptionProcessingMode::Translated,
+                &LiveTranslationEngine::TranscriptLocked,
+            ),
+            CaptionProcessingMode::OriginalOnly
+        );
+        assert_eq!(
+            realtime_processing_mode_for(
+                &CaptionProcessingMode::Translated,
+                &LiveTranslationEngine::Realtime,
+            ),
+            CaptionProcessingMode::Translated
+        );
+        assert_eq!(
+            realtime_processing_mode_for(
+                &CaptionProcessingMode::OriginalOnly,
+                &LiveTranslationEngine::TranscriptLocked,
+            ),
+            CaptionProcessingMode::OriginalOnly
+        );
+    }
+
+    #[test]
+    fn transcript_locked_source_clause_is_immutable_and_capture_timed() {
+        let mut coordinator = TranscriptionCoordinator::new(SegmentStatus::Pending, false);
+        coordinator.register_committed_span(24_000, 60_000);
+        assert_eq!(
+            coordinator
+                .on_delta(
+                    "item-1".into(),
+                    Some("delta-1".into()),
+                    "税金効果は".into(),
+                    9_000,
+                )
+                .len(),
+            1,
+            "Coordinated Accurate mode publishes the transcript but not a visible cue"
+        );
+        let (events, clause) = coordinator.on_done_with_clause(
+            "item-1".into(),
+            Some("done-1".into()),
+            "税金効果は12人".into(),
+            10_000,
+        );
+        let clause = clause.expect("a finalized source clause");
+        assert_eq!(clause.source_item_id, "0:item-1");
+        assert_eq!(clause.segment.start_ms, 1_000);
+        assert_eq!(clause.segment.end_ms, 2_500);
+        assert_eq!(clause.segment.source_text, "税金効果は12人");
+        assert_eq!(clause.segment.translation_status, SegmentStatus::Pending);
+        assert_eq!(clause.source_hash, source_hash("税金効果は12人"));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::TranscriptFinalized { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::LiveSyncChanged { .. })));
+    }
+
+    #[test]
+    fn reconnect_epoch_prevents_reused_whisper_item_ids_from_merging() {
+        let mut coordinator = TranscriptionCoordinator::new(SegmentStatus::Pending, false);
+        let (_, first) = coordinator.on_done_with_clause(
+            "item-1".into(),
+            Some("done-1".into()),
+            "first".into(),
+            1_000,
+        );
+        coordinator.finish(1_100);
+        let (_, second) = coordinator.on_done_with_clause(
+            "item-1".into(),
+            Some("done-2".into()),
+            "second".into(),
+            2_000,
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(first.source_item_id, "0:item-1");
+        assert_eq!(second.source_item_id, "1:item-1");
+        assert_ne!(first.segment.id, second.segment.id);
+        assert_ne!(first.source_hash, second.source_hash);
+    }
+
+    #[test]
+    fn luna_context_is_bounded_by_pair_count_and_characters() {
+        let mut context = (0..20)
+            .map(|index| LiveDialoguePair {
+                source: format!("source-{index}"),
+                translation: "x".repeat(700),
+            })
+            .collect::<VecDeque<_>>();
+        trim_luna_context(&mut context);
+        assert!(context.len() <= MAX_LUNA_CONTEXT_PAIRS);
+        assert!(
+            context
+                .iter()
+                .map(|pair| pair.source.chars().count() + pair.translation.chars().count())
+                .sum::<usize>()
+                <= MAX_LUNA_CONTEXT_CHARS
+        );
+        assert_eq!(MAX_LUNA_PENDING_CLAUSES, 8);
+    }
+
+    #[test]
+    fn luna_retry_policy_excludes_terminal_and_quota_failures() {
+        let error = |kind, message: &str, retryable| ApiError {
+            kind,
+            message: message.into(),
+            retryable,
+        };
+        assert!(should_retry_luna(&error(
+            ApiErrorKind::Network,
+            "temporary",
+            true
+        )));
+        assert!(!should_retry_luna(&error(
+            ApiErrorKind::Authentication,
+            "bad key",
+            false
+        )));
+        assert!(!should_retry_luna(&error(
+            ApiErrorKind::ModelUnavailable,
+            "missing",
+            false
+        )));
+        assert!(!should_retry_luna(&error(
+            ApiErrorKind::RateLimited,
+            "OpenAI rejected the request (insufficient_quota).",
+            true,
+        )));
     }
 }
