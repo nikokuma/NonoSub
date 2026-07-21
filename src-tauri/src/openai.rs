@@ -11,6 +11,8 @@ use crate::contracts::{
 pub const TRANSCRIPTION_MODEL: &str = "gpt-4o-transcribe-diarize";
 pub const LANGUAGE_MODEL: &str = "gpt-5.6-sol";
 pub const REALTIME_TRANSLATION_MODEL: &str = "gpt-realtime-translate";
+pub const REALTIME_TRANSCRIPTION_MODEL: &str = "gpt-realtime-whisper";
+pub const LIVE_TEXT_TRANSLATION_MODEL: &str = "gpt-5.6-luna";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const RESPONSES_TIMEOUT: Duration = Duration::from_secs(120);

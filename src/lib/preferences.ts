@@ -123,6 +123,9 @@ export function parsePreferences(serialized: string): Preferences | undefined {
       processingMode: parsed.processingMode === "original_only" ? "original_only" : "translated",
       sync: {
         liveMode: parsed.sync?.liveMode === "fast_source" ? "fast_source" : DEFAULT_SYNC.liveMode,
+        translationEngine: parsed.sync?.translationEngine === "transcript_locked"
+          ? "transcript_locked"
+          : DEFAULT_SYNC.translationEngine,
       },
       style: {
         ...DEFAULT_STYLE,
@@ -209,7 +212,16 @@ export function applyPreferenceAction(preferences: Preferences, action: string):
   if (action === "live_mode_coordinated" || action === "live_mode_fast_source") {
     return {
       ...preferences,
-      sync: { liveMode: action === "live_mode_fast_source" ? "fast_source" : "coordinated" },
+      sync: { ...preferences.sync, liveMode: action === "live_mode_fast_source" ? "fast_source" : "coordinated" },
+    };
+  }
+  if (action === "live_engine_realtime" || action === "live_engine_transcript_locked") {
+    return {
+      ...preferences,
+      sync: {
+        ...preferences.sync,
+        translationEngine: action === "live_engine_transcript_locked" ? "transcript_locked" : "realtime",
+      },
     };
   }
   if (action === "toggle_speaker_names") {

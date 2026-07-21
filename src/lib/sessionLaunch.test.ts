@@ -81,6 +81,7 @@ describe("session launcher", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("start_live_capture", {
       languages: preferences.languages,
       syncMode: preferences.sync.liveMode,
+      translationEngine: preferences.sync.translationEngine,
       processingMode: preferences.processingMode,
       source,
     });

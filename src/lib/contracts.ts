@@ -4,6 +4,7 @@ export type CaptionProcessingMode = "translated" | "original_only";
 export type SegmentStatus = "pending" | "complete" | "failed" | "skipped";
 export type SessionMode = "file" | "live";
 export type LiveSyncMode = "coordinated" | "fast_source";
+export type LiveTranslationEngine = "realtime" | "transcript_locked";
 export type LiveSyncStatus = "steady" | "catching_up" | "degraded";
 export type LiveCaptureLifecycle = "inactive" | "starting" | "active" | "reconnecting" | "stopping" | "failed";
 export type EndSessionReason = "user_stop" | "replacement" | "quit" | "fatal_error";
@@ -88,6 +89,7 @@ export interface LanguageSettings {
 
 export interface SyncSettings {
   liveMode: LiveSyncMode;
+  translationEngine: LiveTranslationEngine;
 }
 
 export interface LiveSyncState {
@@ -232,7 +234,7 @@ export interface RetranslatedSegment {
 }
 
 export type SessionEvent =
-  | { type: "session_reset"; mode: SessionMode; languages: LanguageSettings; processingMode: CaptionProcessingMode }
+  | { type: "session_reset"; mode: SessionMode; languages: LanguageSettings; processingMode: CaptionProcessingMode; liveTranslationEngine?: LiveTranslationEngine }
   | { type: "phase_changed"; phase: SessionPhase }
   | { type: "caption_upserted"; segment: SubtitleSegment }
   | { type: "transcript_finalized"; segment: SubtitleSegment }
@@ -263,6 +265,7 @@ export interface SessionState {
   sequence: number;
   mode?: SessionMode;
   processingMode: CaptionProcessingMode;
+  liveTranslationEngine?: LiveTranslationEngine;
   languages: LanguageSettings;
   phase: SessionPhase;
   segments: SubtitleSegment[];
@@ -285,6 +288,7 @@ export interface ApiConfigurationStatus {
   fileTranscription: CapabilityAvailability;
   realtimeTranslation: CapabilityAvailability;
   realtimeOriginalOnly: CapabilityAvailability;
+  liveTextTranslation: CapabilityAvailability;
 }
 
 /** @deprecated Use ApiConfigurationStatus. */
@@ -301,6 +305,7 @@ export const DEFAULT_LANGUAGES: LanguageSettings = {
 
 export const DEFAULT_SYNC: SyncSettings = {
   liveMode: "coordinated",
+  translationEngine: "realtime",
 };
 
 export const DEFAULT_LIVE_SYNC: LiveSyncState = {

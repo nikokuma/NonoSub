@@ -29,6 +29,7 @@ export function reduceSession(state: SessionState, event: SessionEvent): Session
         ...state,
         mode: event.mode,
         processingMode: event.processingMode,
+        liveTranslationEngine: event.liveTranslationEngine,
         languages: event.languages,
         phase: "preparing",
         segments: [],

@@ -1,7 +1,8 @@
 use crate::{
     contracts::{
         CaptionProcessingMode, LanguageSettings, LiveSyncMode, LiveSyncState, LiveSyncStatus,
-        RecoverableError, SegmentStatus, SessionEvent, SessionMode, SubtitleSegment,
+        LiveTranslationEngine, RecoverableError, SegmentStatus, SessionEvent, SessionMode,
+        SubtitleSegment,
     },
     openai::{ApiError, ApiErrorKind},
     record_event_for_generation,
@@ -101,6 +102,7 @@ pub struct LiveStartOptions {
     pub api_key: String,
     pub languages: LanguageSettings,
     pub sync_mode: LiveSyncMode,
+    pub translation_engine: LiveTranslationEngine,
     pub processing_mode: CaptionProcessingMode,
     pub source: LiveCaptureSourceSelection,
 }
@@ -1792,9 +1794,14 @@ pub async fn start(
         api_key,
         languages,
         sync_mode,
+        translation_engine,
         processing_mode,
         source,
     } = options;
+    // Phase-one routing deliberately preserves the proven realtime transport for both choices.
+    // The value is nevertheless captured in canonical state so a running session cannot change
+    // when preferences are edited.
+    let _selected_translation_engine = translation_engine;
     let start_lease = state.start_sequence.fetch_add(1, Ordering::SeqCst) + 1;
     let _start_guard = state.start_lock.lock().await;
     abort_previous(state).await;

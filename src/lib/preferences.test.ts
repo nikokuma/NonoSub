@@ -13,6 +13,7 @@ describe("local preferences and tutor context", () => {
   it("migrates older preferences to coordinated live timing", () => {
     const parsed = parsePreferences(JSON.stringify({ level: "beginner", style: DEFAULT_STYLE, languages: DEFAULT_LANGUAGES }));
     expect(parsed?.sync.liveMode).toBe("coordinated");
+    expect(parsed?.sync.translationEngine).toBe("realtime");
     expect(parsed?.processingMode).toBe("translated");
   });
 
@@ -123,6 +124,7 @@ describe("local preferences and tutor context", () => {
     expect(updated?.style.displayMode).toBe("source");
     expect(base.style.displayMode).toBe("both");
     expect(applyPreferenceAction(base, "live_mode_fast_source")?.sync.liveMode).toBe("fast_source");
+    expect(applyPreferenceAction(base, "live_engine_transcript_locked")?.sync.translationEngine).toBe("transcript_locked");
     expect(base.experimentalExternalPause).toBe(false);
     expect(applyPreferenceAction(base, "external_pause_on")?.experimentalExternalPause).toBe(true);
   });

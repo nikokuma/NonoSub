@@ -41,6 +41,14 @@ pub enum LiveSyncMode {
     FastSource,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveTranslationEngine {
+    #[default]
+    Realtime,
+    TranscriptLocked,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LiveSyncStatus {
@@ -138,6 +146,7 @@ pub enum SessionEvent {
         mode: SessionMode,
         languages: LanguageSettings,
         processing_mode: CaptionProcessingMode,
+        live_translation_engine: Option<LiveTranslationEngine>,
     },
     PhaseChanged {
         phase: String,
@@ -204,6 +213,7 @@ pub struct SessionSnapshot {
     pub sequence: u64,
     pub mode: Option<SessionMode>,
     pub processing_mode: CaptionProcessingMode,
+    pub live_translation_engine: Option<LiveTranslationEngine>,
     pub languages: LanguageSettings,
     pub phase: String,
     pub segments: Vec<SubtitleSegment>,
@@ -223,6 +233,7 @@ impl Default for SessionSnapshot {
             sequence: 0,
             mode: None,
             processing_mode: CaptionProcessingMode::Translated,
+            live_translation_engine: None,
             languages: LanguageSettings::default(),
             phase: "idle".into(),
             segments: Vec::new(),

@@ -11,8 +11,9 @@ mod pipeline;
 
 use contracts::{
     CaptionProcessingMode, LanguageSettings, LearnerLevel, LessonCard, LiveSyncMode, LiveSyncState,
-    PreparedMediaInfo, RecoverableError, RetranslatedSegment, SegmentStatus, SequencedSessionEvent,
-    SessionEvent, SessionMode, SessionSnapshot, SpeakerProfile, SubtitleSegment, TutorMessage,
+    LiveTranslationEngine, PreparedMediaInfo, RecoverableError, RetranslatedSegment, SegmentStatus,
+    SequencedSessionEvent, SessionEvent, SessionMode, SessionSnapshot, SpeakerProfile,
+    SubtitleSegment, TutorMessage,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -33,7 +34,7 @@ use tauri::{
 const KEYRING_SERVICE: &str = "com.nono.nonosub";
 const KEYRING_ACCOUNT: &str = "openai-api-key";
 const API_KEY_MARKER: &str = "api-key-configured";
-const API_VALIDATION_SCHEMA: u32 = 1;
+const API_VALIDATION_SCHEMA: u32 = 2;
 const MAX_RECOVERABLE_ERRORS: usize = 50;
 const MAX_LESSON_CACHE_ENTRIES: usize = 128;
 const MAX_LESSON_REQUEST_THREAD_MESSAGES: usize = 12;
@@ -393,6 +394,7 @@ struct ApiConfigurationStatus {
     file_transcription: CapabilityAvailability,
     realtime_translation: CapabilityAvailability,
     realtime_original_only: CapabilityAvailability,
+    live_text_translation: CapabilityAvailability,
 }
 
 impl Default for ApiConfigurationStatus {
@@ -405,6 +407,7 @@ impl Default for ApiConfigurationStatus {
             file_transcription: CapabilityAvailability::Unknown,
             realtime_translation: CapabilityAvailability::Unknown,
             realtime_original_only: CapabilityAvailability::Unknown,
+            live_text_translation: CapabilityAvailability::Unknown,
         }
     }
 }
@@ -624,6 +627,7 @@ async fn ensure_file_api_capability(
             file_transcription: CapabilityAvailability::Available,
             realtime_translation: status.realtime_translation,
             realtime_original_only: status.realtime_original_only,
+            live_text_translation: status.live_text_translation,
             ..ApiConfigurationStatus::default()
         };
         write_api_key_marker(app, &next).map_err(|message| service_error(&message))?;
@@ -635,26 +639,58 @@ async fn ensure_live_api_capability(
     app: &tauri::AppHandle,
     api_key: &str,
     processing_mode: &CaptionProcessingMode,
+    translation_engine: &LiveTranslationEngine,
 ) -> Result<(), openai::ApiError> {
     let status = api_configuration_status(app);
     let recorded = if processing_mode == &CaptionProcessingMode::OriginalOnly {
         status.realtime_original_only
+    } else if translation_engine == &LiveTranslationEngine::TranscriptLocked {
+        status.live_text_translation
     } else {
         status.realtime_translation
     };
-    if recorded == CapabilityAvailability::Available && !api_validation_is_stale(&status) {
+    let transcription_recorded = status.realtime_original_only;
+    let requires_transcription = processing_mode == &CaptionProcessingMode::OriginalOnly
+        || translation_engine == &LiveTranslationEngine::TranscriptLocked;
+    if recorded == CapabilityAvailability::Available
+        && (!requires_transcription || transcription_recorded == CapabilityAvailability::Available)
+        && !api_validation_is_stale(&status)
+    {
         return Ok(());
     }
     let client = openai::OpenAiClient::new(api_key.to_owned())?;
-    if !client
-        .model_accessible(openai::REALTIME_TRANSLATION_MODEL)
-        .await
+    if requires_transcription
+        && !client
+            .model_accessible(openai::REALTIME_TRANSCRIPTION_MODEL)
+            .await
     {
         return Err(openai::ApiError {
             kind: openai::ApiErrorKind::ModelUnavailable,
-            message: "This API project cannot access the realtime caption model.".into(),
+            message: "This API project cannot access realtime transcription.".into(),
             retryable: false,
         });
+    }
+    let requested_model = if translation_engine == &LiveTranslationEngine::TranscriptLocked
+        && processing_mode == &CaptionProcessingMode::Translated
+    {
+        Some(openai::LIVE_TEXT_TRANSLATION_MODEL)
+    } else if processing_mode == &CaptionProcessingMode::Translated {
+        Some(openai::REALTIME_TRANSLATION_MODEL)
+    } else {
+        None
+    };
+    if let Some(model) = requested_model {
+        if !client.model_accessible(model).await {
+            return Err(openai::ApiError {
+                kind: openai::ApiErrorKind::ModelUnavailable,
+                message: if model == openai::LIVE_TEXT_TRANSLATION_MODEL {
+                    "Transcript-Locked translation needs access to gpt-5.6-luna.".into()
+                } else {
+                    "This API project cannot access the realtime translation model.".into()
+                },
+                retryable: false,
+            });
+        }
     }
     let mut next = status;
     next.configured = true;
@@ -663,9 +699,14 @@ async fn ensure_live_api_capability(
         .duration_since(SystemTime::UNIX_EPOCH)
         .ok()
         .map(|duration| duration.as_secs());
-    if processing_mode == &CaptionProcessingMode::OriginalOnly {
+    if requires_transcription {
         next.realtime_original_only = CapabilityAvailability::Available;
-    } else {
+    }
+    if processing_mode == &CaptionProcessingMode::Translated
+        && translation_engine == &LiveTranslationEngine::TranscriptLocked
+    {
+        next.live_text_translation = CapabilityAvailability::Available;
+    } else if processing_mode == &CaptionProcessingMode::Translated {
         next.realtime_translation = CapabilityAvailability::Available;
     }
     write_api_key_marker(app, &next).map_err(|message| service_error(&message))
@@ -713,6 +754,7 @@ async fn save_api_key(
         } else {
             CapabilityAvailability::Unavailable
         },
+        live_text_translation: CapabilityAvailability::Unknown,
     };
     keyring_entry()
         .map_err(|message| service_error(&message))?
@@ -747,6 +789,7 @@ async fn validate_model_access(
         file_transcription: CapabilityAvailability::Available,
         realtime_translation: if live { CapabilityAvailability::Available } else { CapabilityAvailability::Unavailable },
         realtime_original_only: if live { CapabilityAvailability::Available } else { CapabilityAvailability::Unavailable },
+        live_text_translation: CapabilityAvailability::Unknown,
     };
     write_api_key_marker(&app, &status).map_err(|message| service_error(&message))?;
     Ok(status)
@@ -933,6 +976,12 @@ fn validate_preferences(preferences: &serde_json::Value) -> Result<(), String> {
                 .pointer("/sync/liveMode")
                 .and_then(serde_json::Value::as_str),
             Some("coordinated" | "fast_source")
+        )
+        || !matches!(
+            preferences
+                .pointer("/sync/translationEngine")
+                .and_then(serde_json::Value::as_str),
+            Some("realtime" | "transcript_locked")
         )
     {
         return Err("General preferences are invalid.".into());
@@ -1358,6 +1407,7 @@ async fn start_analysis(
         SessionMode::File,
         languages.clone(),
         processing_mode.clone(),
+        None,
     )?;
     let client = openai::OpenAiClient::new(api_key(&app)?)?;
     ensure_file_api_capability(&app, &client).await?;
@@ -2507,6 +2557,7 @@ async fn start_live_capture(
     state: State<'_, AppState>,
     languages: LanguageSettings,
     sync_mode: LiveSyncMode,
+    translation_engine: LiveTranslationEngine,
     processing_mode: CaptionProcessingMode,
     source: live::LiveCaptureSourceSelection,
 ) -> Result<(), openai::ApiError> {
@@ -2519,6 +2570,7 @@ async fn start_live_capture(
         SessionMode::Live,
         languages.clone(),
         processing_mode.clone(),
+        Some(translation_engine.clone()),
     )?;
     let session_id = current_session_id(state.inner());
     let source_label = Some(match source.kind {
@@ -2551,7 +2603,14 @@ async fn start_live_capture(
             return Err(error);
         }
     };
-    if let Err(error) = ensure_live_api_capability(&app, &key, &processing_mode).await {
+    if let Err(error) = ensure_live_api_capability(
+        &app,
+        &key,
+        &processing_mode,
+        &translation_engine,
+    )
+    .await
+    {
         let _ = set_live_capture_status(
             &app,
             LiveCaptureStatus {
@@ -2570,6 +2629,7 @@ async fn start_live_capture(
             api_key: key,
             languages,
             sync_mode,
+            translation_engine,
             processing_mode,
             source,
         },
@@ -2644,6 +2704,7 @@ fn live_start_error_code(error: &openai::ApiError) -> &'static str {
 async fn start_live_capture(
     _languages: LanguageSettings,
     _sync_mode: LiveSyncMode,
+    _translation_engine: LiveTranslationEngine,
     _processing_mode: CaptionProcessingMode,
     _source: serde_json::Value,
 ) -> Result<(), openai::ApiError> {
@@ -2687,6 +2748,7 @@ fn begin_session_for_generation(
     mode: SessionMode,
     languages: LanguageSettings,
     processing_mode: CaptionProcessingMode,
+    live_translation_engine: Option<LiveTranslationEngine>,
 ) -> Result<(), openai::ApiError> {
     let state = app.state::<AppState>();
     let _dispatch = state
@@ -2697,6 +2759,7 @@ fn begin_session_for_generation(
         mode: mode.clone(),
         languages: languages.clone(),
         processing_mode: processing_mode.clone(),
+        live_translation_engine,
     };
     let active = state
         .runs
@@ -2885,9 +2948,11 @@ fn apply_event(snapshot: &mut SessionSnapshot, event: &SessionEvent) {
             mode,
             languages,
             processing_mode,
+            live_translation_engine,
         } => {
             snapshot.mode = Some(mode.clone());
             snapshot.processing_mode = processing_mode.clone();
+            snapshot.live_translation_engine = live_translation_engine.clone();
             snapshot.languages = languages.clone();
             snapshot.phase = "preparing".into();
             snapshot.live_sync = (mode == &SessionMode::Live).then(LiveSyncState::default);
@@ -3303,6 +3368,18 @@ fn live_timing_menu<R: tauri::Runtime>(
         .build()
 }
 
+fn live_translation_engine_menu<R: tauri::Runtime>(
+    app: &impl Manager<R>,
+) -> tauri::Result<tauri::menu::Submenu<R>> {
+    SubmenuBuilder::new(app, "Live translation engine")
+        .text("live_engine_realtime", "Realtime — Fast")
+        .text(
+            "live_engine_transcript_locked",
+            "Transcript-Locked — Accurate (Experimental)",
+        )
+        .build()
+}
+
 fn build_tray_menu<R: tauri::Runtime>(
     app: &impl Manager<R>,
     status: &LiveCaptureStatus,
@@ -3316,6 +3393,7 @@ fn build_tray_menu<R: tauri::Runtime>(
     let timing = subtitle_timing_menu(app)?;
     let display = subtitle_display_menu(app)?;
     let live_timing = live_timing_menu(app)?;
+    let live_engine = live_translation_engine_menu(app)?;
     let experimental = SubmenuBuilder::new(app, "Experimental")
         .text("external_pause_on", "External Media Pause: On")
         .text("external_pause_off", "External Media Pause: Off")
@@ -3358,6 +3436,7 @@ fn build_tray_menu<R: tauri::Runtime>(
     builder
         .item(&display)
         .item(&live_timing)
+        .item(&live_engine)
         .item(&experimental)
         .item(&presets)
         .item(&levels)
@@ -3544,6 +3623,8 @@ fn dispatch_action(app: &tauri::AppHandle, id: &str) {
         | "display_both"
         | "live_mode_coordinated"
         | "live_mode_fast_source"
+        | "live_engine_realtime"
+        | "live_engine_transcript_locked"
         | "external_pause_on"
         | "external_pause_off" => {
             let _ = app.emit("tray-action", id);
@@ -3689,7 +3770,7 @@ mod tests {
                 "arcadeColors": { "text": "#f0a14a", "panel": "#0b0d08" }
             },
             "languages": { "source": "auto", "target": "en", "explanation": "en" },
-            "sync": { "liveMode": "coordinated" },
+            "sync": { "liveMode": "coordinated", "translationEngine": "realtime" },
             "processingMode": "translated",
             "onboardingComplete": true,
             "lessonPlacements": {},
