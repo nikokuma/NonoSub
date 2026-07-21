@@ -29,7 +29,7 @@ Keep every live subtitle preset compact and readable even if a realtime provider
 
 ## Acceptance
 
-- Clean, Classic Outline, Yellow Drop, Fallout, Momento, and Wired remain fully contained at normal and minimum overlay widths.
+- Clean, Classic Outline, Yellow Drop, Arcade, Momento, and Wired remain fully contained at normal and minimum overlay widths.
 - Pathological source and translation strings cannot grow the overlay beyond 240 logical points.
 - Growing text shows its newest readable tail without layout flashing.
 - Source-only and translation-only modes use the available height without clipping.

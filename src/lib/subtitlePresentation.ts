@@ -111,7 +111,7 @@ function liveRowBudget(
   const cjkCount = graphemes.filter((grapheme) => /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(grapheme)).length;
   const averageGlyphWidth = graphemes.length > 0 && cjkCount / graphemes.length >= 0.2 ? 0.96 : 0.58;
   const cardWidth = Math.min(900, Math.max(280, viewportWidth * 0.92));
-  // Fallout has the widest horizontal frame. Using its inset keeps the text
+  // Arcade has the widest horizontal frame. Using its inset keeps the text
   // budget safe for every preset without measuring on each realtime fragment.
   const usableWidth = Math.max(180, cardWidth - Math.max(64, fontSizePx * 5));
   const glyphWidth = Math.max(6, fontSizePx * rowScale * averageGlyphWidth);

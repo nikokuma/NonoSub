@@ -857,7 +857,7 @@ fn validate_preferences(preferences: &serde_json::Value) -> Result<(), String> {
     let allowed_style = [
         "preset", "position", "overlayPosition", "overlayWidth", "fontFamily", "fontSize",
         "backgroundOpacity", "effect", "displayMode", "showSpeakerNames", "wiredColors",
-        "falloutColors",
+        "arcadeColors",
     ];
     if style.keys().any(|key| !allowed_style.contains(&key.as_str())) {
         return Err("Subtitle settings contain an unknown field.".into());
@@ -870,7 +870,7 @@ fn validate_preferences(preferences: &serde_json::Value) -> Result<(), String> {
     }
     if !matches!(
         style.get("preset").and_then(serde_json::Value::as_str),
-        Some("clean" | "classic-outline" | "yellow-drop" | "fallout" | "momento" | "wired")
+        Some("clean" | "classic-outline" | "yellow-drop" | "arcade" | "momento" | "wired")
     ) || !matches!(
         style.get("displayMode").and_then(serde_json::Value::as_str),
         Some("source" | "translation" | "both")
@@ -906,7 +906,7 @@ fn validate_preferences(preferences: &serde_json::Value) -> Result<(), String> {
                 "fallbackAccent",
             ][..],
         ),
-        ("falloutColors", &["text", "panel"][..]),
+        ("arcadeColors", &["text", "panel"][..]),
     ] {
         let palette = style
             .get(palette_key)
@@ -3268,7 +3268,7 @@ fn subtitle_preset_menu<R: tauri::Runtime>(
         .text("preset_clean", "Clean")
         .text("preset_classic-outline", "Classic Outline")
         .text("preset_yellow-drop", "Yellow Drop")
-        .text("preset_fallout", "Fallout")
+        .text("preset_arcade", "Arcade")
         .text("preset_momento", "Momento")
         .text("preset_wired", "Wired")
         .build()
@@ -3686,7 +3686,7 @@ mod tests {
                     "panel": "#05081c", "wash": "#0b2944", "sourceText": "#c9e6fa",
                     "translationText": "#ffffff", "metadata": "#5fa8dc", "fallbackAccent": "#4ac8ff"
                 },
-                "falloutColors": { "text": "#f0a14a", "panel": "#0b0d08" }
+                "arcadeColors": { "text": "#f0a14a", "panel": "#0b0d08" }
             },
             "languages": { "source": "auto", "target": "en", "explanation": "en" },
             "sync": { "liveMode": "coordinated" },
@@ -4090,7 +4090,7 @@ mod tests {
         apply_preference_patch(
             &mut state,
             5,
-            serde_json::json!({ "style": { "preset": "fallout" } }),
+            serde_json::json!({ "style": { "preset": "arcade" } }),
         )
         .unwrap();
         let last = apply_preference_patch(

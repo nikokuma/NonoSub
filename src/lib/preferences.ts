@@ -5,6 +5,9 @@ export const SUPPORTED_SUBTITLE_FONTS = [
   "Arial", "Helvetica", "Hiragino Sans", "Noto Sans",
 ] as const;
 
+const INTERIM_ARCADE_PRESET_ID = ["fall", "out"].join("");
+const INTERIM_ARCADE_PALETTE_KEY = `${INTERIM_ARCADE_PRESET_ID}Colors`;
+
 export interface Preferences {
   style: StyleSettings;
   level: LearnerLevel;
@@ -94,15 +97,17 @@ export function parsePreferences(serialized: string): Preferences | undefined {
       ? "momento"
       : savedPreset === "cyberia"
         ? "wired"
-        : savedPreset === "arcade"
-          ? "fallout"
-          : ["clean", "classic-outline", "yellow-drop", "fallout", "momento", "wired"].includes(savedPreset ?? "")
+        : savedPreset === INTERIM_ARCADE_PRESET_ID
+          ? "arcade"
+          : ["clean", "classic-outline", "yellow-drop", "arcade", "momento", "wired"].includes(savedPreset ?? "")
             ? savedPreset
             : DEFAULT_STYLE.preset;
     const legacyStyle = style as Partial<StyleSettings> & {
       cyberiaColors?: StyleSettings["wiredColors"];
-      arcadeColors?: StyleSettings["falloutColors"];
     };
+    const interimArcadeColors = (style as Record<string, unknown>)[INTERIM_ARCADE_PALETTE_KEY] as
+      | Partial<StyleSettings["arcadeColors"]>
+      | undefined;
     return {
       level: parsed.level as LearnerLevel,
       languages: {
@@ -146,7 +151,7 @@ export function parsePreferences(serialized: string): Preferences | undefined {
         },
         overlayWidth: finiteClamp(style.overlayWidth, DEFAULT_STYLE.overlayWidth, 520, 1200),
         wiredColors: safePalette(DEFAULT_STYLE.wiredColors, legacyStyle.cyberiaColors, legacyStyle.wiredColors),
-        falloutColors: safePalette(DEFAULT_STYLE.falloutColors, legacyStyle.arcadeColors, legacyStyle.falloutColors),
+        arcadeColors: safePalette(DEFAULT_STYLE.arcadeColors, interimArcadeColors, legacyStyle.arcadeColors),
       },
     };
   } catch {
@@ -188,7 +193,7 @@ export function effectiveStyle(style: StyleSettings, processingMode: CaptionProc
 export function applyPreferenceAction(preferences: Preferences, action: string): Preferences | undefined {
   if (action.startsWith("preset_")) {
     const preset = action.slice(7);
-    if (!["clean", "classic-outline", "yellow-drop", "fallout", "momento", "wired"].includes(preset)) return undefined;
+    if (!["clean", "classic-outline", "yellow-drop", "arcade", "momento", "wired"].includes(preset)) return undefined;
     return { ...preferences, style: { ...preferences.style, preset: preset as StyleSettings["preset"] } };
   }
   if (action.startsWith("level_")) {

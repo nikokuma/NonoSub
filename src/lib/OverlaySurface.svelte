@@ -82,7 +82,7 @@
   });
 
   function parseFixturePreset(value: string | null): SubtitlePreset | undefined {
-    return value && ["clean", "classic-outline", "yellow-drop", "fallout", "momento", "wired"].includes(value)
+    return value && ["clean", "classic-outline", "yellow-drop", "arcade", "momento", "wired"].includes(value)
       ? value as SubtitlePreset
       : undefined;
   }

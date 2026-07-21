@@ -21,7 +21,7 @@
   const visibility = $derived(subtitleRowVisibility(segment, style.displayMode));
   const showSource = $derived(visibility.showSource);
   const showTranslation = $derived(visibility.showTranslation);
-  const panel = $derived(colorWithOpacity(style.falloutColors.panel, style.backgroundOpacity));
+  const panel = $derived(colorWithOpacity(style.arcadeColors.panel, style.backgroundOpacity));
 </script>
 
 <div
@@ -29,7 +29,7 @@
   class:provisional={segment.isProvisional}
   class:degraded
   class:live={Boolean(liveLabel)}
-  style={`--arcade-text:${style.falloutColors.text};--arcade-panel:${panel}`}
+  style={`--arcade-text:${style.arcadeColors.text};--arcade-panel:${panel}`}
   aria-label={segment.isProvisional ? "Caption in progress" : "Right-click this caption to ask Nono"}
 >
   <span class="dialogue-strip">

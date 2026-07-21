@@ -151,7 +151,7 @@ For the current single-identity live pipeline, overlap is evaluated for readable
 
 ### Visual safety
 
-Test Clean, Classic Outline, Yellow Drop, Fallout, Momento, and Wired at minimum/default/maximum font size over light, dark, and busy footage.
+Test Clean, Classic Outline, Yellow Drop, Arcade, Momento, and Wired at minimum/default/maximum font size over light, dark, and busy footage.
 
 - No flash, warp, or whole-card reflow on each incoming delta.
 - Source and translation remain inside their style geometry.

@@ -71,7 +71,7 @@
     <CyberiaSubtitleCard segment={renderedSegment} {speaker} {style} liveLabel={delayLabel} degraded={sync?.status === "degraded"} />
   {:else if style.preset === "classic-outline" || style.preset === "yellow-drop"}
     <BroadcastSubtitleCard segment={renderedSegment} {speaker} {style} variant={style.preset} liveLabel={delayLabel} degraded={sync?.status === "degraded"} />
-  {:else if style.preset === "fallout"}
+  {:else if style.preset === "arcade"}
     <ArcadeSubtitleCard segment={renderedSegment} {speaker} {style} liveLabel={delayLabel} degraded={sync?.status === "degraded"} />
   {:else}
     <button

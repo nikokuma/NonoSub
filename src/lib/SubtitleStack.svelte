@@ -54,7 +54,7 @@
       <CyberiaSubtitleCard {segment} {speaker} {style} />
     {:else if style.preset === "classic-outline" || style.preset === "yellow-drop"}
       <BroadcastSubtitleCard {segment} {speaker} {style} variant={style.preset} />
-    {:else if style.preset === "fallout"}
+    {:else if style.preset === "arcade"}
       <ArcadeSubtitleCard {segment} {speaker} {style} />
     {:else}
       <button

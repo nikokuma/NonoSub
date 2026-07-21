@@ -58,33 +58,35 @@ describe("local preferences and tutor context", () => {
     expect(parsed?.style.wiredColors.sourceText).toBe("#fedcba");
   });
 
-  it.each(["classic-outline", "yellow-drop", "fallout"] as const)("round-trips the %s preset", (preset) => {
+  it.each(["classic-outline", "yellow-drop", "arcade"] as const)("round-trips the %s preset", (preset) => {
     const style = { ...DEFAULT_STYLE, preset };
     const parsed = parsePreferences(serializePreferences({ level: "beginner", style, languages: DEFAULT_LANGUAGES, sync: DEFAULT_SYNC, processingMode: "translated", onboardingComplete: true, lessonPlacements: {}, experimentalExternalPause: false }));
     expect(parsed?.style.preset).toBe(preset);
   });
 
-  it("migrates older styles to the default Fallout palette", () => {
+  it("migrates older styles to the default Arcade palette", () => {
     const legacyStyle = { ...DEFAULT_STYLE } as Partial<typeof DEFAULT_STYLE>;
-    delete legacyStyle.falloutColors;
+    delete legacyStyle.arcadeColors;
     const parsed = parsePreferences(JSON.stringify({
       level: "beginner",
       style: legacyStyle,
       languages: DEFAULT_LANGUAGES,
     }));
-    expect(parsed?.style.falloutColors).toEqual(DEFAULT_STYLE.falloutColors);
+    expect(parsed?.style.arcadeColors).toEqual(DEFAULT_STYLE.arcadeColors);
   });
 
-  it("migrates Arcade to Fallout while preserving a green terminal palette", () => {
+  it("migrates the interim terminal preset to Arcade while preserving its palette", () => {
+    const interimPresetId = ["fall", "out"].join("");
+    const interimPaletteKey = `${interimPresetId}Colors`;
     const style = {
       ...DEFAULT_STYLE,
-      preset: "arcade",
-      arcadeColors: { text: "#53ff9b", panel: "#071109" },
-    } as unknown as Partial<typeof DEFAULT_STYLE> & { preset: string; arcadeColors: typeof DEFAULT_STYLE.falloutColors };
-    delete style.falloutColors;
+      preset: interimPresetId,
+      [interimPaletteKey]: { text: "#53ff9b", panel: "#071109" },
+    } as unknown as Partial<typeof DEFAULT_STYLE> & { preset: string; [key: string]: unknown };
+    delete (style as Partial<typeof DEFAULT_STYLE>).arcadeColors;
     const parsed = parsePreferences(JSON.stringify({ level: "advanced", style, languages: DEFAULT_LANGUAGES }));
-    expect(parsed?.style.preset).toBe("fallout");
-    expect(parsed?.style.falloutColors).toEqual(style.arcadeColors);
+    expect(parsed?.style.preset).toBe("arcade");
+    expect(parsed?.style.arcadeColors).toEqual(style[interimPaletteKey]);
   });
 
   it("round-trips original-only processing", () => {

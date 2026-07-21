@@ -17,7 +17,7 @@
     ["fr", "French"], ["de", "German"], ["ko", "Korean"], ["zh", "Chinese"],
     ["pt", "Portuguese"], ["it", "Italian"], ["ru", "Russian"],
   ] as const;
-  const PRESETS: SubtitlePreset[] = ["clean", "classic-outline", "yellow-drop", "fallout", "momento", "wired"];
+  const PRESETS: SubtitlePreset[] = ["clean", "classic-outline", "yellow-drop", "arcade", "momento", "wired"];
 
   let session = $state<SessionState>(initialSession());
   let preferences = $state(loadPreferences());
@@ -65,7 +65,7 @@
     void Promise.all([
       document.fonts.load('400 24px "DotGothic16"', "行きたくないわけじゃないんですけど、今日はちょっと予定があって難しいかもしれません。"),
       document.fonts.load('700 18px "JetBrains Mono"', "It’s not that I don’t want to go, but I already have plans today."),
-      document.fonts.load('400 18px "Share Tech Mono"', "FALLOUT SUBTITLE PREVIEW"),
+      document.fonts.load('400 18px "Share Tech Mono"', "ARCADE SUBTITLE PREVIEW"),
     ]);
     const cleanup: Array<() => void> = [];
     cleanup.push(maintainSubscription(
@@ -215,7 +215,7 @@
   }
 
   function presetLabel(preset: SubtitlePreset) {
-    return ({ clean: "Clean", "classic-outline": "Classic Outline", "yellow-drop": "Yellow Drop", fallout: "Fallout", momento: "Momento", wired: "Wired" })[preset];
+    return ({ clean: "Clean", "classic-outline": "Classic Outline", "yellow-drop": "Yellow Drop", arcade: "Arcade", momento: "Momento", wired: "Wired" })[preset];
   }
 
 </script>
@@ -269,11 +269,11 @@
             <label>Metadata <input type="color" bind:value={preferences.style.wiredColors.metadata} onchange={() => void persist({ style: { wiredColors: { metadata: preferences.style.wiredColors.metadata } } })} /></label>
             <label>Fallback speaker <input type="color" bind:value={preferences.style.wiredColors.fallbackAccent} onchange={() => void persist({ style: { wiredColors: { fallbackAccent: preferences.style.wiredColors.fallbackAccent } } })} /></label>
           </div>
-        {:else if preferences.style.preset === "fallout"}
-          <div class="cyberia-colors arcade-colors" aria-label="Fallout colors">
-            <span>FALLOUT COLORS</span>
-            <label>Terminal text <input type="color" bind:value={preferences.style.falloutColors.text} onchange={() => void persist({ style: { falloutColors: { text: preferences.style.falloutColors.text } } })} /></label>
-            <label>Dialogue strip <input type="color" bind:value={preferences.style.falloutColors.panel} onchange={() => void persist({ style: { falloutColors: { panel: preferences.style.falloutColors.panel } } })} /></label>
+        {:else if preferences.style.preset === "arcade"}
+          <div class="cyberia-colors arcade-colors" aria-label="Arcade colors">
+            <span>ARCADE COLORS</span>
+            <label>Terminal text <input type="color" bind:value={preferences.style.arcadeColors.text} onchange={() => void persist({ style: { arcadeColors: { text: preferences.style.arcadeColors.text } } })} /></label>
+            <label>Dialogue strip <input type="color" bind:value={preferences.style.arcadeColors.panel} onchange={() => void persist({ style: { arcadeColors: { panel: preferences.style.arcadeColors.panel } } })} /></label>
           </div>
         {/if}
       </section>

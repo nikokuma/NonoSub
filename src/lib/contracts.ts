@@ -22,7 +22,7 @@ export type SubtitlePreset =
   | "clean"
   | "classic-outline"
   | "yellow-drop"
-  | "fallout"
+  | "arcade"
   | "momento"
   | "wired";
 export type AppSurface = "workbench" | "viewer" | "overlay" | "lesson" | "launcher";
@@ -139,7 +139,7 @@ export interface WiredColors {
   fallbackAccent: string;
 }
 
-export interface FalloutColors {
+export interface ArcadeColors {
   text: string;
   panel: string;
 }
@@ -156,7 +156,7 @@ export interface StyleSettings {
   displayMode: SubtitleDisplayMode;
   showSpeakerNames: boolean;
   wiredColors: WiredColors;
-  falloutColors: FalloutColors;
+  arcadeColors: ArcadeColors;
 }
 
 export interface BoardSection {
@@ -328,7 +328,7 @@ export const DEFAULT_STYLE: StyleSettings = {
     metadata: "#5fa8dc",
     fallbackAccent: "#4ac8ff",
   },
-  falloutColors: {
+  arcadeColors: {
     text: "#f0a14a",
     panel: "#0b0d08",
   },
