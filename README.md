@@ -166,38 +166,35 @@ Before replacing Nono's GLB, run the dedicated asset gate:
 pnpm audit:nono-rig
 ```
 
-It requires one canonical skin, normalized four-influence weights, skinned `Nono_Tails`, both supported 12-bone chains, the five procedural hair roots, required material roles and hair UVs, no source-only objects, the 120,000-triangle/60-draw/15 MB budgets, and named `Idle`, `Think`, and `Present` clips that do not key procedural tails, hair, or skirt bones.
+It requires one canonical skin, normalized four-influence weights, skinned `Nono_Tails`, both supported 12-bone chains, the five procedural hair roots, required material roles and hair UVs, no source-only objects, the 120,000-triangle/60-draw/15 MB budgets, and all nine approved mood clips without procedural tail, hair, or skirt tracks.
 
-The production Blender source is prepared outside the public repository so Nico-owned construction assets remain private. The repeatable pipeline is:
+The production Blender source is prepared outside the public repository so Nico-owned construction assets remain private. The shipped teacher-form GLB contains 103,072 triangles, 55 draw calls, 54 skinned meshes, both tail chains, and nine clips. The repeatable rebuild path is:
 
 ```bash
 /Applications/Blender.app/Contents/MacOS/Blender \
-  -b /path/to/NonoSubProductionSource.blend \
+  -b /path/to/NonoSubCheckpointFinal.blend \
   --python-exit-code 1 \
-  --python scripts/prepare_nono_production.py -- \
-  --output /path/to/NonoSubProduction.blend \
-  --candidate-glb /path/to/NonoSubProductionCandidate.glb
+  --python scripts/cut_nono_clips.py -- \
+  --output /path/to/NonoClipLibrary.blend
 
-node scripts/audit_nono_glb.mjs \
-  /path/to/NonoSubProductionCandidate.glb \
-  --allow-missing-animations
-```
-
-The current interim candidate passes at 95,728 triangles, 54 draws, 54 skinned meshes, and 8.0 MB. It deliberately remains outside `static/assets/Nono.glb` until Nico supplies the three final suit-captured actions. Final export is then:
-
-```bash
 /Applications/Blender.app/Contents/MacOS/Blender \
-  -b /path/to/NonoSubProduction.blend \
+  -b /path/to/NonoSubCheckpointFinal.blend \
+  --python-exit-code 1 \
+  --python scripts/prepare_nono_release.py -- \
+  --output /path/to/NonoSubRelease.blend \
+  --actions-from /path/to/NonoClipLibrary.blend
+
+/Applications/Blender.app/Contents/MacOS/Blender \
+  -b /path/to/NonoSubRelease.blend \
   --python-exit-code 1 \
   --python scripts/export_nono_final.py -- \
-  --output /path/to/Nono.glb
+  --output /path/to/NonoFinal.glb
 
-node scripts/audit_nono_glb.mjs /path/to/Nono.glb
+node scripts/strip_nono_glb.mjs /path/to/NonoFinal.glb
+node scripts/audit_nono_glb.mjs /path/to/NonoFinal.glb
 ```
 
-For local visual comparison only, copy the candidate to the ignored `static/assets/NonoCandidate.glb`, open the lesson fixture with `nonoAsset=candidate`, and choose `nonoShader=toon`, `nontoon`, or `portable`. Production builds ignore both query controls and always use the release Nono asset with `NonoToon`.
-
-The currently shipped placeholder GLB intentionally fails this strict audit because its old export lost skin attributes and does not contain the authored clips; lessons retain the complete chalk emphasis fallback until the audited final asset replaces it.
+`static/assets/Nono.glb` is the promoted teacher form. The former bear-hoodie form is preserved as `static/assets/NonoHoodie.glb`; `static/assets/NonoCandidate.glb` remains an ignored development rebuild slot. Development builds may compare `nonoShader=toon`, `nontoon`, or `portable`; production always uses the audited release asset with `NonoToon`.
 
 The exact suit-capture rules, forbidden procedural bones, pose checks, and final command are in [Nono animation handoff](docs/NONO_ANIMATION_HANDOFF.md).
 
@@ -212,6 +209,6 @@ References: [speech to text](https://developers.openai.com/api/docs/guides/speec
 
 ## Codex and provenance
 
-This implementation was created in the primary Codex task used for the Build Week `/feedback` submission. It was scaffolded into a new repository and does not import source from the older experimental NonoSub. The only reused product asset is Nico-owned `static/assets/Nono.glb`; its SHA-256 is recorded in [Asset rights](ASSET_RIGHTS.md).
+This implementation was created in the primary Codex task used for the Build Week `/feedback` submission. It was scaffolded into a new repository and does not import source from the older experimental NonoSub. Nico owns the Nono assets and recorded motion; exact technical contributions from Codex, Claude Fable 5, and read-only Kimi/Codex investigations are recorded in the [AI contribution ledger](docs/AI_CONTRIBUTIONS.md). Production asset hashes are recorded in [Asset rights](ASSET_RIGHTS.md).
 
 No license is granted for this repository. Nono's model, character, name, likeness, artwork, logos, and brand assets remain all rights reserved. Third-party components retain their respective terms; see [Third-party notices](THIRD_PARTY_NOTICES.md).

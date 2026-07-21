@@ -15,7 +15,7 @@ Deadline: **Tuesday, July 21, 2026 at 5:00 PM PT**. Target implementation finish
 - [ ] ScreenCaptureKit source chooser, permission denial, self-audio exclusion, one reconnect, and graceful live stop checked.
 - [x] Japanese→English and English→Japanese pass in file mode.
 - [x] Japanese→English and English→Japanese live modes pass on the development Mac.
-- [x] Workbench 960×680, lesson 780×620, and overlay 900×240 fit checks pass in fixture QA.
+- [x] Workbench 960×680, enlarged 2048×1024 lesson assembly with proportional compact fits, and overlay 900×240 pass fixture QA.
 - [x] Lesson history stays scrollable and preserves manual scroll position when a new answer arrives.
 
 ## Release
@@ -55,7 +55,7 @@ Deadline: **Tuesday, July 21, 2026 at 5:00 PM PT**. Target implementation finish
 - [ ] Working project URL.
 - [ ] Public sub-three-minute YouTube demo.
 - [ ] Testable public source repository.
-- [ ] Codex and GPT‑5.6 usage documented.
+- [x] Codex, Claude Fable 5, Kimi, and runtime GPT‑5.6 usage documented in `docs/AI_CONTRIBUTIONS.md`.
 - [ ] Education category and pitch confirmed.
 - [ ] Primary Codex task `/feedback` session ID included.
 - [ ] Submit before 5:00 PM PT; retain confirmation screenshot.

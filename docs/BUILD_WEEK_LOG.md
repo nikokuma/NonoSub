@@ -280,3 +280,12 @@
 - Strictly allowlisted preference fields, fonts, palettes, colors, language codes, geometry, and numeric ranges; lesson placement history is capped at eight displays.
 - Pinned Rust 1.97.1 locally and in GitHub Actions and fixed its Clippy findings without suppressions. Updated release documentation to state the verified platform, model-qualified language support, adaptive delay, last-caption retention, and deferred media-quality limitations.
 - Full verification passes with zero Svelte errors or warnings, 155 frontend tests, a successful production build, 120 Rust tests passing with one native permission test ignored, and warning-free Clippy.
+
+## July 21 — Teacher Nono and enlarged lesson stage
+
+- Checkpointed Claude Fable 5's direct model-repair/export lane separately in `3b71c3b`, preserving its implementation provenance and the read-only Codex/Kimi investigations.
+- Promoted Nico's repaired nine-animation teacher form into the production asset slot in `536d56c` and preserved the original bear-hoodie form as `NonoHoodie.glb`.
+- Replaced fixed lesson padding and Nono's world-space anchor with a proportional 2048×1024 assembly: a literal 1624×914 board on supporting displays, a dedicated speech/character rail, and controls below the board.
+- Added screen-space character fitting from actual model bounds, unified chalk content scaling, and full/Retina/compact geometry regressions.
+- Verified all nine mood routes at DPR 1 and 2, persistent point/underline teaching cues, production-disabled tail debug curves, and the complete WebGL/text fallback.
+- Added `docs/AI_CONTRIBUTIONS.md` to distinguish Nico's direction/assets/motion, primary Codex implementation, Codex tail tasks orchestrated through Fable, Fable's direct model pipeline, read-only investigations, and runtime OpenAI models.

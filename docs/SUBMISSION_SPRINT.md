@@ -1,5 +1,7 @@
 # NonoSub submission sprint
 
+> Historical planning record. The shipped teacher asset now uses the nine-mood pipeline documented in [NONO_ANIMATION_HANDOFF.md](NONO_ANIMATION_HANDOFF.md), and current acceptance is tracked in [SUBMISSION_CHECKLIST.md](SUBMISSION_CHECKLIST.md).
+
 Last updated: July 18, 2026
 
 This document is the execution source of truth for the final OpenAI Build Week sprint. It tracks what is already protected, what remains, the completion standard for each deliverable, and the scope that must not expand before submission.

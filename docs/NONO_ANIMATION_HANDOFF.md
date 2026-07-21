@@ -1,64 +1,54 @@
-# Nono animation handoff
+# Nono animation and rebuild handoff
 
-Use `/Users/nico/Projects/Blendr/NonoSubProduction.blend` for suit capture. Do not animate `NonoSubCheckpoint.blend`, `NonoSubProductionSource.blend`, or either source-only armature.
+The submission asset is already promoted. This document is the safe path for future motion edits.
 
-## Canonical character
+## Source of truth
 
-- Armature: `Nono_Rig`
-- Export collection: `NONO_EXPORT`
-- Reference/backups: `SOURCE_ONLY` (keep excluded)
-- Scene rate: 30 fps
-- Keep the rig at the world origin with object rotation `0, 0, 0` and scale `1, 1, 1`.
+- Nico's private checkpoint: `/Users/nico/Projects/Blendr/NonoSubCheckpointFinal.blend`
+- Clip library: `/Users/nico/Projects/Blendr/NonoClipLibrary.blend`
+- Prepared release scene: `/Users/nico/Projects/Blendr/NonoSubRelease.blend`
+- Local candidate slot: `static/assets/NonoCandidate.glb`
 
-The jacket details, outfit, hair, plugs, and tails already target the canonical rig. Do not merge the source armatures back into the export collection.
+Never overwrite the checkpoint. The old production-preparation route is retired because it damaged approved geometry and materials.
 
-## Required actions
+## Approved clips
 
-Create exactly these actions on `Nono_Rig`:
+The app recognizes these normalized clip names:
 
-| Action | Timing | Behavior |
-| --- | --- | --- |
-| `Idle` | 60–120 frames | Seamless breathing, blink, and extremely small body sway. |
-| `Think` | 60–120 frames | Seamless thoughtful head tilt and facial change. |
-| `Present` | 30–60 frames | One cheerful teaching beat; avoid a wide arm sweep across the chalkboard. |
+| Clip | Runtime use |
+| --- | --- |
+| `Idle` | Resting lesson state |
+| `Neutral` | Board presentation |
+| `Think` | GPT lesson preparation |
+| `Thumbs_Up` | Lesson completion |
+| `Point_User` | Explicit fixture/future cue |
+| `Point_Self` | Explicit fixture/future cue |
+| `Cheer` | Skip remainder |
+| `Heart_Touch` | Explicit fixture/future cue |
+| `Surprised` | Lesson failure |
 
-Body and facial bone keys are welcome. Remove object-level translation/scale and root `spine` translation/scale. Store the actions with fake users or NLA tracks so Blender does not discard them.
+Do not key procedural tail bones `spine.055–078`, the dynamic long-hair roots and descendants, or skirt-secondary bones. NonoSub applies those systems after the animation mixer, and the strip/audit pipeline rejects prohibited tracks.
 
-Do not key:
-
-- tail bones `spine.055–078`;
-- long-hair roots `spine.021`, `.031`, `.039`, `.085`, `.093`, or any descendants;
-- `skirt_root*` secondary bones.
-
-NonoSub applies those motions procedurally after the animation mixer. `scripts/export_nono_final.py` rejects release actions that key them.
-
-## Weight and clipping checks
-
-Before final export, inspect the complete outfit at representative poses:
-
-1. T-pose.
-2. Arms relaxed down.
-3. Arms forward.
-4. Shoulder lift.
-5. Deep elbow bend and cuff compression.
-6. Torso lean.
-7. Head tilt in both directions.
-8. The final `Present` pose.
-
-Check shoulders/armpits, elbows/cuffs, blazer opening/buttons, waist/skirt top, neck bow/collar, long-hair shoulder clearance, hair bow, tail plugs, skirt/thigh intersections, and exposed-body seams. Correct weights in `NonoSubProduction.blend`; never edit the checkpoint as the fix.
-
-## Final export
+## Rebuild
 
 From `/Users/nico/Projects/NonoSub`:
 
 ```bash
-/Applications/Blender.app/Contents/MacOS/Blender \
-  -b /Users/nico/Projects/Blendr/NonoSubProduction.blend \
-  --python-exit-code 1 \
-  --python scripts/export_nono_final.py -- \
-  --output /Users/nico/Projects/Blendr/NonoSubFinal.glb
+B=/Applications/Blender.app/Contents/MacOS/Blender
+CKPT=/Users/nico/Projects/Blendr/NonoSubCheckpointFinal.blend
 
-node scripts/audit_nono_glb.mjs /Users/nico/Projects/Blendr/NonoSubFinal.glb
+$B -b $CKPT --python scripts/cut_nono_clips.py -- \
+  --output /Users/nico/Projects/Blendr/NonoClipLibrary.blend
+$B -b $CKPT --python scripts/prepare_nono_release.py -- \
+  --output /Users/nico/Projects/Blendr/NonoSubRelease.blend \
+  --actions-from /Users/nico/Projects/Blendr/NonoClipLibrary.blend
+$B -b /Users/nico/Projects/Blendr/NonoSubRelease.blend \
+  --python scripts/export_nono_final.py -- \
+  --output /Users/nico/Projects/Blendr/NonoSubFinal2.glb
+node scripts/strip_nono_glb.mjs /Users/nico/Projects/Blendr/NonoSubFinal2.glb
+node scripts/audit_nono_glb.mjs /Users/nico/Projects/Blendr/NonoSubFinal2.glb
 ```
 
-The final-export script samples at 30 fps, exports only the three required actions, and does not save over the production Blender file. Replace `static/assets/Nono.glb` only after the strict audit passes and the exact lesson-window comparison is approved.
+Install into `NonoCandidate.glb` first. Inspect all nine moods at 1× and 2× DPR, point and underline targets, outfit/hair/leg integrity, and console output before promoting it.
+
+Clip ranges are defined in `CLIP_RANGES` in `scripts/cut_nono_clips.py`. The current cutter includes the quaternion-hemisphere and arm-safety repairs documented in [SESSION_REPORT_NONO_ARM_FIX.md](SESSION_REPORT_NONO_ARM_FIX.md).

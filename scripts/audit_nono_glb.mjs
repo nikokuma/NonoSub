@@ -70,25 +70,19 @@ else {
   }
 }
 
-const REQUIRED_CLIPS = ["idle", "think", "neutral", "thumbs_up"];
-const OPTIONAL_CLIPS = ["point_user", "point_self", "cheer", "heart_touch", "surprised"];
+const REQUIRED_CLIPS = ["idle", "neutral", "think", "thumbs_up", "point_user", "point_self", "cheer", "heart_touch", "surprised"];
 const animationNames = new Set(animations.map((animation) => animation.name?.toLowerCase()).filter(Boolean));
 for (const clip of REQUIRED_CLIPS) {
-  if (!animationNames.has(clip) && !allowMissingAnimations) {
-    errors.push(`Missing ${clip} animation clip.`);
-  }
-}
-for (const clip of OPTIONAL_CLIPS) {
-  if (!animationNames.has(clip)) warnings.push(`Optional gesture clip ${clip} not shipped; app falls back.`);
+  if (animationNames.has(clip)) continue;
+  if (allowMissingAnimations) warnings.push(`Animation clip ${clip} is not present in this in-progress candidate.`);
+  else errors.push(`Missing ${clip} animation clip.`);
 }
 for (const name of animationNames) {
-  if (!REQUIRED_CLIPS.includes(name) && !OPTIONAL_CLIPS.includes(name)) {
+  if (!REQUIRED_CLIPS.includes(name)) {
     warnings.push(`Animation clip "${name}" is outside the known mood set and will never play.`);
   }
 }
-if (allowMissingAnimations && animations.length === 0) {
-  warnings.push("Idle/Think/Neutral/Thumbs_Up are intentionally pending Nico's suit-animation capture.");
-}
+if (allowMissingAnimations && animations.length === 0) warnings.push("Approved mood clips are intentionally pending in this in-progress candidate.");
 
 const childrenByNode = nodes.map((node) => node.children ?? []);
 function descendants(rootIndex) {
