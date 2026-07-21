@@ -8,8 +8,8 @@ function expectContained(layout: ReturnType<typeof calculateLessonStageLayout>, 
     expect(rect.x + rect.width).toBeLessThanOrEqual(width);
     expect(rect.y + rect.height).toBeLessThanOrEqual(height);
   }
-  expect(layout.characterRail.x).toBeGreaterThan(layout.board.x + layout.board.width);
-  expect(layout.bubble.x).toBeGreaterThanOrEqual(layout.board.x + layout.board.width);
+  expect(layout.characterRail.x).toBeGreaterThan(layout.board.x + layout.board.width - 168);
+  expect(layout.bubble.x).toBeGreaterThan(layout.board.x + layout.board.width - 136);
   expect(layout.controls.y).toBeGreaterThan(layout.board.y + layout.board.height);
 }
 
@@ -20,6 +20,11 @@ describe("lesson stage layout", () => {
     expect(layout.board.width).toBe(LESSON_BOARD_TARGET.width);
     expect(layout.board.height).toBe(LESSON_BOARD_TARGET.height);
     expect(layout.boardContentScale).toBe(1.65);
+    expect(layout.characterRail.x - (layout.board.x + layout.board.width)).toBe(-156);
+    expect(layout.characterRail.width).toBe(384);
+    expect(layout.bubble.width).toBe(350);
+    expect(layout.characterViewport.y).toBe(layout.bubble.y + layout.bubble.height);
+    expect(layout.characterViewport.bottom).toBeLessThan(layout.board.y + layout.board.height);
     expectContained(layout, 2048, 1024);
   });
 

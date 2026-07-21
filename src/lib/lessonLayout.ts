@@ -26,13 +26,19 @@ export const LESSON_BOARD_TARGET = { width: 1624, height: 914 } as const;
 const BASE_LAYOUT = {
   boardX: 16,
   boardY: 16,
-  railX: 1656,
+  // The chalkboard PNG has a transparent outer gutter. The character rail
+  // intentionally overlaps that gutter so Nono sits beside the visible wood,
+  // not beside the image file's invisible bounds.
+  railX: 1484,
   railY: 16,
-  railWidth: 340,
+  railWidth: 384,
   railHeight: 914,
-  bubbleHeight: 185,
-  characterY: 217,
-  characterHeight: 713,
+  bubbleX: 1518,
+  bubbleWidth: 350,
+  bubbleY: 109,
+  bubbleHeight: 180,
+  characterY: 289,
+  characterHeight: 551,
   controlsY: 944,
   controlsHeight: 56,
 } as const;
@@ -58,7 +64,7 @@ export function calculateLessonStageLayout(
   });
   const board = rect(BASE_LAYOUT.boardX, BASE_LAYOUT.boardY, LESSON_BOARD_TARGET.width, LESSON_BOARD_TARGET.height);
   const characterRail = rect(BASE_LAYOUT.railX, BASE_LAYOUT.railY, BASE_LAYOUT.railWidth, BASE_LAYOUT.railHeight);
-  const bubble = rect(BASE_LAYOUT.railX, BASE_LAYOUT.railY, BASE_LAYOUT.railWidth, BASE_LAYOUT.bubbleHeight);
+  const bubble = rect(BASE_LAYOUT.bubbleX, BASE_LAYOUT.bubbleY, BASE_LAYOUT.bubbleWidth, BASE_LAYOUT.bubbleHeight);
   const character = rect(BASE_LAYOUT.railX, BASE_LAYOUT.characterY, BASE_LAYOUT.railWidth, BASE_LAYOUT.characterHeight);
 
   return {

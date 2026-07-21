@@ -159,6 +159,7 @@
     const modelPlacement = new THREE.Group();
     scene.add(modelPlacement);
     let modelBodyBounds: THREE.Box3 | undefined;
+    let modelCoreBounds: THREE.Box3 | undefined;
     let viewportSignature = "";
     let mixer: THREE.AnimationMixer | undefined;
     let activeAction: THREE.AnimationAction | undefined;
@@ -250,6 +251,7 @@
       mixer?.update(0);
       model.updateWorldMatrix(true, true);
       modelBodyBounds = calculateCharacterBounds(model);
+      modelCoreBounds = calculateCharacterCoreBounds(model);
       positionModelInViewport();
       if (tailDynamics) {
         resetTailDynamics(tailDynamics.left);
@@ -366,7 +368,7 @@
     animationFrame = requestAnimationFrame(render);
 
     function positionModelInViewport() {
-      if (!model || !modelBodyBounds || renderer.domElement.width === 0) return;
+      if (!model || !modelBodyBounds || !modelCoreBounds || renderer.domElement.width === 0) return;
       const canvas = renderer.domElement;
       const canvasRect = canvas.getBoundingClientRect();
       if (canvasRect.width <= 0 || canvasRect.height <= 0 || viewport.width <= 0 || viewport.height <= 0) return;
@@ -393,10 +395,11 @@
         availableWidth / Math.max(bodySize.x, 0.001),
         availableHeight / Math.max(bodySize.y, 0.001),
       );
-      const centerX = (leftTop.x + rightBottom.x) / 2;
+      const viewportWorldWidth = Math.abs(rightBottom.x - leftTop.x);
+      const leftInset = viewportWorldWidth * CHARACTER_FIT.leftInset;
       modelPlacement.scale.setScalar(scale);
       modelPlacement.position.set(
-        centerX - bodyCenter.x * scale,
+        leftTop.x + leftInset - modelCoreBounds.min.x * scale,
         rightBottom.y - modelBodyBounds.min.y * scale,
         -bodyCenter.z * scale,
       );
@@ -421,6 +424,8 @@
       }
       if (model) disposeModel(model);
       model = undefined;
+      modelBodyBounds = undefined;
+      modelCoreBounds = undefined;
       outlines = [];
       mixer = undefined;
       activeAction = undefined;
@@ -555,10 +560,29 @@
     model.updateWorldMatrix(true, true);
     const bounds = new THREE.Box3();
     model.traverse((object) => {
-      if (!("isMesh" in object) || !object.isMesh || object.name === "Nono_Tails" || object.userData.nonoOutline) return;
+      // The export body contains covered arm geometry that is deliberately wider
+      // than Nono's visible outfit. Using it for framing makes the dressed model
+      // look tiny and leaves a large dead gap between her and the chalkboard.
+      if (
+        !("isMesh" in object)
+        || !object.isMesh
+        || object.name === "Nono_Tails"
+        || object.name === "Nono_Body"
+        || object.userData.nonoOutline
+      ) return;
       bounds.union(new THREE.Box3().setFromObject(object, true));
     });
     return bounds.isEmpty() ? new THREE.Box3().setFromObject(model, true) : bounds;
+  }
+
+  function calculateCharacterCoreBounds(model: THREE.Object3D): THREE.Box3 {
+    model.updateWorldMatrix(true, true);
+    const bounds = new THREE.Box3();
+    model.traverse((object) => {
+      if (!("isMesh" in object) || !object.isMesh || !CHARACTER_CORE_MESHES.has(object.name)) return;
+      bounds.union(new THREE.Box3().setFromObject(object, true));
+    });
+    return bounds.isEmpty() ? calculateCharacterBounds(model) : bounds;
   }
 
   function screenPointToPlane(
@@ -1024,7 +1048,15 @@
   }
 
   const TAIL_SIDES = ["left", "right"] as const;
-  const CHARACTER_FIT = { width: 0.92, height: 0.96 } as const;
+  const CHARACTER_FIT = { width: 0.94, height: 0.98, leftInset: 0.08 } as const;
+  const CHARACTER_CORE_MESHES = new Set([
+    "Nono_Head_Mesh",
+    "Nono_Hair_Long",
+    "Nono_Hair_Sweep",
+    "Nono_Outfit_Skirt",
+    "Nono_Outfit_Socks",
+    "Nono_Outfit_Shoes",
+  ]);
   const TAIL_DEBUG_POINTS = 32;
   const CHALK_PROP = { lengthScale: 1.4, radiusScale: 0.15, protrusion: 0.3, color: 0xf4f0df } as const;
   const WORLD_DOWN = new THREE.Vector3(0, -1, 0);
