@@ -3224,6 +3224,9 @@ fn show_surface(app: &tauri::AppHandle, surface: &str) -> Result<(), String> {
 }
 
 fn surface_path(surface: &str) -> String {
+    if cfg!(debug_assertions) && surface == "lesson" {
+        return "?surface=lesson&nonoAsset=candidate".into();
+    }
     format!("?surface={surface}")
 }
 
@@ -4348,6 +4351,7 @@ mod tests {
         assert_eq!(surface_path("overlay"), "?surface=overlay");
         assert_eq!(surface_path("launcher"), "?surface=launcher");
         assert!(!surface_path("lesson").contains("index.html"));
+        assert!(surface_path("lesson").contains("nonoAsset=candidate"));
     }
 
     #[test]
