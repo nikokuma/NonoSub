@@ -48,6 +48,7 @@ const IDLE_CLAUSE_MS: u64 = 1_200;
 const MAX_ALIGNED_CLAUSE_MS: u64 = 8_000;
 const MAX_CAPTURE_CLAUSE_MS: u64 = 10_000;
 const MAX_CLAUSE_GRAPHEMES: usize = 220;
+const SOURCE_ALIGNED_GAP_MS: u64 = 2_000;
 const CLAUSE_PAIR_TOLERANCE_MS: u64 = 1_000;
 const SOURCE_FALLBACK_MS: u64 = 6_000;
 const MAX_RECENT_EVENT_IDS: usize = 2_048;
@@ -250,14 +251,36 @@ impl TextClause {
                 || self.text.graphemes(true).count() >= MAX_CLAUSE_GRAPHEMES)
     }
 
-    fn should_close(&self, capture_clock_ms: u64) -> bool {
+    fn should_rotate_source_before(&self, aligned_ms: u64, capture_clock_ms: u64) -> bool {
+        self.should_rotate_before(aligned_ms, capture_clock_ms)
+            || (self.timed
+                && aligned_ms.saturating_sub(self.end_ms) >= SOURCE_ALIGNED_GAP_MS)
+    }
+
+    fn reached_hard_boundary(&self, capture_clock_ms: u64) -> bool {
+        if self.text.is_empty() {
+            return false;
+        }
+        self.end_ms.saturating_sub(self.start_ms) >= MAX_ALIGNED_CLAUSE_MS
+            || capture_clock_ms.saturating_sub(self.created_at_ms) >= MAX_CAPTURE_CLAUSE_MS
+            || self.text.graphemes(true).count() >= MAX_CLAUSE_GRAPHEMES
+    }
+
+    fn should_close_source(&self, capture_clock_ms: u64) -> bool {
         if self.text.is_empty() {
             return false;
         }
         let quiet_ms = capture_clock_ms.saturating_sub(self.last_at_ms);
-        self.end_ms.saturating_sub(self.start_ms) >= MAX_ALIGNED_CLAUSE_MS
-            || capture_clock_ms.saturating_sub(self.created_at_ms) >= MAX_CAPTURE_CLAUSE_MS
-            || self.text.graphemes(true).count() >= MAX_CLAUSE_GRAPHEMES
+        self.reached_hard_boundary(capture_clock_ms)
+            || (terminal(&self.text) && quiet_ms >= TERMINAL_QUIET_MS)
+    }
+
+    fn should_close_translation(&self, capture_clock_ms: u64) -> bool {
+        if self.text.is_empty() {
+            return false;
+        }
+        let quiet_ms = capture_clock_ms.saturating_sub(self.last_at_ms);
+        self.reached_hard_boundary(capture_clock_ms)
             || quiet_ms >= IDLE_CLAUSE_MS
             || (terminal(&self.text) && quiet_ms >= TERMINAL_QUIET_MS)
     }
@@ -824,8 +847,9 @@ impl CaptionCoordinator {
         let mut continuation_group = None;
         while !remaining.is_empty() {
             if self.active_source_clause.is_some_and(|index| {
-                self.source_clauses[index].should_close(capture_clock_ms)
-                    || self.source_clauses[index].should_rotate_before(aligned_ms, capture_clock_ms)
+                self.source_clauses[index].should_close_source(capture_clock_ms)
+                    || self.source_clauses[index]
+                        .should_rotate_source_before(aligned_ms, capture_clock_ms)
             }) {
                 let index = self.active_source_clause.expect("active source clause");
                 self.close_source_clause(index, capture_clock_ms, &mut events);
@@ -889,7 +913,7 @@ impl CaptionCoordinator {
         let mut continuation_group = None;
         while !remaining.is_empty() {
             if self.active_translation_clause.is_some_and(|index| {
-                self.translation_clauses[index].should_close(capture_clock_ms)
+                self.translation_clauses[index].should_close_translation(capture_clock_ms)
                     || self.translation_clauses[index]
                         .should_rotate_before(aligned_ms, capture_clock_ms)
             }) {
@@ -942,14 +966,16 @@ impl CaptionCoordinator {
         let mut events = Vec::new();
         if self
             .active_source_clause
-            .is_some_and(|index| self.source_clauses[index].should_close(capture_clock_ms))
+            .is_some_and(|index| self.source_clauses[index].should_close_source(capture_clock_ms))
         {
             let index = self.active_source_clause.expect("active source clause");
             self.close_source_clause(index, capture_clock_ms, &mut events);
         }
         if self
             .active_translation_clause
-            .is_some_and(|index| self.translation_clauses[index].should_close(capture_clock_ms))
+            .is_some_and(|index| {
+                self.translation_clauses[index].should_close_translation(capture_clock_ms)
+            })
         {
             let index = self
                 .active_translation_clause
@@ -2895,6 +2921,53 @@ mod tests {
     }
 
     #[test]
+    fn coordinated_mode_does_not_seal_a_fragment_during_transcription_stall() {
+        let mut coordinator = CaptionCoordinator::new(LiveSyncMode::Coordinated);
+        coordinator.on_source(timed("s1", "私", Some(0)), 1_000);
+        coordinator.on_translation(
+            timed("t1", "I seek a peaceful life.", Some(0)),
+            1_100,
+        );
+
+        // An absence of source deltas is model-output latency, not proof of an
+        // audio/sentence boundary. The completed target must remain queued.
+        coordinator.tick(2_600);
+        assert!(!coordinator.drafts[0].source_closed);
+        assert!(coordinator.drafts[0].translation_closed);
+        assert_eq!(coordinator.visible_segment_id, None);
+
+        coordinator.on_source(timed("s2", "は平穏な生活を求めている。", Some(800)), 3_500);
+        coordinator.tick(3_900);
+
+        assert_eq!(coordinator.drafts[0].source, "私は平穏な生活を求めている。");
+        assert!(coordinator.drafts[0].source_closed);
+        assert_eq!(coordinator.visible_segment_id.as_deref(), Some("live-1"));
+    }
+
+    #[test]
+    fn coordinated_mode_holds_complete_pair_while_next_source_is_fragmentary() {
+        let mut coordinator = CaptionCoordinator::new(LiveSyncMode::Coordinated);
+        coordinator.on_source(timed("s1", "最初です。", Some(0)), 1_000);
+        coordinator.on_translation(timed("t1", "This is first.", Some(0)), 1_100);
+        coordinator.tick(3_000);
+        assert_eq!(coordinator.visible_segment_id.as_deref(), Some("live-1"));
+
+        coordinator.on_source(timed("s2", "次", Some(4_000)), 4_000);
+        coordinator.on_translation(
+            timed("t2", "The complete second sentence.", Some(4_000)),
+            4_100,
+        );
+        coordinator.tick(5_700);
+        assert_eq!(coordinator.visible_segment_id.as_deref(), Some("live-1"));
+        assert!(!coordinator.drafts[1].source_closed);
+
+        coordinator.on_source(timed("s3", "の文です。", Some(4_800)), 6_000);
+        coordinator.tick(6_600);
+        assert_eq!(coordinator.drafts[1].source, "次の文です。");
+        assert_eq!(coordinator.visible_segment_id.as_deref(), Some("live-2"));
+    }
+
+    #[test]
     fn coordinated_mode_holds_previous_caption_while_replacement_is_preparing() {
         let mut coordinator = CaptionCoordinator::new(LiveSyncMode::Coordinated);
         coordinator.on_source(timed("s1", "最初です。", Some(200)), 1_000);
@@ -3103,7 +3176,7 @@ mod tests {
     }
 
     #[test]
-    fn punctuation_idle_and_capture_age_close_source_clauses() {
+    fn punctuation_and_capture_age_close_source_clauses_without_output_idle() {
         let mut punctuation = CaptionCoordinator::new(LiveSyncMode::Coordinated);
         punctuation.on_source(timed("p1", "Finished.", Some(0)), 1_000);
         punctuation.tick(1_349);
@@ -3116,7 +3189,7 @@ mod tests {
         idle.tick(2_199);
         assert!(!idle.drafts[0].source_closed);
         idle.tick(2_200);
-        assert!(idle.drafts[0].source_closed);
+        assert!(!idle.drafts[0].source_closed);
 
         let mut aged = CaptionCoordinator::new(LiveSyncMode::Coordinated);
         aged.on_source(timed("a1", "age bound", Some(0)), 1_000);
@@ -3145,10 +3218,16 @@ mod tests {
         assert_eq!(translation.translation_clauses[0].text, "Finished.");
         assert_eq!(translation.translation_clauses[1].text, "Next sentence");
 
-        let mut idle = CaptionCoordinator::new(LiveSyncMode::Coordinated);
-        idle.on_source(timed("i1", "first", Some(0)), 1_000);
-        idle.on_source(timed("i2", "second", Some(1_200)), 2_200);
-        assert_eq!(idle.drafts.len(), 2);
+        let mut stalled = CaptionCoordinator::new(LiveSyncMode::Coordinated);
+        stalled.on_source(timed("i1", "first", Some(0)), 1_000);
+        stalled.on_source(timed("i2", "second", Some(1_200)), 2_200);
+        assert_eq!(stalled.drafts.len(), 1);
+        assert_eq!(stalled.drafts[0].source, "firstsecond");
+
+        let mut separated = CaptionCoordinator::new(LiveSyncMode::Coordinated);
+        separated.on_source(timed("g1", "first", Some(0)), 1_000);
+        separated.on_source(timed("g2", "second", Some(2_400)), 3_400);
+        assert_eq!(separated.drafts.len(), 2);
     }
 
     #[test]

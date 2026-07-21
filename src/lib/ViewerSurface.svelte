@@ -8,12 +8,14 @@
   import { effectiveStyle } from "./preferences";
   import { initialSession, loadPreferences, maintainSubscription, savePreferencePatch, subscribePreferences, subscribeSession } from "./runtime";
   import { closeIdentifiesPlaybackLease, createPlaybackPauseLease, shouldResumePlayback, type PlaybackPauseLease } from "./playbackOwnership";
+  import { clampSubtitlePosition, mediaEventIsCurrent } from "./viewerLayout";
   import SubtitleStack from "./SubtitleStack.svelte";
 
   let session = $state<SessionState>(initialSession());
   let preferences = $state(loadPreferences());
   let video = $state<HTMLVideoElement>();
   let stage = $state<HTMLDivElement>();
+  let subtitlePosition = $state<HTMLDivElement>();
   const fixtureTimeMs = typeof window !== "undefined" && !isTauri()
     ? Math.max(0, Number(new URLSearchParams(window.location.search).get("fixtureTimeMs") ?? 0) || 0)
     : 0;
@@ -32,12 +34,15 @@
   let manualSubtitleOffsetMs = $state(0);
   let offsetHudVisible = $state(false);
   let offsetHudTimer: ReturnType<typeof setTimeout> | undefined;
-  let offsetSessionId = "";
+  let activeMediaInstanceId = "";
   let connectionIssue = $state("");
 
   const active = $derived(activeSegments(session.segments, subtitleTimelineTime(currentMs, manualSubtitleOffsetMs)));
   const activeStyle = $derived(effectiveStyle(preferences.style, session.processingMode));
   const mediaUrl = $derived(session.media?.path ? convertFileSrc(session.media.path) : undefined);
+  const mediaInstanceId = $derived(session.mode === "file" && session.media?.path
+    ? `${session.sessionId}:${session.media.path}`
+    : "");
 
   onMount(() => {
     document.documentElement.dataset.surface = "viewer";
@@ -71,23 +76,30 @@
   });
 
   $effect(() => {
-    if (session.mode !== "file" || session.sessionId === offsetSessionId) return;
+    const nextMediaInstanceId = mediaInstanceId;
+    if (!nextMediaInstanceId || nextMediaInstanceId === activeMediaInstanceId) return;
     playbackRevision += 1;
     pauseLease = undefined;
-    offsetSessionId = session.sessionId;
+    activeMediaInstanceId = nextMediaInstanceId;
     manualSubtitleOffsetMs = 0;
+    currentMs = 0;
+    durationMs = 0;
+    playing = false;
+    catchingUp = false;
   });
 
   $effect(() => {
-    if ((session.phase === "ready" || session.phase === "complete") && video?.paused && currentMs === 0 && !catchingUp && !pauseLease) void video.play();
+    const current = currentVideo();
+    if ((session.phase === "ready" || session.phase === "complete") && current?.paused && currentMs === 0 && !catchingUp && !pauseLease) void current.play();
   });
 
   $effect(() => {
     const readyThroughMs = session.readyThroughMs;
-    if (!catchingUp || !video?.paused || pauseLease) return;
+    const current = currentVideo();
+    if (!catchingUp || !current?.paused || pauseLease) return;
     if (session.phase === "complete" || canResumeForCoverage(currentMs, readyThroughMs)) {
       catchingUp = false;
-      void video.play();
+      void current.play();
     }
   });
 
@@ -98,18 +110,20 @@
   }
 
   function togglePlayback() {
-    if (!video) return;
+    const current = currentVideo();
+    if (!current) return;
     playbackRevision += 1;
-    if (video.paused) void video.play(); else video.pause();
+    if (current.paused) void current.play(); else current.pause();
   }
 
   function openLessonPause(context: LessonOpenContext) {
-    if (!video || session.mode !== "file" || context.sessionId !== session.sessionId) return;
+    const current = currentVideo();
+    if (!current || session.mode !== "file" || context.sessionId !== session.sessionId) return;
     const mediaInstanceId = session.media?.path ?? "";
-    const lease = createPlaybackPauseLease(context, mediaInstanceId, !video.paused, playbackRevision);
+    const lease = createPlaybackPauseLease(context, mediaInstanceId, !current.paused, playbackRevision);
     if (!lease) return;
     pauseLease = lease;
-    if (!video.paused) video.pause();
+    if (!current.paused) current.pause();
   }
 
   function closeLessonPause(closed: LessonClosedContext) {
@@ -117,15 +131,16 @@
     if (!lease || !closeIdentifiesPlaybackLease(lease, closed)) return;
     const coverageReady = session.phase === "complete"
       || !shouldPauseForCoverage(currentMs, session.readyThroughMs);
-    const resume = Boolean(video) && shouldResumePlayback(lease, closed, {
+    const current = currentVideo();
+    const resume = Boolean(current) && shouldResumePlayback(lease, closed, {
       sessionId: session.sessionId,
       mediaInstanceId: session.media?.path ?? "",
       playbackRevision,
-      paused: video?.paused ?? true,
+      paused: current?.paused ?? true,
       coverageReady,
     });
     pauseLease = undefined;
-    if (resume) void video?.play();
+    if (resume) void current?.play();
     else if (lease.wasPlaying && closed.reason === "closed" && !coverageReady) catchingUp = true;
   }
 
@@ -157,22 +172,59 @@
     return `${manualSubtitleOffsetMs > 0 ? "+" : "−"}${(Math.abs(manualSubtitleOffsetMs) / 1_000).toFixed(1)}s`;
   }
 
-  function updateTime() {
-    if (!video) return;
-    currentMs = video.currentTime * 1000;
-    if (session.phase !== "complete" && !video.paused && shouldPauseForCoverage(currentMs, session.readyThroughMs)) {
+  function currentVideo(): HTMLVideoElement | undefined {
+    return video?.dataset.mediaInstance === activeMediaInstanceId ? video : undefined;
+  }
+
+  function mediaFromEvent(event: Event): HTMLVideoElement | undefined {
+    const element = event.currentTarget instanceof HTMLVideoElement ? event.currentTarget : undefined;
+    const eventInstanceId = element?.dataset.mediaInstance ?? "";
+    return mediaEventIsCurrent(element, video, eventInstanceId, activeMediaInstanceId) ? element : undefined;
+  }
+
+  function loadedMetadata(event: Event) {
+    const current = mediaFromEvent(event);
+    if (!current) return;
+    current.currentTime = 0;
+    currentMs = 0;
+    updateDuration(event);
+  }
+
+  function updateTime(event: Event) {
+    const current = mediaFromEvent(event);
+    if (!current) return;
+    currentMs = current.currentTime * 1000;
+    if (session.phase !== "complete" && !current.paused && shouldPauseForCoverage(currentMs, session.readyThroughMs)) {
       playbackRevision += 1;
-      video.pause();
+      current.pause();
       catchingUp = true;
     }
     if (catchingUp && canResumeForCoverage(currentMs, session.readyThroughMs)) {
       catchingUp = false;
-      void video.play();
+      void current.play();
     }
   }
 
-  function updateDuration() {
-    durationMs = video?.duration && Number.isFinite(video.duration) ? video.duration * 1000 : 0;
+  function updateDuration(event: Event) {
+    const current = mediaFromEvent(event);
+    if (!current) return;
+    durationMs = current.duration && Number.isFinite(current.duration) ? current.duration * 1000 : 0;
+  }
+
+  function handlePlay(event: Event) {
+    if (!mediaFromEvent(event)) return;
+    playing = true;
+    activity();
+  }
+
+  function handlePause(event: Event) {
+    if (!mediaFromEvent(event)) return;
+    playing = false;
+  }
+
+  function handleEnded(event: Event) {
+    if (!mediaFromEvent(event)) return;
+    playing = false;
   }
 
   async function openComposer(event: MouseEvent) {
@@ -217,7 +269,7 @@
   }
 
   function moveDrag(event: PointerEvent) {
-    if (!stage || !dragCandidate || dragCandidate.pointerId !== event.pointerId) return;
+    if (!stage || !subtitlePosition || !dragCandidate || dragCandidate.pointerId !== event.pointerId) return;
     if (!dragging) {
       const distance = Math.hypot(event.clientX - dragCandidate.startX, event.clientY - dragCandidate.startY);
       if (distance < 6) return;
@@ -225,10 +277,15 @@
       suppressSelection = true;
     }
     const bounds = stage.getBoundingClientRect();
-    preferences.style.position = {
-      x: Math.min(.94, Math.max(.06, (event.clientX - bounds.left) / bounds.width)),
-      y: Math.min(.94, Math.max(.1, (event.clientY - bounds.top) / bounds.height)),
-    };
+    const panel = subtitlePosition.getBoundingClientRect();
+    preferences.style.position = clampSubtitlePosition(
+      {
+        x: (event.clientX - bounds.left) / bounds.width,
+        y: (event.clientY - bounds.top) / bounds.height,
+      },
+      { width: bounds.width, height: bounds.height },
+      { width: panel.width, height: panel.height },
+    );
   }
 
   function finishDrag(event: PointerEvent) {
@@ -241,17 +298,52 @@
     void savePreferencePatch({ style: { position: preferences.style.position } }).then((value) => preferences = value);
     window.setTimeout(() => suppressSelection = false, 350);
   }
+
+  function keepSubtitleInBounds(node: HTMLElement) {
+    let frame = 0;
+    const clampCurrent = () => {
+      frame = 0;
+      if (!stage || dragging) return;
+      const bounds = stage.getBoundingClientRect();
+      const panel = node.getBoundingClientRect();
+      const next = clampSubtitlePosition(
+        preferences.style.position,
+        { width: bounds.width, height: bounds.height },
+        { width: panel.width, height: panel.height },
+      );
+      if (Math.abs(next.x - preferences.style.position.x) > 0.0001
+        || Math.abs(next.y - preferences.style.position.y) > 0.0001) {
+        preferences.style.position = next;
+      }
+    };
+    const schedule = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(clampCurrent);
+    };
+    const observer = new ResizeObserver(schedule);
+    observer.observe(node);
+    if (stage) observer.observe(stage);
+    window.addEventListener("resize", schedule);
+    schedule();
+    return { destroy() {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener("resize", schedule);
+    } };
+  }
 </script>
 
 <svelte:window onpointermove={activity} onkeydown={(event) => { activity(); handleShortcut(event); }} />
 
 <div class="viewer" bind:this={stage}>
   {#if mediaUrl}
-    <!-- svelte-ignore a11y_media_has_caption -->
-    <video bind:this={video} src={mediaUrl} onloadedmetadata={updateDuration} ondurationchange={updateDuration} ontimeupdate={updateTime} onplay={() => { playing = true; activity(); }} onpause={() => playing = false} onended={() => playing = false}></video>
+    {#key mediaInstanceId}
+      <!-- svelte-ignore a11y_media_has_caption -->
+      <video bind:this={video} data-media-instance={mediaInstanceId} src={mediaUrl} onloadedmetadata={loadedMetadata} ondurationchange={updateDuration} ontimeupdate={updateTime} onplay={handlePlay} onpause={handlePause} onended={handleEnded}></video>
+    {/key}
   {:else}<div class="fixture-backdrop"><span>駅前</span><small>NONOSUB VIEWER FIXTURE</small></div>{/if}
 
-  {#if subtitlesVisible}<div role="group" aria-label="Movable subtitle overlay. Drag to reposition; right-click to ask Nono." class="subtitle-position" class:dragging style={`left:${preferences.style.position.x * 100}%;top:${preferences.style.position.y * 100}%`} use:suppressLookup oncontextmenu={openComposer} onpointerdown={beginDrag} onpointermove={moveDrag} onpointerup={finishDrag} onpointercancel={finishDrag}>
+  {#if subtitlesVisible}<div bind:this={subtitlePosition} role="group" aria-label="Movable subtitle overlay. Drag to reposition; right-click to ask Nono." class="subtitle-position" class:dragging style={`left:${preferences.style.position.x * 100}%;top:${preferences.style.position.y * 100}%`} use:suppressLookup use:keepSubtitleInBounds oncontextmenu={openComposer} onpointerdown={beginDrag} onpointermove={moveDrag} onpointerup={finishDrag} onpointercancel={finishDrag}>
     <SubtitleStack segments={active} speakers={session.speakers} style={activeStyle} movable />
   </div>{/if}
 
@@ -260,7 +352,7 @@
   {#if offsetHudVisible}<div class="offset-hud">Subtitles {formattedOffset()}</div>{/if}
   <div class="chrome" class:visible={controlsVisible}>
     <div class="topbar" data-tauri-drag-region><b>{session.media?.fileName ?? "Video"}</b></div>
-    <div class="controls"><button class="play" onclick={togglePlayback}>{playing ? "❚❚" : "▶"}</button><time>{formatTime(currentMs)}</time><input type="range" min="0" max={durationMs || 33_000} value={currentMs} oninput={(event) => { playbackRevision += 1; currentMs = Number(event.currentTarget.value); if (video) video.currentTime = currentMs / 1000; }} /><time>{formatTime(durationMs)}</time><div class="sync-controls"><button title="Show subtitles 100 ms earlier" onclick={() => adjustSubtitleOffset(-100)}>−</button><button title="Reset subtitle timing" onclick={() => setSubtitleOffset(0)}>{formattedOffset()}</button><button title="Show subtitles 100 ms later" onclick={() => adjustSubtitleOffset(100)}>+</button></div><button onclick={toggleFullscreen}>⛶</button></div>
+    <div class="controls"><button class="play" onclick={togglePlayback}>{playing ? "❚❚" : "▶"}</button><time>{formatTime(currentMs)}</time><input type="range" min="0" max={durationMs || 33_000} value={currentMs} oninput={(event) => { playbackRevision += 1; currentMs = Number(event.currentTarget.value); const current = currentVideo(); if (current) current.currentTime = currentMs / 1000; }} /><time>{formatTime(durationMs)}</time><div class="sync-controls"><button title="Show subtitles 100 ms earlier" onclick={() => adjustSubtitleOffset(-100)}>−</button><button title="Reset subtitle timing" onclick={() => setSubtitleOffset(0)}>{formattedOffset()}</button><button title="Show subtitles 100 ms later" onclick={() => adjustSubtitleOffset(100)}>+</button></div><button onclick={toggleFullscreen}>⛶</button></div>
   </div>
 </div>
 

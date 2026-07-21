@@ -8,6 +8,8 @@
   import { FIXTURE_EVENTS, FIXTURE_LESSON } from "./fixtures";
   import { dominantChalkColor, isLessonSkipped, lessonStepOrder } from "./lesson";
   import { lessonThreadKey } from "./lessonIdentity";
+  import { calculateLessonStageLayout } from "./lessonLayout";
+  import { capLessonMessages, recallLessonThread, rememberLessonThread } from "./lessonThreads";
   import { fitLogicalWindowSize, makeMonitorKey, normalizeLessonPlacement, resolveLessonPosition, shouldPersistLessonPlacement, type MonitorGeometry } from "./floatingPlacement";
   import { reduceSession } from "./session";
   import { loadPreferences, maintainSubscription, savePreferencePatch, subscribePreferences } from "./runtime";
@@ -47,6 +49,8 @@
   let preferences = $state(loadPreferences());
   let messages = $state<LessonMessage[]>([]);
   let threads = $state<Record<string, LessonMessage[]>>({});
+  let threadOrder = $state<string[]>([]);
+  let threadSessionId = "";
   let loading = $state(false);
   let error = $state("");
   let activeSelectionId = 0;
@@ -70,6 +74,8 @@
   let openContext = $state<LessonOpenContext>(emptyOpenContext);
   let placementTimer: ReturnType<typeof setTimeout> | undefined;
   let placementSuppressedUntil = 0;
+  let viewportWidth = $state(typeof window === "undefined" ? 980 : window.innerWidth);
+  let viewportHeight = $state(typeof window === "undefined" ? 620 : window.innerHeight);
 
   const selected = $derived(openContext.selectionId > 0 ? openContext.selectedSegment : (isTauri() ? undefined : fixtureSession.segments[3]));
   const latestAssistant = $derived(messages.findLast((message) => message.card?.selectedSegmentId === selected?.id));
@@ -94,6 +100,7 @@
   const nonoMood = $derived<NonoMood>(
     nonoGesture ?? (boardPhase === "thinking" ? "think" : boardPhase === "writing" ? "neutral" : "idle"),
   );
+  const stageLayout = $derived(calculateLessonStageLayout(viewportWidth, viewportHeight, followupOpen));
 
   $effect(() => {
     if (boardPhase !== "idle") nonoGesture = undefined;
@@ -137,6 +144,14 @@
 
   function applyOpenContext(context: LessonOpenContext) {
     suppressPlacementEvents();
+    if (context.sessionId && context.sessionId !== threadSessionId) {
+      threads = {};
+      threadOrder = [];
+      threadSessionId = context.sessionId;
+      activeThreadKey = undefined;
+      activeSelectionId = 0;
+      messages = [];
+    }
     openContext = context;
     mode = "compose";
     followupOpen = false;
@@ -147,10 +162,21 @@
   $effect(() => {
     const nextSelectionId = openContext.selectionId;
     if (nextSelectionId === activeSelectionId) return;
-    if (activeThreadKey) threads[activeThreadKey] = messages;
+    if (activeThreadKey) {
+      const stored = rememberLessonThread({ threads, order: threadOrder }, activeThreadKey, messages);
+      threads = stored.threads;
+      threadOrder = stored.order;
+    }
     activeSelectionId = nextSelectionId;
     activeThreadKey = nextSelectionId > 0 ? lessonThreadKey(openContext) : undefined;
-    messages = activeThreadKey ? [...(threads[activeThreadKey] ?? [])] : [];
+    if (activeThreadKey) {
+      const recalled = recallLessonThread({ threads, order: threadOrder }, activeThreadKey);
+      threads = recalled.store.threads;
+      threadOrder = recalled.store.order;
+      messages = recalled.messages;
+    } else {
+      messages = [];
+    }
     error = "";
     loading = false;
     boardPhase = "idle";
@@ -179,7 +205,7 @@
     const requestId = ++requestGeneration;
     const eraseExistingBoard = Boolean(currentMoment);
     const userMessage: LessonMessage = { id: crypto.randomUUID(), role: "user", text: question.trim() };
-    messages = [...messages, userMessage];
+    messages = capLessonMessages([...messages, userMessage]);
     loading = true;
     error = "";
     followupOpen = false;
@@ -201,7 +227,7 @@
         : Promise.resolve();
       const [card] = await Promise.all([request, eraseTransition]);
       if (requestId !== requestGeneration || openContext.selectionId !== requestSelectionId) return;
-      messages = [...messages, { id: crypto.randomUUID(), role: "assistant", text: card.moments[0].speechBubble, card }];
+      messages = capLessonMessages([...messages, { id: crypto.randomUUID(), role: "assistant", text: card.moments[0].speechBubble, card }]);
       mode = "lesson";
       await resizeLessonWindow("lesson");
       boardPhase = "writing";
@@ -243,7 +269,7 @@
     await sleep(440);
     skippedCardKey = latestCardKey;
     boardPhase = "idle";
-    nonoGesture = "hand_over_mouth";
+    nonoGesture = "heart_touch";
   }
 
   async function closeLesson() {
@@ -455,6 +481,11 @@
   }
 </script>
 
+<svelte:window onresize={() => {
+  viewportWidth = window.innerWidth;
+  viewportHeight = window.innerHeight;
+}} />
+
 {#if selected && mode !== "lesson"}
   <div class="composer-shell">
     <LessonQuestionComposer
@@ -471,7 +502,11 @@
   </div>
 {:else}
 <div class="lesson-shell">
-  <section class="stage">
+  <section
+    class="stage"
+    class:compact={stageLayout.compact}
+    style={`--stage-top:${stageLayout.top}px;--stage-right:${stageLayout.right}px;--stage-bottom:${stageLayout.bottom}px;--stage-left:${stageLayout.left}px;--board-width:${stageLayout.boardWidth}px;--board-height:${stageLayout.boardHeight}px;--controls-width:${stageLayout.controlsWidth}px`}
+  >
       <button class="floating-close" aria-label="Close Nono lesson" onclick={closeLesson}>×</button>
       <NonoScene presentation={tailPresentation} mood={nonoMood} onRigStatus={(available) => tailRigAvailable = available} onTailTip={handleTailTip} />
       <svg class="chalk-filter" width="0" height="0" aria-hidden="true">
@@ -571,18 +606,18 @@
 <style>
   .composer-shell{width:100vw;height:100vh;box-sizing:border-box;background:transparent}
   .lesson-shell{height:100vh;display:grid;grid-template-rows:minmax(0,1fr);align-content:start;color:#f7f5fb;background:transparent;overflow:hidden}
-  .stage{position:relative;min-height:0;overflow:visible;padding:102px 20px 6px 148px;background:transparent}
+  .stage{position:relative;min-height:0;overflow:visible;padding:var(--stage-top) var(--stage-right) var(--stage-bottom) var(--stage-left);background:transparent;box-sizing:border-box}
   .floating-close{position:absolute;z-index:30;right:19px;top:76px;width:28px;height:28px;border:1px solid #fff7;background:#142019d9;color:#f4f0df;border-radius:50%;font-size:18px;line-height:1;box-shadow:0 5px 16px #0007}.floating-close:hover{background:#9a315c;color:white}
   .chalk-filter{position:absolute;pointer-events:none}
   .bubble{position:absolute;z-index:9;left:186px;right:52px;top:18px;min-height:72px;padding:15px 18px;background:#fff;color:#24232a;border:2px solid #4f3b46;border-radius:20px 20px 20px 5px;font-size:11px;line-height:1.55;box-shadow:6px 7px 0 #291e2355;transition:color .2s,transform .2s}
   .bubble.thinking{color:#78576b;transform:translateY(2px)}
   .drag-handle{position:absolute;z-index:22;border:0;background:transparent;opacity:0;transition:opacity .15s}.drag-handle:hover{opacity:1}.drag-handle::after{content:"MOVE";display:block;padding:3px 7px;border:1px solid #f4f0df66;border-radius:8px;background:#173c2bcc;color:#f4f0df;font:700 6px/1 "JetBrains Mono",monospace;letter-spacing:.14em}.bubble-drag{left:12px;right:12px;top:-8px;height:15px}.bubble-drag::after{width:max-content;margin:auto}.board-drag{left:24%;right:19%;top:5.2%;height:9%}.board-drag::after{width:max-content;margin:auto}
-  .lesson-stack{position:relative;z-index:2;display:grid;align-content:center;gap:5px;min-height:0}
-  .board-prop{position:relative;width:100%;aspect-ratio:16/9;margin:auto;filter:drop-shadow(0 14px 12px #20160f77)}
+  .lesson-stack{position:relative;z-index:2;display:grid;grid-template-rows:var(--board-height) auto;justify-items:center;align-content:start;gap:5px;min-height:0}
+  .board-prop{position:relative;width:var(--board-width);height:var(--board-height);margin:0;filter:drop-shadow(0 14px 12px #20160f77)}
   .board-art{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none;user-select:none}
   .board{position:absolute;inset:13.2% 12.8% 15.8%;padding:8px 10px;display:grid;grid-template-rows:auto auto minmax(0,1fr);color:#f4f0df;font-family:"Klee One","Hiragino Maru Gothic ProN","Noto Sans",cursive;font-weight:600;overflow:hidden;text-shadow:0 1px 1px #00150b88}
   .board.thinking::before{content:"";position:absolute;inset:0;z-index:-1;background:radial-gradient(circle at 50% 45%,#7ab09322,transparent 58%)}
-  .board-prop.image-failed{min-height:330px;aspect-ratio:auto;filter:none}
+  .board-prop.image-failed{min-height:0;filter:none}
   .board-prop.image-failed .board{inset:0;padding:20px 22px;background:#173c2b;border:9px solid #795438;border-radius:5px;box-shadow:inset 0 0 40px #051b11aa,0 18px 40px #0008}
   .board-top{display:flex;justify-content:space-between;align-items:center;position:relative;padding-bottom:7px}.board-top::after{content:"";position:absolute;left:0;right:0;bottom:1px;height:1px;background:linear-gradient(90deg,#f4f0df80,#f4f0df35 62%,transparent);transform:rotate(-.2deg);box-shadow:0 1px #f4f0df18}
   .board-top>span{font-size:clamp(12px,1.5vw,17px)}
@@ -607,7 +642,7 @@
   .ambiguity>b{color:#f39bc4;font-size:13px;transform:rotate(-8deg);text-shadow:0 0 4px #f39bc455}
   .board-empty{display:grid;place-content:center;min-height:0;text-align:center;color:#b8b099;font-size:11px}
   .board-empty.waiting{grid-template-columns:repeat(3,7px);gap:6px}.waiting span{width:7px;height:7px;background:#eee6d2;border-radius:50%;animation:think 1s ease-in-out infinite}.waiting span:nth-child(2){animation-delay:.15s}.waiting span:nth-child(3){animation-delay:.3s}.waiting p{grid-column:1/-1;margin:8px 0 0}
-  .deck-controls{position:relative;z-index:10;display:flex;align-items:center;justify-content:flex-end;gap:6px;min-height:36px;margin:0 10%;padding:4px 5px 4px 10px;border:1px solid #c9bdac77;border-radius:12px;background:#f7f1e9e8;color:#4b3d43;box-shadow:3px 5px 0 #17100d55;font-family:Inter,sans-serif}.progress-wrap{display:flex;align-items:center;gap:8px;margin-right:auto}.progress-wrap small{font-size:7px;color:#75646b;white-space:nowrap}
+  .deck-controls{position:relative;z-index:10;display:flex;align-items:center;justify-content:flex-end;gap:6px;width:var(--controls-width);min-height:36px;margin:0;padding:4px 5px 4px 10px;box-sizing:border-box;border:1px solid #c9bdac77;border-radius:12px;background:#f7f1e9e8;color:#4b3d43;box-shadow:3px 5px 0 #17100d55;font-family:Inter,sans-serif}.progress-wrap{display:flex;align-items:center;gap:8px;margin-right:auto}.progress-wrap small{font-size:7px;color:#75646b;white-space:nowrap}
   .deck-controls button{border:1px solid #8d777f55;border-radius:8px;padding:7px 10px;font-size:7px;cursor:pointer}.deck-controls button:disabled{opacity:.45}.deck-controls .skip{background:transparent;color:#75646b}.deck-controls .next{max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#244d3c;color:#fff8e7;border-color:#244d3c;font-weight:700}.deck-controls .ask-toggle{background:#28212a;color:#fff;border-color:#28212a}.deck-controls em{font-style:normal;font-size:7px;letter-spacing:.13em;color:#2e776b}
   .progress{display:flex;gap:4px}.progress span{width:18px;height:4px;background:#a8929c55;border-radius:2px}.progress span.active{background:#e3a924}.progress span.complete{background:#43a597}
   .followup-composer{flex:1;min-width:260px;height:44px;z-index:40}
@@ -616,5 +651,9 @@
   @keyframes eraser-sweep{0%{left:102%;transform:rotate(-7deg)}45%{transform:rotate(6deg)}100%{left:-54px;transform:rotate(-4deg)}}
   @keyframes dust-sweep{0%{opacity:0;transform:translateX(70%)}35%{opacity:1}100%{opacity:0;transform:translateX(-70%)}}
   @keyframes think{0%,100%{opacity:.25;transform:translateY(0)}50%{opacity:1;transform:translateY(-4px)}}
-  @media(max-width:800px){.stage{padding-left:108px}.bubble{left:126px}.deck-controls{margin-inline:4%}.deck-controls .next{max-width:150px}.progress-wrap small{display:none}}
+  .stage.compact .floating-close{right:8px;top:8px;width:24px;height:24px;font-size:15px}
+  .stage.compact .bubble{left:92px;right:40px;top:4px;min-height:38px;max-height:42px;padding:6px 10px;overflow:hidden;border-radius:14px 14px 14px 4px;font-size:9px;line-height:1.3;box-shadow:4px 4px 0 #291e2344}
+  .stage.compact .deck-controls .next{max-width:150px}
+  .stage.compact .progress-wrap small{display:none}
+  @media(max-width:800px) and (min-height:520px){.bubble{left:126px}.deck-controls .next{max-width:150px}.progress-wrap small{display:none}}
 </style>
