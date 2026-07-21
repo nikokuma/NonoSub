@@ -67,7 +67,10 @@ for (const animation of document.animations ?? []) {
   const keptSamplers = [];
   const samplerRemap = new Map();
   for (const channel of animation.channels ?? []) {
-    if (forbidden.has(channel.target?.node)) {
+    // Morph weights must not be baked at all. Always preserve any accidental
+    // channel here so the audit catches the export regression instead of this
+    // cleanup pass hiding it.
+    if (channel.target?.path !== "weights" && forbidden.has(channel.target?.node)) {
       removed += 1;
       continue;
     }

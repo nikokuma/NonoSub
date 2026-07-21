@@ -14,7 +14,8 @@ export const NONO_MOODS = [
   "surprised",
 ] as const;
 export type NonoMood = (typeof NONO_MOODS)[number];
-export type NonoMaterialRole = "skin" | "face" | "hair" | "tail" | "cloth" | "eye" | "metal" | "accent" | "unknown";
+export type NonoExpression = "squint";
+export type NonoMaterialRole = "skin" | "face" | "hair" | "tail" | "cloth" | "eye" | "mouth" | "squint" | "metal" | "accent" | "unknown";
 
 const ROLE_COLORS: Record<Exclude<NonoMaterialRole, "unknown">, number> = {
   skin: 0xf1c7b2,
@@ -23,6 +24,8 @@ const ROLE_COLORS: Record<Exclude<NonoMaterialRole, "unknown">, number> = {
   tail: 0x122348,
   cloth: 0xffffff,
   eye: 0xffffff,
+  mouth: 0x6b263f,
+  squint: 0x000000,
   metal: 0xbfc6d4,
   accent: 0xf18fbc,
 };
@@ -31,15 +34,33 @@ const gradients = new Map<string, THREE.DataTexture>();
 
 export function inferNonoMaterialRole(materialName: string, objectName = ""): NonoMaterialRole {
   const name = `${materialName} ${objectName}`.toLowerCase();
+  if (/squint/.test(name)) return "squint";
+  if (/mouth|lips?/.test(name)) return "mouth";
   if (/eye|iris|pupil|moon|shine/.test(name)) return "eye";
   if (/face/.test(name)) return "face";
   if (/body|skin/.test(name)) return "skin";
   if (/hair/.test(name)) return "hair";
   if (/tail(?!oring)|cable/.test(name)) return "tail";
   if (/metal|pin_rim|button|ring|zip/.test(name)) return "metal";
-  if (/pink|bow|enamel|spark|accent/.test(name)) return "accent";
   if (/blazer|shirt|skirt|sock|shoe|cloth|jacket|seam|thread|short/.test(name)) return "cloth";
+  if (/pink|bow|enamel|spark|accent/.test(name)) return "accent";
   return "unknown";
+}
+
+export function nonoMoodFromCue(gesture?: string): NonoMood | undefined {
+  return (NONO_MOODS as readonly string[]).includes(gesture ?? "") ? gesture as NonoMood : undefined;
+}
+
+export function nextNonoBlinkAt(nowMs: number, random = Math.random): number {
+  return nowMs + 8_000 + THREE.MathUtils.clamp(random(), 0, 1) * 4_000;
+}
+
+export function nonoBlinkInfluence(elapsedMs: number): number {
+  if (elapsedMs <= 0) return 0;
+  if (elapsedMs < 70) return elapsedMs / 70;
+  if (elapsedMs < 100) return 1;
+  if (elapsedMs < 190) return 1 - (elapsedMs - 100) / 90;
+  return 0;
 }
 
 export function shaderVariantFromLocation(search: string, development = import.meta.env.DEV): NonoShaderVariant {
@@ -59,6 +80,11 @@ export function nonoMoodFromLocation(search: string, development = import.meta.e
   if (!development) return undefined;
   const requested = new URLSearchParams(search).get("nonoMood");
   return (NONO_MOODS as readonly string[]).includes(requested ?? "") ? requested as NonoMood : undefined;
+}
+
+export function nonoExpressionFromLocation(search: string, development = import.meta.env.DEV): NonoExpression | undefined {
+  if (!development) return undefined;
+  return new URLSearchParams(search).get("nonoExpression") === "squint" ? "squint" : undefined;
 }
 
 export function applyNonoMaterials(model: THREE.Object3D, variant: NonoShaderVariant): THREE.Material[] {
@@ -89,7 +115,17 @@ export function createNonoToonMaterial(
   const paletteColor = new THREE.Color(ROLE_COLORS[role]);
   const sourceColor = "color" in standard && standard.color instanceof THREE.Color ? standard.color : undefined;
   const useSourceColor = sourceColor && sourceColor.getHex() !== 0x000000 && sourceColor.getHex() !== 0xffffff;
-  const color = role === "face" || role === "eye" ? new THREE.Color(0xffffff) : useSourceColor ? sourceColor!.clone() : paletteColor;
+  const meaningfulEyeColor = sourceColor && sourceColor.getHex() !== 0xffffff ? sourceColor : undefined;
+  const color = role === "squint"
+    ? new THREE.Color(0x000000)
+    : role === "mouth"
+      ? sourceColor?.clone() ?? paletteColor
+      : role === "face"
+        ? new THREE.Color(0xffffff)
+        : role === "eye"
+          ? meaningfulEyeColor?.clone() ?? (standard.map ? new THREE.Color(0xffffff) : sourceColor?.clone() ?? paletteColor)
+          : useSourceColor ? sourceColor!.clone() : paletteColor;
+  const glossyMouth = role === "mouth" && /lips?/.test(source.name.toLowerCase());
   const material = new THREE.MeshToonMaterial({
     name: `${source.name || role}__${variant}`,
     color,
@@ -108,8 +144,8 @@ export function createNonoToonMaterial(
   material.emissive.copy(role === "eye" ? new THREE.Color(0x314870) : role === "accent" ? new THREE.Color(0x2a1020) : new THREE.Color(0x000000));
   material.emissiveIntensity = role === "eye" ? 0.32 : role === "accent" ? 0.12 : 0;
   material.emissiveMap = standard.emissiveMap ?? null;
-  installNonoShaderPatch(material, role, variant);
-  material.customProgramCacheKey = () => `nono-${variant}-${role}-v1`;
+  installNonoShaderPatch(material, role, variant, glossyMouth);
+  material.customProgramCacheKey = () => `nono-${variant}-${role}-${glossyMouth ? "glossy" : "matte"}-v2`;
   return material;
 }
 
@@ -144,10 +180,11 @@ function installNonoShaderPatch(
   material: THREE.MeshToonMaterial,
   role: Exclude<NonoMaterialRole, "unknown">,
   variant: Exclude<NonoShaderVariant, "portable">,
+  glossyMouth: boolean,
 ): void {
-  const rimStrength = role === "hair" || role === "tail" ? 0.22 : role === "metal" || role === "eye" ? 0.18 : 0.09;
+  const rimStrength = role === "squint" ? 0 : role === "hair" || role === "tail" ? 0.22 : role === "metal" || role === "eye" ? 0.18 : 0.09;
   const hairStrength = variant === "nontoon" && role === "hair" ? 0.3 : 0;
-  const specularStrength = variant === "nontoon" && (role === "metal" || role === "eye") ? 0.22 : 0;
+  const specularStrength = glossyMouth ? 0.12 : variant === "nontoon" && (role === "metal" || role === "eye") ? 0.22 : 0;
   material.onBeforeCompile = (shader) => {
     shader.uniforms.nonoRimColor = { value: new THREE.Color(role === "hair" ? 0xbef7ff : 0xffdff0) };
     shader.uniforms.nonoRimStrength = { value: rimStrength };

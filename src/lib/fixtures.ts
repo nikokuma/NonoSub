@@ -128,6 +128,7 @@ export const FIXTURE_LESSON: LessonCard = {
     {
       title: "The sentence leaves a blank",
       speechBubble: "The speaker stops before the awkward part, but the listener can still hear the refusal hiding in the silence. Sneaky, but polite.",
+      gesture: "point_self",
       sourceFocus: { color: "white", tailCue: "none" },
       boardSections: [{
         heading: "What is spoken",
@@ -151,6 +152,7 @@ export const FIXTURE_LESSON: LessonCard = {
     {
       title: "Literal words, social meaning",
       speechBubble: "The dictionary gives you ‘a little,’ but the conversation gives you ‘no for today.’ Context wins this round.",
+      gesture: "point_user",
       sourceFocus: { color: "baby_blue", tailCue: "point" },
       boardSections: [],
       demonstration: {
@@ -166,6 +168,7 @@ export const FIXTURE_LESSON: LessonCard = {
     {
       title: "Why the softness matters",
       speechBubble: "Leaving the refusal unfinished protects the mood and gives the other person room to understand without being blunt.",
+      gesture: "heart_touch",
       sourceFocus: { color: "white", tailCue: "none" },
       boardSections: [{
         heading: "Politeness strategy",

@@ -201,6 +201,7 @@ export interface BoardDemo {
 export interface TeachingMoment {
   title: string;
   speechBubble: string;
+  gesture?: string;
   sourceFocus: SourceFocus;
   boardSections: BoardSection[];
   demonstration: BoardDemo;

@@ -29,6 +29,10 @@ OPTIONAL_ACTIONS = {
 TAIL_BONES = {f"spine.{index:03d}" for index in range(55, 79)}
 DYNAMIC_HAIR_ROOTS = {"spine.021", "spine.031", "spine.039", "spine.085", "spine.093"}
 BONE_PATH = re.compile(r'^pose\.bones\["([^"]+)"\]\.(.+)$')
+EXPECTED_SHAPE_KEYS = {
+    "Nono_Head": ["Basis", "Blink", "SmallSmile", "BigSmile"],
+    "Nono_BrowsNLashes": ["Basis", "Blink"],
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -115,6 +119,28 @@ def validate_actions(rig: bpy.types.Object) -> dict[str, bpy.types.Action]:
     return actions
 
 
+def validate_morph_export_scene(export: bpy.types.Collection) -> None:
+    export_names = {obj.name for obj in export.all_objects}
+    for object_name, expected_keys in EXPECTED_SHAPE_KEYS.items():
+        obj = bpy.data.objects.get(object_name)
+        if obj is None or object_name not in export_names or obj.type != "MESH":
+            raise RuntimeError(f"Missing export shape-key mesh {object_name}")
+        shape_keys = obj.data.shape_keys
+        actual_keys = [key.name for key in shape_keys.key_blocks] if shape_keys else []
+        if actual_keys != expected_keys:
+            raise RuntimeError(f"{object_name} shape keys are {actual_keys}; expected {expected_keys}")
+        nonzero = [(key.name, key.value) for key in shape_keys.key_blocks if abs(key.value) > 1e-6]
+        if nonzero:
+            raise RuntimeError(f"{object_name} has nonzero shape-key values: {nonzero}")
+        if shape_keys.animation_data is not None:
+            raise RuntimeError(f"{object_name} shape keys still have animation data")
+        non_armature = [(modifier.name, modifier.type) for modifier in obj.modifiers if modifier.type != "ARMATURE"]
+        if non_armature:
+            raise RuntimeError(f"{object_name} has non-ARMATURE modifiers: {non_armature}")
+    if "Nono_Squint" not in export_names:
+        raise RuntimeError("Missing Nono_Squint from NONO_EXPORT")
+
+
 def main() -> None:
     args = parse_args()
     output = args.output.expanduser().resolve()
@@ -123,6 +149,7 @@ def main() -> None:
     export = bpy.data.collections.get("NONO_EXPORT")
     if not rig or rig.type != "ARMATURE" or not export:
         raise RuntimeError("Open NonoSubProduction.blend with Nono_Rig and NONO_EXPORT before final export")
+    validate_morph_export_scene(export)
     actions = validate_actions(rig)
 
     # Remove non-release actions only from this background export process. The
@@ -147,6 +174,11 @@ def main() -> None:
         export_tangents=True,
         export_materials="EXPORT",
         export_skins=True,
+        export_morph=True,
+        export_morph_normal=True,
+        export_morph_tangent=False,
+        # Blink and smiles are driven at runtime, never baked into body clips.
+        export_morph_animation=False,
         export_all_influences=False,
         export_influence_nb=4,
         export_animations=True,

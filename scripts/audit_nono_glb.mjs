@@ -70,6 +70,36 @@ else {
   }
 }
 
+function checkMorphMesh(nodeName, expectedTargets) {
+  const node = nodes.find((candidate) => candidate.name === nodeName);
+  if (!node) {
+    errors.push(`Missing ${nodeName} node.`);
+    return;
+  }
+  const mesh = node.mesh === undefined ? undefined : meshes[node.mesh];
+  if (!mesh) {
+    errors.push(`${nodeName} has no mesh.`);
+    return;
+  }
+  const primitives = mesh.primitives ?? [];
+  if (primitives.length === 0 || primitives.some((primitive) => (primitive.targets ?? []).length === 0)) {
+    errors.push(`${nodeName} mesh primitives are missing morph targets.`);
+  }
+  const targetNames = mesh.extras?.targetNames ?? [];
+  for (const target of expectedTargets) {
+    if (!targetNames.includes(target)) errors.push(`${nodeName} is missing morph target ${target}.`);
+  }
+  for (const [owner, weights] of [[`${nodeName} node`, node.weights], [`${nodeName} mesh`, mesh.weights]]) {
+    if (weights !== undefined && weights.some((weight) => Math.abs(weight) > 1e-8)) {
+      errors.push(`${owner} has nonzero default morph weights: ${weights.join(", ")}.`);
+    }
+  }
+}
+
+checkMorphMesh("Nono_Head", ["Blink", "SmallSmile", "BigSmile"]);
+checkMorphMesh("Nono_BrowsNLashes", ["Blink"]);
+if (!nodeNames.has("Nono_Squint")) errors.push("Missing Nono_Squint node.");
+
 const REQUIRED_CLIPS = ["idle", "neutral", "think", "thumbs_up", "point_user", "point_self", "cheer", "heart_touch", "surprised"];
 const animationNames = new Set(animations.map((animation) => animation.name?.toLowerCase()).filter(Boolean));
 for (const clip of REQUIRED_CLIPS) {
@@ -110,6 +140,10 @@ for (const root of dynamicHairRoots) {
   if (index !== undefined) for (const descendant of descendants(index)) proceduralNodes.add(descendant);
 }
 for (const animation of animations) {
+  const morphChannels = (animation.channels ?? []).filter((channel) => channel.target?.path === "weights");
+  if (morphChannels.length > 0) {
+    errors.push(`${animation.name} contains ${morphChannels.length} baked morph-weight channel(s).`);
+  }
   const forbidden = (animation.channels ?? []).map((channel) => channel.target?.node).filter((index) => proceduralNodes.has(index));
   if (forbidden.length > 0) {
     const names = [...new Set(forbidden.map((index) => nodes[index]?.name ?? `node ${index}`))];
@@ -214,6 +248,20 @@ for (const required of [
   if (!materialNames.some((name) => name.startsWith(required))) errors.push(`Missing required material role ${required}.`);
 }
 
+// Nono_Eye_Shine bakes to pure white, which glTF omits as the default
+// baseColorFactor — absence there is legitimate, not a colorless export.
+for (const name of ["Nono_Eye_Shine", "Nono_Eye_Moon"]) {
+  const material = materials.find((candidate) => candidate.name === name);
+  if (!material) {
+    errors.push(`Missing required material ${name}.`);
+    continue;
+  }
+  if (name === "Nono_Eye_Shine") continue;
+  const pbr = material.pbrMetallicRoughness;
+  if (!pbr || (pbr.baseColorFactor === undefined && pbr.baseColorTexture === undefined)) {
+    errors.push(`${name} has no exported base color factor or texture.`);
+  }
+}
 for (const node of nodes.filter((candidate) => /^Nono_Hair_(Bangs|Fwip|Long|Sweep)$/u.test(candidate.name ?? ""))) {
   const mesh = meshes[node.mesh];
   for (const primitive of mesh?.primitives ?? []) {

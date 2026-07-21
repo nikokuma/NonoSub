@@ -57,9 +57,7 @@ FINAL_ACTIONS = (
     "Heart_Touch",
     "Surprised",
 )
-# Layered eye shines genuinely need alpha blending; everything else exports
-# opaque so three.js never mis-sorts laces/tongue/body behind other meshes.
-KEEP_ALPHA_MATERIALS = {"EyeShine", "EyeSparklePink", "Material.002"}
+SHAPE_KEY_MESHES = ("Nono_Head.001", "Nono_BrowsNLashes.001")
 
 # Canonical object names expected by the GLB audit and the app runtime.
 SEMANTIC_NAMES = {
@@ -266,46 +264,193 @@ def bind_unweighted_vertices(obj: bpy.types.Object, rig: bpy.types.Object) -> in
     return len(unweighted)
 
 
-def bake_toon_flat_colors(materials: set[bpy.types.Material]) -> None:
-    """Bake each toon node-chain's flat color into the Principled Base Color.
+def apply_modifiers_preserving_shape_keys(obj: bpy.types.Object) -> None:
+    """Bake non-armature modifiers into every shape while keeping one topology."""
+    shape_keys = obj.data.shape_keys
+    if shape_keys is None:
+        raise RuntimeError(f"{obj.name} is missing its required shape keys")
 
-    The checkpoint materials feed Base Color through ShaderToRGB toon ramps the
-    glTF exporter cannot evaluate, so they export as white. The authored color
-    lives on the "A TOON MIX - CONNECTED" MIX node (Color2). Materials with a
-    real image texture are left alone — the exporter resolves those already.
+    shape_keys.animation_data_clear()
+    for key in shape_keys.key_blocks:
+        key.value = 0.0
+    obj.show_only_shape_key = False
+
+    key_names = [key.name for key in shape_keys.key_blocks]
+    captures: list[bpy.types.Mesh] = []
+    duplicates: list[tuple[bpy.types.Object, bpy.types.Mesh]] = []
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    try:
+        for index, key_name in enumerate(key_names):
+            duplicate = obj.copy()
+            duplicate.data = obj.data.copy()
+            duplicate.name = f"{obj.name}__{key_name}_modifier_capture"
+            bpy.context.scene.collection.objects.link(duplicate)
+            duplicates.append((duplicate, duplicate.data))
+            for modifier in list(duplicate.modifiers):
+                if modifier.type == "ARMATURE":
+                    duplicate.modifiers.remove(modifier)
+            duplicate.show_only_shape_key = True
+            duplicate.active_shape_key_index = index
+            bpy.context.view_layer.update()
+            capture = bpy.data.meshes.new_from_object(
+                duplicate.evaluated_get(depsgraph),
+                preserve_all_data_layers=True,
+                depsgraph=depsgraph,
+            )
+            capture.name = f"{obj.data.name}__{key_name}_applied"
+            captures.append(capture)
+
+        topology = {(len(mesh.vertices), len(mesh.polygons)) for mesh in captures}
+        if len(topology) != 1:
+            details = ", ".join(
+                f"{name}=({len(mesh.vertices)} vertices, {len(mesh.polygons)} polygons)"
+                for name, mesh in zip(key_names, captures)
+            )
+            raise RuntimeError(f"Shape-key modifier topology diverged for {obj.name}: {details}")
+
+        old_mesh = obj.data
+        obj.data = captures[0]
+        obj.data.name = old_mesh.name
+        for modifier in list(obj.modifiers):
+            if modifier.type != "ARMATURE":
+                obj.modifiers.remove(modifier)
+
+        obj.shape_key_add(name=key_names[0], from_mix=False)
+        for key_name, capture in zip(key_names[1:], captures[1:]):
+            key = obj.shape_key_add(name=key_name, from_mix=False)
+            coordinates = [component for vertex in capture.vertices for component in vertex.co]
+            key.data.foreach_set("co", coordinates)
+            key.value = 0.0
+        obj.data.shape_keys.use_relative = True
+        obj.show_only_shape_key = False
+        obj.active_shape_key_index = 0
+        for key in obj.data.shape_keys.key_blocks:
+            key.value = 0.0
+        print(
+            f"Applied non-armature modifiers across {obj.name} shape keys: "
+            f"{key_names} ({len(obj.data.vertices)} vertices, {len(obj.data.polygons)} polygons)"
+        )
+
+        if old_mesh.users == 0:
+            bpy.data.meshes.remove(old_mesh)
+    finally:
+        for duplicate, duplicate_mesh in duplicates:
+            bpy.data.objects.remove(duplicate, do_unlink=True)
+            if duplicate_mesh.users == 0:
+                bpy.data.meshes.remove(duplicate_mesh)
+        for capture in captures:
+            if capture.users == 0:
+                bpy.data.meshes.remove(capture)
+
+
+def _socket_default(socket):
+    value = getattr(socket, "default_value", None)
+    if value is None:
+        return None
+    try:
+        return list(value)
+    except TypeError:
+        return float(value)
+
+
+def _as_color(value):
+    if isinstance(value, list) and len(value) >= 3:
+        return value[:4] if len(value) >= 4 else [*value[:3], 1.0]
+    return None
+
+
+def _resolve_color_source(socket, seen: set[tuple[int, str]] | None = None):
+    """Resolve a flat color or image source through RGB/ramp/Mix nodes."""
+    if not socket.is_linked:
+        color = _as_color(_socket_default(socket))
+        return ("COLOR", color) if color is not None else None
+    seen = seen or set()
+    link = socket.links[0]
+    node = link.from_node
+    marker = (node.as_pointer(), link.from_socket.identifier)
+    if marker in seen:
+        return None
+    seen.add(marker)
+
+    if node.type == "TEX_IMAGE":
+        color_output = node.outputs.get("Color")
+        return ("TEXTURE", color_output) if node.image is not None and color_output is not None else None
+    if node.type == "RGB":
+        color = _as_color(_socket_default(link.from_socket))
+        return ("COLOR", color) if color is not None else None
+    if node.type == "VALTORGB":
+        elements = node.color_ramp.elements
+        color = list(elements[-1].color) if elements else None
+        return ("COLOR", color) if color is not None else None
+    if node.type not in {"MIX_RGB", "MIX"}:
+        return None
+
+    # The authored lit/image value is the second branch. MIX nodes can expose
+    # duplicate A/B sockets for different data types, so consider every socket
+    # with the preferred name until a color-capable source resolves.
+    preferred_names = ("Color2", "B", "Color1", "A")
+    candidates = []
+    for name in preferred_names:
+        candidates.extend(candidate for candidate in node.inputs if candidate.name == name)
+    for candidate in candidates:
+        source = _resolve_color_source(candidate, set(seen))
+        if source is not None:
+            return source
+    return None
+
+
+def bake_toon_flat_colors(materials: set[bpy.types.Material]) -> None:
+    """Expose each toon chain as a glTF-readable flat color or image.
+
+    The glTF exporter cannot evaluate the authored toon ramps and Mix nodes.
+    Constant chains are baked into Base Color; image sources hidden behind a
+    Mix are rewired directly so the authored texture remains intact.
     """
     for material in materials:
         if material is None or material.node_tree is None:
             continue
         tree = material.node_tree
-        if any(node.type == "TEX_IMAGE" and node.image for node in tree.nodes if node.name != "TOON MASK SHADER TO RGB"):
-            continue
         principled = next((node for node in tree.nodes if node.type == "BSDF_PRINCIPLED"), None)
         if principled is None or "Base Color" not in principled.inputs:
             continue
         base = principled.inputs["Base Color"]
         if not base.is_linked:
             continue
-        color = None
-        mix = tree.nodes.get("A TOON MIX - CONNECTED")
-        if mix is not None and "Color2" in mix.inputs and not mix.inputs["Color2"].is_linked:
-            color = list(mix.inputs["Color2"].default_value)
-        if color is None:
+        if base.links[0].from_node.type == "TEX_IMAGE":
+            continue
+
+        source = _resolve_color_source(base)
+        if source is None:
+            mix = tree.nodes.get("A TOON MIX - CONNECTED")
+            if mix is not None:
+                for input_name in ("Color2", "Color1"):
+                    mix_input = mix.inputs.get(input_name)
+                    if mix_input is not None:
+                        source = _resolve_color_source(mix_input)
+                    if source is not None:
+                        break
+        if source is None:
             shadow = tree.nodes.get("A HSV SHADOW")
-            if shadow is not None and "Color" in shadow.inputs and not shadow.inputs["Color"].is_linked:
-                color = list(shadow.inputs["Color"].default_value)
-        if color is None:
+            if shadow is not None and "Color" in shadow.inputs:
+                source = _resolve_color_source(shadow.inputs["Color"])
+        if source is None:
             print(f"Could not resolve a flat color for {material.name}; it will export white")
             continue
+
         for link in list(base.links):
             tree.links.remove(link)
-        base.default_value = color
-        print(f"Baked flat color {tuple(round(c, 3) for c in color)} into {material.name}")
+        source_type, source_value = source
+        if source_type == "TEXTURE":
+            tree.links.new(source_value, base)
+            print(f"Rewired image {source_value.node.image.name} into Base Color for {material.name}")
+        else:
+            base.default_value = source_value
+            print(f"Baked flat color {tuple(round(c, 3) for c in source_value)} into {material.name}")
 
 
 def force_opaque_export(materials: set[bpy.types.Material]) -> None:
     for material in materials:
-        if material is None or material.name in KEEP_ALPHA_MATERIALS:
+        if material is None:
             continue
         if not material.use_nodes or material.node_tree is None:
             continue
@@ -412,9 +557,36 @@ def validate_prepared_scene(export: bpy.types.Collection, rig: bpy.types.Object)
     if armatures != [rig]:
         raise RuntimeError(f"NONO_EXPORT must contain one canonical armature, found {[obj.name for obj in armatures]}")
     names = {obj.name for obj in export_objects}
-    for required in ("Nono_Rig", "Nono_Body", "Nono_Tails", "Nono_Tail_Plugs", "Nono_Outfit_ChestDetails"):
+    for required in (
+        "Nono_Rig",
+        "Nono_Body",
+        "Nono_Tails",
+        "Nono_Tail_Plugs",
+        "Nono_Outfit_ChestDetails",
+        "Nono_Squint",
+    ):
         if required not in names:
             raise RuntimeError(f"Prepared scene is missing {required}")
+    expected_shapes = {
+        "Nono_Head": ["Basis", "Blink", "SmallSmile", "BigSmile"],
+        "Nono_BrowsNLashes": ["Basis", "Blink"],
+    }
+    for object_name, expected_keys in expected_shapes.items():
+        obj = bpy.data.objects.get(object_name)
+        if obj is None or obj.name not in names or obj.type != "MESH":
+            raise RuntimeError(f"Prepared scene is missing shape-key mesh {object_name}")
+        shape_keys = obj.data.shape_keys
+        actual_keys = [key.name for key in shape_keys.key_blocks] if shape_keys else []
+        if actual_keys != expected_keys:
+            raise RuntimeError(f"{object_name} shape keys are {actual_keys}; expected {expected_keys}")
+        nonzero = [(key.name, key.value) for key in shape_keys.key_blocks if abs(key.value) > 1e-6]
+        if nonzero:
+            raise RuntimeError(f"{object_name} has nonzero shape-key values: {nonzero}")
+        if shape_keys.animation_data is not None:
+            raise RuntimeError(f"{object_name} shape keys still have animation data")
+        modifier_types = [modifier.type for modifier in obj.modifiers]
+        if modifier_types != ["ARMATURE"]:
+            raise RuntimeError(f"{object_name} must retain only ARMATURE, found {modifier_types}")
     for bone in (*TAIL_BONES, *DYNAMIC_HAIR_ROOTS):
         if bone not in rig.data.bones:
             raise RuntimeError(f"Canonical rig is missing required bone {bone}")
@@ -434,6 +606,9 @@ def main() -> None:
     rig = bpy.data.objects.get(CANONICAL_RIG_SOURCE)
     if not rig or rig.type != "ARMATURE":
         raise RuntimeError("Expected a Nono_Rig2 armature in the source file")
+    # A checkpoint saved while displaying Rest Position would export every clip
+    # as the bind pose (armature evaluation disabled). Force pose evaluation.
+    rig.data.pose_position = "POSE"
 
     export_objects = classify_export_objects(rig)
     export = collection(EXPORT_COLLECTION)
@@ -453,6 +628,8 @@ def main() -> None:
     for obj in list(export.all_objects):
         if obj.type != "MESH":
             continue
+        if obj.name in SHAPE_KEY_MESHES:
+            apply_modifiers_preserving_shape_keys(obj)
         bind_unweighted_vertices(obj, rig)
         normalize_deform_weights(obj)
         materials.update(slot.material for slot in obj.material_slots if slot.material)

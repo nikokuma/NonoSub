@@ -5,7 +5,10 @@
   import { applyHairMotion, resolveHairMotionRig, type HairMotionRig } from "./hairMotion";
   import {
     applyNonoMaterials,
+    nextNonoBlinkAt,
     nonoAssetFromLocation,
+    nonoBlinkInfluence,
+    nonoExpressionFromLocation,
     nonoMoodFromLocation,
     shaderVariantFromLocation,
     type NonoMood,
@@ -51,6 +54,17 @@
   import type { CharacterViewport } from "./lessonLayout";
 
   type TailSide = "left" | "right";
+
+  type MorphMesh = THREE.Mesh & {
+    morphTargetDictionary?: Record<string, number>;
+    morphTargetInfluences?: number[];
+  };
+
+  interface FaceController {
+    setMood: (mood: NonoMood) => void;
+    setSquint: (active: boolean, nowMs?: number) => void;
+    update: (timestamp: number, deltaMs: number) => void;
+  }
 
   const ONE_SHOT_MOODS = new Set<NonoMood>([
     "thumbs_up",
@@ -153,6 +167,7 @@
     let tailCableBuffers: Record<TailSide, TailCableBuffers> | undefined;
     let tailDebugLines: Record<TailSide, THREE.Line> | undefined;
     let hairRig: HairMotionRig | undefined;
+    let faceController: FaceController | undefined;
     let assignedSequence = -1;
     const motionPreference = window.matchMedia("(prefers-reduced-motion: reduce)");
     let reducedMotion = motionPreference.matches;
@@ -161,6 +176,7 @@
     const loader = new GLTFLoader();
     const shaderVariant = shaderVariantFromLocation(window.location.search);
     const moodOverride = nonoMoodFromLocation(window.location.search);
+    const expressionOverride = nonoExpressionFromLocation(window.location.search);
     const tailDebugEnabled = import.meta.env.DEV && new URLSearchParams(window.location.search).get("tailDebug") === "1";
     if (import.meta.env.DEV) container.dataset.nonoShader = shaderVariant;
 
@@ -172,6 +188,8 @@
       model = gltf.scene;
       applyNonoMaterials(model, shaderVariant);
       modelPlacement.add(model);
+      faceController = createFaceController(model, expressionOverride === "squint");
+      model.userData.faceController = faceController;
 
       if (gltf.animations.length > 0) mixer = new THREE.AnimationMixer(model);
       const resolveClip = (requested: NonoMood): { clip: THREE.AnimationClip; mood: NonoMood } | undefined => {
@@ -206,16 +224,22 @@
       mixer?.addEventListener("finished", (event) => {
         if (event.action !== activeAction) return;
         if (!activeMood || !ONE_SHOT_MOODS.has(activeMood)) return;
+        faceController?.setSquint(false);
         const resting = resolveClip("neutral");
         if (resting) playClip(resting.clip, false);
       });
       function updateAnimation(nextMood: NonoMood) {
-        if (!mixer || nextMood === activeMood) return;
+        if (nextMood === activeMood) return;
+        faceController?.setSquint(false);
         activeMood = nextMood;
+        faceController?.setMood(nextMood);
+        if (!mixer) return;
         const resolved = resolveClip(nextMood);
         if (!resolved) return;
         // A one-shot request that fell back to a resting clip must loop.
-        playClip(resolved.clip, ONE_SHOT_MOODS.has(nextMood) && resolved.mood === nextMood);
+        const oneShot = ONE_SHOT_MOODS.has(nextMood) && resolved.mood === nextMood;
+        playClip(resolved.clip, oneShot);
+        faceController?.setSquint(oneShot && (nextMood === "cheer" || nextMood === "surprised"));
       }
       updateAnimation(moodOverride ?? mood);
       mixer?.update(0);
@@ -300,6 +324,7 @@
         const nextViewportSignature = `${viewport.x}:${viewport.y}:${viewport.width}:${viewport.height}:${viewport.bottom}`;
         if (nextViewportSignature !== viewportSignature) positionModelInViewport();
         (model.userData.updateAnimation as ((nextMood: NonoMood) => void) | undefined)?.(moodOverride ?? mood);
+        faceController?.update(timestamp, delta * 1_000);
         model.rotation.y = reducedMotion ? 0 : Math.sin(timestamp * 0.00055) * 0.018;
         model.updateWorldMatrix(true, true);
         if (hairRig) applyHairMotion(hairRig, delta, timestamp, reducedMotion);
@@ -398,10 +423,102 @@
       tailDynamics = undefined;
       tailCableBuffers = undefined;
       hairRig = undefined;
+      faceController = undefined;
       renderer.dispose();
       renderer.domElement.remove();
     };
   });
+
+  function createFaceController(model: THREE.Object3D, forceSquint: boolean): FaceController {
+    const lashMesh = asMorphMesh(model.getObjectByName("Nono_BrowsNLashes"));
+    let headMesh = asMorphMesh(model.getObjectByName("Nono_Head"));
+    if (headMesh?.morphTargetDictionary?.Blink === undefined) {
+      model.traverse((object) => {
+        const candidate = asMorphMesh(object);
+        if (headMesh?.morphTargetDictionary?.Blink === undefined && candidate !== lashMesh && candidate?.morphTargetDictionary?.Blink !== undefined) {
+          headMesh = candidate;
+        }
+      });
+    }
+    const squintMesh = model.getObjectByName("Nono_Squint");
+    if (squintMesh) squintMesh.visible = false;
+
+    const headBlink = morphBinding(headMesh, "Blink");
+    const lashBlink = morphBinding(lashMesh, "Blink");
+    const smallSmile = morphBinding(headMesh, "SmallSmile");
+    const bigSmile = morphBinding(headMesh, "BigSmile");
+    let smallSmileTarget = 0;
+    let bigSmileTarget = 0;
+    let squintRequested = false;
+    let squintActive = false;
+    let blinkStartedAt: number | undefined;
+    let nextBlinkAt = nextNonoBlinkAt(performance.now());
+
+    const applySquint = (active: boolean, nowMs = performance.now()) => {
+      if (active === squintActive) return;
+      squintActive = active;
+      blinkStartedAt = undefined;
+      nextBlinkAt = nextNonoBlinkAt(nowMs);
+      setMorph(headBlink, active ? 1 : 0);
+      setMorph(lashBlink, active ? 1 : 0);
+      if (lashMesh) lashMesh.visible = !active;
+      if (squintMesh) squintMesh.visible = active;
+    };
+
+    const controller: FaceController = {
+      setMood(nextMood) {
+        smallSmileTarget = nextMood === "thumbs_up" ? 1 : 0;
+        bigSmileTarget = nextMood === "cheer" ? 1 : 0;
+      },
+      setSquint(active, nowMs) {
+        squintRequested = active;
+        applySquint(forceSquint || squintRequested, nowMs);
+      },
+      update(timestamp, deltaMs) {
+        applySquint(forceSquint || squintRequested, timestamp);
+        if (squintActive) {
+          setMorph(headBlink, 1);
+          setMorph(lashBlink, 1);
+        } else {
+          if (blinkStartedAt === undefined && timestamp >= nextBlinkAt) blinkStartedAt = timestamp;
+          if (blinkStartedAt !== undefined) {
+            const elapsed = timestamp - blinkStartedAt;
+            const influence = nonoBlinkInfluence(elapsed);
+            setMorph(headBlink, influence);
+            setMorph(lashBlink, influence);
+            if (elapsed >= 190) {
+              blinkStartedAt = undefined;
+              nextBlinkAt = nextNonoBlinkAt(timestamp);
+            }
+          }
+        }
+        const smileStep = Math.min(Math.max(deltaMs, 0) / 120, 1);
+        rampMorph(smallSmile, smallSmileTarget, smileStep);
+        rampMorph(bigSmile, bigSmileTarget, smileStep);
+      },
+    };
+    controller.setSquint(false);
+    return controller;
+  }
+
+  function asMorphMesh(object?: THREE.Object3D): MorphMesh | undefined {
+    return object && "isMesh" in object && object.isMesh ? object as MorphMesh : undefined;
+  }
+
+  function morphBinding(mesh: MorphMesh | undefined, name: string): { mesh: MorphMesh; index: number } | undefined {
+    const index = mesh?.morphTargetDictionary?.[name];
+    return mesh?.morphTargetInfluences && index !== undefined ? { mesh, index } : undefined;
+  }
+
+  function setMorph(binding: { mesh: MorphMesh; index: number } | undefined, value: number): void {
+    if (binding?.mesh.morphTargetInfluences) binding.mesh.morphTargetInfluences[binding.index] = THREE.MathUtils.clamp(value, 0, 1);
+  }
+
+  function rampMorph(binding: { mesh: MorphMesh; index: number } | undefined, target: number, step: number): void {
+    const influences = binding?.mesh.morphTargetInfluences;
+    if (!binding || !influences) return;
+    influences[binding.index] = THREE.MathUtils.lerp(influences[binding.index] ?? 0, target, step);
+  }
 
   function resolveTailRig(model: THREE.Object3D): TailRig | undefined {
     let tailMesh: THREE.SkinnedMesh | undefined;

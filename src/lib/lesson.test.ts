@@ -48,6 +48,14 @@ describe("progressive chalkboard lessons", () => {
     });
   });
 
+  it("demonstrates lesson-driven mascot gestures across the fixture flow", () => {
+    expect(FIXTURE_LESSON.moments.map((moment) => moment.gesture)).toEqual([
+      "point_self",
+      "point_user",
+      "heart_touch",
+    ]);
+  });
+
   it("uses the fixed teaching palette and reserves strikes for pink corrections", () => {
     const colors = new Set(["white", "baby_blue", "yellow", "pink"]);
     for (const moment of FIXTURE_LESSON.moments) {

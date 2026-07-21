@@ -17,7 +17,7 @@
   import ChalkPhrase from "./ChalkPhrase.svelte";
   import ChalkStepNumber from "./ChalkStepNumber.svelte";
   import NonoScene from "./NonoScene.svelte";
-  import type { NonoMood } from "./nonoToon";
+  import { nonoMoodFromCue, type NonoMood } from "./nonoToon";
   import LessonQuestionComposer from "./LessonQuestionComposer.svelte";
   import { IDLE_TAIL_PRESENTATION, tipUnderlineProgress, type TailPresentation, type TailPresentationPhase } from "./tailPresentation";
 
@@ -195,6 +195,7 @@
     activeCardKey = nextCardKey;
     activeMomentIndex = 0;
     skippedCardKey = undefined;
+    nonoGesture = nonoMoodFromCue(latestCard?.moments[0]?.gesture);
     cancelCueSequence();
   });
 
@@ -249,7 +250,7 @@
       await sleep(720);
       if (requestId === requestGeneration) {
         boardPhase = "idle";
-        if (!hasMoreMoments) nonoGesture = "thumbs_up";
+        applyMomentGesture();
         void playCueSequence();
       }
     } catch (requestError) {
@@ -273,8 +274,14 @@
     boardPhase = "writing";
     await sleep(620);
     boardPhase = "idle";
-    if (!hasMoreMoments) nonoGesture = "thumbs_up";
+    applyMomentGesture();
     void playCueSequence();
+  }
+
+  function applyMomentGesture() {
+    const cue = nonoMoodFromCue(currentMoment?.gesture);
+    if (cue) nonoGesture = cue;
+    else if (!hasMoreMoments) nonoGesture = "thumbs_up";
   }
 
   async function skipRemaining() {
