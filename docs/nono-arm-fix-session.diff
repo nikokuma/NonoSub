@@ -1,0 +1,897 @@
+# Diff of all working-tree changes on branch codex/final-reliability-repair
+# Generated 2026-07-21 by Claude Fable 5 (session: Nono GLB rebuild + arm-contortion fix)
+# Binary asset also changed (not diffable): static/assets/NonoCandidate.glb (10.4 MB)
+
+diff --git a/scripts/audit_nono_glb.mjs b/scripts/audit_nono_glb.mjs
+index ab0f25f..15c0c71 100644
+--- a/scripts/audit_nono_glb.mjs
++++ b/scripts/audit_nono_glb.mjs
+@@ -71,7 +71,7 @@ else {
+ }
+ 
+ const REQUIRED_CLIPS = ["idle", "think", "neutral", "thumbs_up"];
+-const OPTIONAL_CLIPS = ["point_user", "point_self", "cheer", "hand_over_mouth", "surprised"];
++const OPTIONAL_CLIPS = ["point_user", "point_self", "cheer", "heart_touch", "surprised"];
+ const animationNames = new Set(animations.map((animation) => animation.name?.toLowerCase()).filter(Boolean));
+ for (const clip of REQUIRED_CLIPS) {
+   if (!animationNames.has(clip) && !allowMissingAnimations) {
+diff --git a/scripts/export_nono_final.py b/scripts/export_nono_final.py
+index 9ec5b9a..a842b10 100644
+--- a/scripts/export_nono_final.py
++++ b/scripts/export_nono_final.py
+@@ -17,14 +17,14 @@ from pathlib import Path
+ import bpy
+ 
+ 
+-REQUIRED_ACTIONS = {"Idle": (2.0, 4.0), "Think": (2.0, 4.0), "Neutral": (2.0, 4.0), "Thumbs_Up": (1.0, 2.5)}
++REQUIRED_ACTIONS = {"Idle": (2.0, 10.0), "Think": (2.0, 8.0), "Neutral": (2.0, 10.0), "Thumbs_Up": (1.0, 4.0)}
+ # Exported and validated only when present; the app falls back gracefully.
+ OPTIONAL_ACTIONS = {
+-    "Point_User": (1.0, 2.5),
+-    "Point_Self": (1.0, 2.5),
+-    "Cheer": (1.0, 2.5),
+-    "Hand_Over_Mouth": (1.0, 2.5),
+-    "Surprised": (0.5, 2.0),
++    "Point_User": (1.0, 4.0),
++    "Point_Self": (1.0, 4.0),
++    "Cheer": (0.5, 4.0),
++    "Heart_Touch": (0.5, 4.0),
++    "Surprised": (0.5, 4.0),
+ }
+ TAIL_BONES = {f"spine.{index:03d}" for index in range(55, 79)}
+ DYNAMIC_HAIR_ROOTS = {"spine.021", "spine.031", "spine.039", "spine.085", "spine.093"}
+@@ -104,8 +104,14 @@ def validate_actions(rig: bpy.types.Object) -> dict[str, bpy.types.Action]:
+             bone_name, property_name = match.groups()
+             if bone_name in forbidden_bones:
+                 raise RuntimeError(f"{name} keys procedural bone {bone_name}")
+-            if bone_name == "spine" and property_name in {"location", "scale"}:
+-                raise RuntimeError(f"{name} contains unintended root-bone {property_name}")
++            if bone_name == "spine" and property_name == "scale":
++                raise RuntimeError(f"{name} contains unintended root-bone scale")
++            if bone_name == "spine" and property_name == "location":
++                # Hip sway is allowed, but only re-based small-amplitude motion:
++                # a drifting root means the capture wasn't normalized.
++                extremes = [abs(k.co.y) for k in curve.keyframe_points]
++                if extremes and max(extremes) > 0.35:
++                    raise RuntimeError(f"{name} root-bone location amplitude {max(extremes):.2f} exceeds 0.35")
+     return actions
+ 
+ 
+diff --git a/src/lib/NonoScene.svelte b/src/lib/NonoScene.svelte
+index 9c37452..2aad0a0 100644
+--- a/src/lib/NonoScene.svelte
++++ b/src/lib/NonoScene.svelte
+@@ -56,7 +56,7 @@
+     "point_user",
+     "point_self",
+     "cheer",
+-    "hand_over_mouth",
++    "heart_touch",
+     "surprised",
+   ]);
+   // Missing clips degrade along this chain so older GLBs keep working.
+@@ -66,7 +66,7 @@
+     point_user: "neutral",
+     point_self: "neutral",
+     cheer: "thumbs_up",
+-    hand_over_mouth: "neutral",
++    heart_touch: "neutral",
+     surprised: "think",
+   };
+   type TailRig = Record<TailSide, THREE.Bone[]>;
+diff --git a/src/lib/nonoToon.ts b/src/lib/nonoToon.ts
+index 119af5a..eadd31a 100644
+--- a/src/lib/nonoToon.ts
++++ b/src/lib/nonoToon.ts
+@@ -10,7 +10,7 @@ export const NONO_MOODS = [
+   "point_user",
+   "point_self",
+   "cheer",
+-  "hand_over_mouth",
++  "heart_touch",
+   "surprised",
+ ] as const;
+ export type NonoMood = (typeof NONO_MOODS)[number];
+diff --git a/scripts/prepare_nono_release.py b/scripts/prepare_nono_release.py
+new file mode 100644
+index 0000000..f70be85
+--- /dev/null
++++ b/scripts/prepare_nono_release.py
+@@ -0,0 +1,477 @@
++#!/usr/bin/env python3
++"""Prepare NonoSubCheckpointFinal.blend for release export without fidelity loss.
++
++Unlike prepare_nono_production.py (which masks the body, replaces every
++material with flat palette stand-ins, and fabricates a hair highlight), this
++script keeps the checkpoint's original geometry, materials, textures, and
++modifier stacks. It only:
++
++  * renames Nono_Rig2 -> Nono_Rig and zeroes its object transform,
++  * moves the teacher-form objects into NONO_EXPORT (hoodie form stays out),
++  * joins the loose chest-detail planes into one rig-bound mesh,
++  * normalizes skin weights to the 4-influence GLB budget (deform bones only),
++  * unlinks Principled alpha on materials that don't need blending so the
++    glTF exporter emits OPAQUE instead of sort-order-fragile BLEND,
++  * downsizes textures above --max-texture and packs them into the file,
++  * imports the final mean-centered mocap actions from NonoSubProduction2.blend.
++
++Run:
++
++    Blender -b NonoSubCheckpointFinal.blend \
++      --python scripts/prepare_nono_release.py -- \
++      --output ~/Projects/Blendr/NonoSubRelease.blend
++"""
++
++from __future__ import annotations
++
++import argparse
++import sys
++import traceback
++from pathlib import Path
++
++import bpy
++from mathutils import Vector
++
++
++CANONICAL_RIG_SOURCE = "Nono_Rig2"
++EXPORT_COLLECTION = "NONO_EXPORT"
++PLANE_DETAILS = ("Plane", "Plane.001", "Plane.003", "Plane.004")
++EXCLUDED_OBJECTS = {"Plane.002", "Nono_TeacherSkirt"}
++PROTECTED_SOURCES = {
++    "NonoSubCheckpoint.blend",
++    "NonoSubCheckpointCodex.blend",
++    "NonoSubCheckpointFable.blend",
++    "NonoSubCheckpointFinal.blend",
++    "NonoSubCheckpointKimi.blend",
++}
++TAIL_BONES = tuple(f"spine.{index:03d}" for index in range(55, 79))
++DYNAMIC_HAIR_ROOTS = ("spine.021", "spine.031", "spine.039", "spine.085", "spine.093")
++FINAL_ACTIONS = (
++    "Idle",
++    "Neutral",
++    "Think",
++    "Thumbs_Up",
++    "Point_User",
++    "Point_Self",
++    "Cheer",
++    "Heart_Touch",
++    "Surprised",
++)
++# Layered eye shines genuinely need alpha blending; everything else exports
++# opaque so three.js never mis-sorts laces/tongue/body behind other meshes.
++KEEP_ALPHA_MATERIALS = {"EyeShine", "EyeSparklePink", "Material.002"}
++
++# Canonical object names expected by the GLB audit and the app runtime.
++SEMANTIC_NAMES = {
++    "Nono_Body.001": "Nono_Body",
++    "Nono_Head.001": "Nono_Head",
++    "Nono_BrowsNLashes.001": "Nono_BrowsNLashes",
++    "Nono_Eye_Iris.001": "Nono_Eye_Iris",
++    "Nono_Eye_Pupil.001": "Nono_Eye_Pupil",
++    "Nono_Eye_ShineStripe.001": "Nono_Eye_ShineStripe",
++    "Nono_Eyes_Moon.001": "Nono_Eyes_Moon",
++    "Nono_Eyes_PinkSmall.001": "Nono_Eyes_PinkSmall",
++    "Nono_Eyes_TopShine.001": "Nono_Eyes_TopShine",
++    "Nono_Hair_Bangs.001": "Nono_Hair_Bangs",
++    "Nono_Hair_Fwip.001": "Nono_Hair_Fwip",
++    "Nono_Hair_Long.001": "Nono_Hair_Long",
++    "Nono_Hair_Sweep.001": "Nono_Hair_Sweep",
++    "Nono_Hair_Bow.001": "Nono_Hair_Bow_Pink",
++    "Nono_Hair_Bow.002": "Nono_Hair_Bow_Navy",
++    "Nono_NoHairClip.L.001": "Nono_Hair_Clip_L",
++    "Nono_NoHairClip.R.001": "Nono_Hair_Clip_R",
++    "Nono_Tails.001": "Nono_Tails",
++    "Nono_Tail_Plugs.001": "Nono_Tail_Plugs",
++    "Nono_Blazer": "Nono_Outfit_Blazer",
++    "Nono_Shirt": "Nono_Outfit_Shirt",
++    "Nono_Shirt.001": "Nono_Outfit_Shirt_Detail_L",
++    "Nono_Shirt.002": "Nono_Outfit_Shirt_Detail_R",
++    "Nono_NeckBow": "Nono_Outfit_NeckBow",
++    "Nono_Skirt.001": "Nono_Outfit_Skirt",
++    "Nono_Shorts.001": "Nono_Outfit_Shorts",
++    "Nono_Socks.001": "Nono_Outfit_Socks",
++    "Nono_Shoes.001": "Nono_Outfit_Shoes",
++    "Nono_Shoe_Tongue.001": "Nono_Outfit_Shoe_Tongue",
++    "Nono_Shoes_Laces.001": "Nono_Outfit_Shoe_Laces",
++    "Nono_Shoes_No.001": "Nono_Outfit_Shoe_Accent",
++}
++
++# Rename-only material mapping: the audit requires Nono_<Role> prefixes and
++# the app infers toon roles from these names. Material contents are untouched.
++SEMANTIC_MATERIALS = {
++    "Body": "Nono_Skin_Body",
++    "Face": "Nono_Face_Base",
++    "Material.001": "Nono_Hair_Main",
++    "HairClipNoL": "Nono_Hair_Clip_L",
++    "HairClipNoR": "Nono_Hair_Clip_R",
++    "PinkBow": "Nono_Accent_BowPink",
++    "DarkBlueBow": "Nono_Accent_BowNavy",
++    "Material.012": "Nono_TailCable_Main",
++    "Material.013": "Nono_Metal_TailPlug",
++    "Blazer_Camel": "Nono_Blazer_Camel",
++    "TeacherJacket_P5_Seam_PBR": "Nono_Blazer_Seam",
++    "TeacherJacket_P5_PocketShadow_PBR": "Nono_Blazer_PocketShadow",
++    "TeacherJacket_P5_Button_Brown_PBR": "Nono_Metal_ButtonBrown",
++    "TeacherJacket_P5_ButtonThread_PBR": "Nono_Metal_ButtonThread",
++    "Teacher_Collared_Shirt_Button": "Nono_Metal_ShirtButton",
++    "Teacher_Collared_Shirt_Button_Loops": "Nono_Metal_ShirtButtonLoops",
++    "Material.006": "Nono_Metal_ButtonAccent",
++    "TeacherJacket_P5_Pin_Enamel_PBR": "Nono_Accent_PinEnamel",
++    "TeacherJacket_P5_Pin_Rim_PBR": "Nono_Metal_PinRim",
++    "TeacherJacket_P5_Pin_Mark_PBR": "Nono_Accent_PinSpark",
++    "Shirt_White": "Nono_Shirt_White",
++    "Skirt_Navy": "Nono_Skirt_Navy",
++    "Material.005": "Nono_Skirt_Shorts",
++    "Socks": "Nono_Socks_Main",
++    "Shoes": "Nono_Shoes_Tongue",
++    "Shoes_Converse": "Nono_Shoes_Converse",
++    "ShoeLaces": "Nono_Shoes_Laces",
++    "ShoeNo": "Nono_Shoes_AccentNo",
++    "ShoeRings": "Nono_Metal_ShoeRings",
++    "Eye": "Nono_Eye_Iris",
++    "EyeShine": "Nono_Eye_Shine",
++    "EyeSparklePink": "Nono_Eye_SparklePink",
++    "Material.002": "Nono_Eye_Moon",
++}
++
++
++def parse_args() -> argparse.Namespace:
++    argv = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--output", type=Path, required=True)
++    parser.add_argument(
++        "--actions-from",
++        type=Path,
++        default=None,
++        help="Optional blend file to import the final actions from; by default the checkpoint's own actions are used",
++    )
++    parser.add_argument("--max-texture", type=int, default=1024)
++    return parser.parse_args(argv)
++
++
++def ensure_safe_output(output: Path) -> Path:
++    output = output.expanduser().resolve()
++    if output.name in PROTECTED_SOURCES:
++        raise RuntimeError(f"Refusing to overwrite protected source: {output}")
++    output.parent.mkdir(parents=True, exist_ok=True)
++    return output
++
++
++def collection(name: str) -> bpy.types.Collection:
++    result = bpy.data.collections.get(name)
++    if result is None:
++        result = bpy.data.collections.new(name)
++        bpy.context.scene.collection.children.link(result)
++    return result
++
++
++def move_to_collection(obj: bpy.types.Object, target: bpy.types.Collection) -> None:
++    if obj.name not in target.objects:
++        target.objects.link(obj)
++    for existing in list(obj.users_collection):
++        if existing != target:
++            existing.objects.unlink(obj)
++
++
++def armature_target(obj: bpy.types.Object) -> bpy.types.Object | None:
++    if obj.type != "MESH":
++        return None
++    for modifier in obj.modifiers:
++        if modifier.type == "ARMATURE" and modifier.object is not None:
++            return modifier.object
++    return obj.parent if obj.parent and obj.parent.type == "ARMATURE" else None
++
++
++def classify_export_objects(rig: bpy.types.Object) -> set[bpy.types.Object]:
++    teacher = bpy.data.collections.get("Collection")
++    if teacher is None:
++        raise RuntimeError("Expected the teacher-form scene collection named 'Collection'")
++    result: set[bpy.types.Object] = {rig}
++    for obj in teacher.objects:
++        if obj.name in EXCLUDED_OBJECTS:
++            continue
++        if obj.name in PLANE_DETAILS:
++            result.add(obj)
++            continue
++        if obj.type == "MESH" and armature_target(obj) == rig:
++            result.add(obj)
++    return result
++
++
++def join_plane_details(rig: bpy.types.Object, export: bpy.types.Collection) -> bpy.types.Object:
++    planes = [bpy.data.objects.get(name) for name in PLANE_DETAILS]
++    planes = [obj for obj in planes if obj and obj.type == "MESH"]
++    if len(planes) != len(PLANE_DETAILS):
++        missing = sorted(set(PLANE_DETAILS) - {obj.name for obj in planes})
++        raise RuntimeError(f"Missing visible outfit plane details: {missing}")
++
++    bpy.ops.object.select_all(action="DESELECT")
++    for obj in planes:
++        obj.hide_set(False)
++        obj.select_set(True)
++    bpy.context.view_layer.objects.active = planes[0]
++    bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
++    bpy.ops.object.join()
++    detail = bpy.context.object
++    detail.name = "Nono_Outfit_ChestDetails"
++    detail.data.name = "Nono_Outfit_ChestDetails_Mesh"
++    world = detail.matrix_world.copy()
++    detail.parent = rig
++    detail.matrix_world = world
++    modifier = next((item for item in detail.modifiers if item.type == "ARMATURE"), None)
++    modifier = modifier or detail.modifiers.new("NonoArmature", "ARMATURE")
++    modifier.object = rig
++    detail.vertex_groups.clear()
++    group = detail.vertex_groups.new(name="spine.001")
++    group.add(range(len(detail.data.vertices)), 1.0, "REPLACE")
++    move_to_collection(detail, export)
++    return detail
++
++
++def normalize_deform_weights(obj: bpy.types.Object) -> None:
++    if obj.type != "MESH" or not obj.vertex_groups:
++        return
++    bpy.ops.object.select_all(action="DESELECT")
++    obj.hide_set(False)
++    obj.select_set(True)
++    bpy.context.view_layer.objects.active = obj
++    bpy.ops.object.mode_set(mode="WEIGHT_PAINT")
++    bpy.ops.object.vertex_group_clean(group_select_mode="BONE_DEFORM", limit=0.001, keep_single=True)
++    bpy.ops.object.vertex_group_limit_total(group_select_mode="BONE_DEFORM", limit=4)
++    bpy.ops.object.vertex_group_normalize_all(group_select_mode="BONE_DEFORM", lock_active=False)
++    bpy.ops.object.mode_set(mode="OBJECT")
++
++
++def bind_unweighted_vertices(obj: bpy.types.Object, rig: bpy.types.Object) -> int:
++    if obj.type != "MESH":
++        return 0
++    unweighted = []
++    for vertex in obj.data.vertices:
++        total = sum(assignment.weight for assignment in vertex.groups if assignment.weight > 0.0001)
++        if total <= 0.0001:
++            unweighted.append(vertex)
++    if not unweighted:
++        return 0
++    deform_bones = [bone for bone in rig.data.bones if bone.use_deform]
++    if not deform_bones:
++        raise RuntimeError("Canonical rig has no deformation bones")
++    bone_positions = {bone.name: rig.matrix_world @ bone.head_local for bone in deform_bones}
++    groups: dict[str, bpy.types.VertexGroup] = {}
++    for vertex in unweighted:
++        world = obj.matrix_world @ vertex.co
++        closest = min(deform_bones, key=lambda bone: (bone_positions[bone.name] - world).length_squared)
++        groups[closest.name] = groups.get(closest.name) or obj.vertex_groups.get(closest.name) or obj.vertex_groups.new(name=closest.name)
++        groups[closest.name].add([vertex.index], 1.0, "REPLACE")
++    print(f"Bound {len(unweighted)} previously unweighted vertices on {obj.name} to nearest deformation bones")
++    return len(unweighted)
++
++
++def bake_toon_flat_colors(materials: set[bpy.types.Material]) -> None:
++    """Bake each toon node-chain's flat color into the Principled Base Color.
++
++    The checkpoint materials feed Base Color through ShaderToRGB toon ramps the
++    glTF exporter cannot evaluate, so they export as white. The authored color
++    lives on the "A TOON MIX - CONNECTED" MIX node (Color2). Materials with a
++    real image texture are left alone — the exporter resolves those already.
++    """
++    for material in materials:
++        if material is None or material.node_tree is None:
++            continue
++        tree = material.node_tree
++        if any(node.type == "TEX_IMAGE" and node.image for node in tree.nodes if node.name != "TOON MASK SHADER TO RGB"):
++            continue
++        principled = next((node for node in tree.nodes if node.type == "BSDF_PRINCIPLED"), None)
++        if principled is None or "Base Color" not in principled.inputs:
++            continue
++        base = principled.inputs["Base Color"]
++        if not base.is_linked:
++            continue
++        color = None
++        mix = tree.nodes.get("A TOON MIX - CONNECTED")
++        if mix is not None and "Color2" in mix.inputs and not mix.inputs["Color2"].is_linked:
++            color = list(mix.inputs["Color2"].default_value)
++        if color is None:
++            shadow = tree.nodes.get("A HSV SHADOW")
++            if shadow is not None and "Color" in shadow.inputs and not shadow.inputs["Color"].is_linked:
++                color = list(shadow.inputs["Color"].default_value)
++        if color is None:
++            print(f"Could not resolve a flat color for {material.name}; it will export white")
++            continue
++        for link in list(base.links):
++            tree.links.remove(link)
++        base.default_value = color
++        print(f"Baked flat color {tuple(round(c, 3) for c in color)} into {material.name}")
++
++
++def force_opaque_export(materials: set[bpy.types.Material]) -> None:
++    for material in materials:
++        if material is None or material.name in KEEP_ALPHA_MATERIALS:
++            continue
++        if not material.use_nodes or material.node_tree is None:
++            continue
++        for node in material.node_tree.nodes:
++            if node.type != "BSDF_PRINCIPLED" or "Alpha" not in node.inputs:
++                continue
++            alpha = node.inputs["Alpha"]
++            for link in list(alpha.links):
++                material.node_tree.links.remove(link)
++            alpha.default_value = 1.0
++
++
++def shrink_and_pack_images(max_texture: int) -> None:
++    for image in bpy.data.images:
++        if image.size[0] == 0 or image.size[1] == 0:
++            continue
++        if max(image.size) > max_texture:
++            ratio = max_texture / max(image.size)
++            image.scale(max(1, round(image.size[0] * ratio)), max(1, round(image.size[1] * ratio)))
++            print(f"Downscaled {image.name} to {image.size[0]}x{image.size[1]}")
++        try:
++            image.pack()
++        except RuntimeError as error:
++            print(f"Could not pack {image.name}: {error}")
++
++
++def import_final_actions(source: Path) -> None:
++    source = source.expanduser().resolve()
++    if not source.exists():
++        raise RuntimeError(f"Actions source not found: {source}")
++    for name in FINAL_ACTIONS:
++        existing = bpy.data.actions.get(name)
++        if existing is not None:
++            bpy.data.actions.remove(existing, do_unlink=True)
++    with bpy.data.libraries.load(str(source), link=False) as (data_from, data_to):
++        missing = sorted(set(FINAL_ACTIONS) - set(data_from.actions))
++        if missing:
++            raise RuntimeError(f"Actions missing from {source.name}: {missing}")
++        data_to.actions = list(FINAL_ACTIONS)
++    for name in FINAL_ACTIONS:
++        action = bpy.data.actions.get(name)
++        if action is None:
++            raise RuntimeError(f"Failed to import action {name}")
++        action.use_fake_user = True
++
++
++def apply_semantic_names(export: bpy.types.Collection) -> None:
++    for old_name, new_name in SEMANTIC_NAMES.items():
++        obj = bpy.data.objects.get(old_name)
++        if obj and obj.name in export.all_objects:
++            obj.name = new_name
++            if obj.type == "MESH":
++                obj.data.name = f"{new_name}_Mesh"
++    for obj in list(export.all_objects):
++        if obj.name.startswith("Nono_TeacherJacket_"):
++            name = obj.name.removesuffix(".001").replace("Nono_TeacherJacket_", "Nono_Outfit_Blazer_")
++            obj.name = name
++            if obj.type == "MESH":
++                obj.data.name = f"{name}_Mesh"
++    for old_name, new_name in SEMANTIC_MATERIALS.items():
++        material = bpy.data.materials.get(old_name)
++        if material is not None:
++            material.name = new_name
++
++
++def mean_center_hip_curves() -> None:
++    """Remove the capture's room-position DC offset from each clip's hip keys.
++
++    The raw retarget keys bone "spine" locations in absolute room space; the
++    export validator (and the app) expect small re-based sway around zero.
++    Subtracting the per-curve mean keeps the sway, drops the offset. Idempotent.
++    """
++    for name in FINAL_ACTIONS:
++        action = bpy.data.actions.get(name)
++        if action is None:
++            continue
++        for curve in action.fcurves:
++            if curve.data_path != 'pose.bones["spine"].location':
++                continue
++            points = curve.keyframe_points
++            if not points:
++                continue
++            mean = sum(point.co.y for point in points) / len(points)
++            if abs(mean) < 1e-6:
++                continue
++            for point in points:
++                point.co.y -= mean
++                point.handle_left.y -= mean
++                point.handle_right.y -= mean
++            curve.update()
++            print(f"Centered {name} hip axis {curve.array_index} (offset {mean:.3f})")
++
++
++def center_canonical_rig(rig: bpy.types.Object) -> None:
++    rig.location = Vector((0.0, 0.0, 0.0))
++    rig.rotation_mode = "XYZ"
++    rig.rotation_euler = Vector((0.0, 0.0, 0.0))
++    rig.scale = Vector((1.0, 1.0, 1.0))
++
++
++def validate_prepared_scene(export: bpy.types.Collection, rig: bpy.types.Object) -> None:
++    export_objects = list(export.all_objects)
++    armatures = [obj for obj in export_objects if obj.type == "ARMATURE"]
++    if armatures != [rig]:
++        raise RuntimeError(f"NONO_EXPORT must contain one canonical armature, found {[obj.name for obj in armatures]}")
++    names = {obj.name for obj in export_objects}
++    for required in ("Nono_Rig", "Nono_Body", "Nono_Tails", "Nono_Tail_Plugs", "Nono_Outfit_ChestDetails"):
++        if required not in names:
++            raise RuntimeError(f"Prepared scene is missing {required}")
++    for bone in (*TAIL_BONES, *DYNAMIC_HAIR_ROOTS):
++        if bone not in rig.data.bones:
++            raise RuntimeError(f"Canonical rig is missing required bone {bone}")
++    for name in FINAL_ACTIONS:
++        if bpy.data.actions.get(name) is None:
++            raise RuntimeError(f"Final action {name} is missing")
++
++
++def main() -> None:
++    args = parse_args()
++    output = ensure_safe_output(args.output)
++    if Path(bpy.data.filepath).name != "NonoSubCheckpointFinal.blend":
++        raise RuntimeError("Run this script on NonoSubCheckpointFinal.blend")
++    # Save-as immediately so every mutation below only ever touches the copy.
++    bpy.ops.wm.save_as_mainfile(filepath=str(output), check_existing=False)
++
++    rig = bpy.data.objects.get(CANONICAL_RIG_SOURCE)
++    if not rig or rig.type != "ARMATURE":
++        raise RuntimeError("Expected a Nono_Rig2 armature in the source file")
++
++    export_objects = classify_export_objects(rig)
++    export = collection(EXPORT_COLLECTION)
++    for obj in export_objects:
++        obj.hide_set(False)
++        move_to_collection(obj, export)
++
++    detail = join_plane_details(rig, export)
++    export_objects.difference_update({bpy.data.objects.get(name) for name in PLANE_DETAILS})
++    export_objects.add(detail)
++
++    rig.name = "Nono_Rig"
++    rig.data.name = "Nono_Rig_Armature"
++    center_canonical_rig(rig)
++
++    materials: set[bpy.types.Material] = set()
++    for obj in list(export.all_objects):
++        if obj.type != "MESH":
++            continue
++        bind_unweighted_vertices(obj, rig)
++        normalize_deform_weights(obj)
++        materials.update(slot.material for slot in obj.material_slots if slot.material)
++    bake_toon_flat_colors(materials)
++    force_opaque_export(materials)
++    apply_semantic_names(export)
++    shrink_and_pack_images(args.max_texture)
++    if args.actions_from is not None:
++        import_final_actions(args.actions_from)
++    mean_center_hip_curves()
++    validate_prepared_scene(export, rig)
++
++    bpy.ops.wm.save_as_mainfile(filepath=str(output), check_existing=False)
++    print(f"NONO_RELEASE_BLEND={output}")
++
++
++if __name__ == "__main__":
++    try:
++        main()
++    except Exception:
++        traceback.print_exc()
++        sys.exit(1)
+diff --git a/scripts/cut_nono_clips.py b/scripts/cut_nono_clips.py
+new file mode 100644
+index 0000000..70c6b6b
+--- /dev/null
++++ b/scripts/cut_nono_clips.py
+@@ -0,0 +1,297 @@
++#!/usr/bin/env python3
++"""Cut the 9 release clips out of the recorded Rokoko take on Nono's rig.
++
++Run headless against the checkpoint (which is NEVER saved by this script):
++
++    Blender -b NonoSubCheckpointFinal.blend --python scripts/cut_nono_clips.py -- \
++      --output ~/Projects/Blendr/NonoClipLibrary.blend
++
++The raw take is `Anim Arm Nono_Rig2` (60 fps, XYZ-euler keys, hip location in
++absolute room space). Amplification parameters captured during the live mocap
++session are stored on the rig object:
++  - "nono_amp_neutral": per-bone neutral rotations ({mode:"E", order, value})
++  - "nono_amp_gains":   per-bone rotation gains (shoulder 1.5 / upper_arm 1.6 / forearm 1.3)
++  - "nono_amp_hip_neutral" / "nono_amp_hip_gain": hip re-basing
++
++Per clip this script samples every 2nd raw frame (60 -> 30 fps), amplifies the
++six arm bones as `neutral * (neutral^-1 * raw)^gain`, re-bases the hip, drops
++procedural/tail/hair/skirt and object-level channels, loop-blends the looping
++clips, and rebuilds LINEAR fcurves starting at frame 1.
++
++CRITICAL LESSON (2026-07-21): the delta quaternion MUST be canonicalized to the
++positive hemisphere (`if delta.w < 0: delta.negate()`) before exponentiation.
++The raw take's wrapped euler channels (e.g. upper_arm.L X at -347..-360 deg)
++otherwise convert to negative-hemisphere quaternions, and the gain amplifies
++the 360-theta long-way rotation - which contorted Nono's left arm to ~179 deg
++from neutral in every gesture clip of the first release. An acceptance check
++below now fails the cut if any amplified bone strays implausibly far.
++
++The cut actions are written to a small library .blend; import them with:
++    scripts/prepare_nono_release.py -- --actions-from <library.blend>
++"""
++
++from __future__ import annotations
++
++import argparse
++import json
++import math
++import re
++import sys
++import traceback
++from pathlib import Path
++
++import bpy
++from mathutils import Euler, Quaternion
++
++RAW_ACTION = "Anim Arm Nono_Rig2"
++RAW_STEP = 2  # 60fps take -> 30fps clips
++
++# Raw-take frame ranges chosen by Nico (60 fps).
++CLIP_RANGES = {
++    "Idle": (4188, 4620),
++    "Neutral": (4188, 4620),
++    "Think": (15200, 15469),
++    "Thumbs_Up": (22452, 22580),
++    "Point_Self": (26959, 27140),
++    "Point_User": (31952, 32128),
++    "Cheer": (36235, 36312),
++    "Surprised": (40165, 40241),
++    "Heart_Touch": (44712, 44822),
++}
++LOOP_CLIPS = {"Idle", "Neutral", "Think"}
++LOOP_BLEND_FRAMES = 10
++
++TAIL_BONES = {f"spine.{index:03d}" for index in range(55, 79)}
++DYNAMIC_HAIR_ROOTS = ("spine.021", "spine.031", "spine.039", "spine.085", "spine.093")
++BONE_PATH = re.compile(r'^pose\.bones\["([^"]+)"\]\.(.+)$')
++
++# Amplification taper: full gain below TAPER_START, fading to gain 1.0 (raw
++# as-performed) at TAPER_END. Nico's extreme poses (cheer elbows ~138 deg) have
++# no headroom - amplifying them folds the limb flat against itself.
++TAPER_START_DEG = 60.0
++TAPER_END_DEG = 130.0
++# Sanity ceiling: honest output never exceeds the raw extreme (~145 deg); the
++# 2026-07-21 hemisphere bug produced ~179 deg on every gesture clip.
++MAX_AMPLIFIED_DELTA_DEG = 165.0
++
++
++def parse_args() -> argparse.Namespace:
++    argv = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--output", type=Path, required=True, help="Library .blend to write the cut actions into")
++    return parser.parse_args(argv)
++
++
++def forbidden_bones(rig: bpy.types.Object) -> set[str]:
++    result = set(TAIL_BONES)
++    for root_name in DYNAMIC_HAIR_ROOTS:
++        root = rig.data.bones.get(root_name)
++        if root is None:
++            continue
++        pending = [root]
++        while pending:
++            bone = pending.pop()
++            result.add(bone.name)
++            pending.extend(bone.children)
++    result.update(bone.name for bone in rig.data.bones if bone.name.lower().startswith("skirt_root"))
++    return result
++
++
++def quat_pow(q: Quaternion, gain: float) -> Quaternion:
++    # q is canonical (w >= 0), so .angle is the shortest rotation in [0, pi].
++    if q.w > 0.9999999:
++        return Quaternion()
++    angle_deg = math.degrees(q.angle)
++    taper = 1.0 - smoothstep((angle_deg - TAPER_START_DEG) / (TAPER_END_DEG - TAPER_START_DEG))
++    effective_gain = 1.0 + (gain - 1.0) * taper
++    return Quaternion(q.axis, q.angle * effective_gain)
++
++
++def smoothstep(t: float) -> float:
++    t = max(0.0, min(1.0, t))
++    return t * t * (3.0 - 2.0 * t)
++
++
++FINGER_BONE = re.compile(r"^(f_index|f_middle|f_ring|f_pinky|thumb|hand)\.")
++# Rokoko finger/wrist solve occasionally flips a joint ~90-180 deg for a few
++# frames and back (e.g. the whole right hand at Surprised f12-13). Detect the
++# spike as an implausible per-frame rotation step and slerp across it.
++QUAT_SPIKE_RAD = math.radians(55.0)
++QUAT_SPIKE_MAX_SPAN = 8  # frames at 30fps (~0.27s)
++
++
++def rotation_step(a: Quaternion, b: Quaternion) -> float:
++    dot = min(1.0, abs(a.dot(b)))
++    return 2.0 * math.acos(dot)
++
++
++def quat_despike(series: list[Quaternion]) -> None:
++    i = 1
++    while i < len(series):
++        if rotation_step(series[i - 1], series[i]) > QUAT_SPIKE_RAD:
++            landing = None
++            for j in range(i + 1, min(i + 1 + QUAT_SPIKE_MAX_SPAN, len(series))):
++                if rotation_step(series[i - 1], series[j]) <= QUAT_SPIKE_RAD:
++                    landing = j
++                    break
++            if landing is not None:
++                for k in range(i, landing):
++                    t = (k - i + 1) / (landing - i + 1)
++                    series[k] = series[i - 1].slerp(series[landing], t)
++                i = landing
++            # else: sustained reorientation - keep as performed
++        i += 1
++
++
++def main() -> None:
++    args = parse_args()
++    output = args.output.expanduser().resolve()
++    output.parent.mkdir(parents=True, exist_ok=True)
++    if output == Path(bpy.data.filepath):
++        raise RuntimeError("Refusing to overwrite the open source file")
++
++    rig = bpy.data.objects.get("Nono_Rig2") or bpy.data.objects.get("Nono_Rig")
++    raw = bpy.data.actions.get(RAW_ACTION)
++    if rig is None or raw is None:
++        raise RuntimeError(f"Need rig and raw take {RAW_ACTION!r} (open NonoSubCheckpointFinal.blend)")
++
++    def as_dict(value):
++        if isinstance(value, str):
++            return json.loads(value)
++        return value.to_dict() if hasattr(value, "to_dict") else dict(value)
++
++    neutral_prop = as_dict(rig.get("nono_amp_neutral"))
++    gains = as_dict(rig.get("nono_amp_gains"))
++    hip_neutral_raw = rig.get("nono_amp_hip_neutral")
++    hip_neutral = [float(v) for v in (json.loads(hip_neutral_raw) if isinstance(hip_neutral_raw, str) else list(hip_neutral_raw))]
++    hip_gain = float(rig.get("nono_amp_hip_gain"))
++    neutral_quats: dict[str, Quaternion] = {}
++    for bone_name, entry in neutral_prop.items():
++        entry = as_dict(entry)
++        if entry.get("mode") != "E":
++            raise RuntimeError(f"Unexpected neutral mode for {bone_name}: {entry.get('mode')}")
++        neutral_quats[bone_name] = Euler(list(entry["value"]), entry.get("order", "XYZ")).to_quaternion()
++
++    banned = forbidden_bones(rig)
++
++    # Collect raw curves per (bone, property) -> {array_index: fcurve}
++    channels: dict[tuple[str, str], dict[int, bpy.types.FCurve]] = {}
++    for curve in raw.fcurves:
++        match = BONE_PATH.match(curve.data_path)
++        if not match:
++            continue  # drop object-level transforms
++        bone_name, prop = match.groups()
++        if bone_name in banned or bone_name not in rig.pose.bones:
++            continue
++        channels.setdefault((bone_name, prop), {})[curve.array_index] = curve
++
++    new_actions: list[bpy.types.Action] = []
++    for clip_name, (start, end) in CLIP_RANGES.items():
++        frame_count = (end - start) // RAW_STEP + 1
++        # sampled[data_path][array_index] = [values per output frame]
++        sampled: dict[str, dict[int, list[float]]] = {}
++        max_delta_deg: dict[str, float] = {}
++
++        # Pass 1: rotations through quaternion space. The raw Rokoko retarget
++        # alternates between equivalent euler decompositions (which quaternions
++        # normalize away) and occasionally flips fingers/wrists outright (which
++        # quat_despike repairs below).
++        quat_series: dict[str, list[Quaternion]] = {}
++        for i in range(frame_count):
++            frame = start + i * RAW_STEP
++            for (bone_name, prop), curves in channels.items():
++                if prop != "rotation_euler":
++                    continue
++                raw_euler = Euler(
++                    (curves.get(0).evaluate(frame) if 0 in curves else 0.0,
++                     curves.get(1).evaluate(frame) if 1 in curves else 0.0,
++                     curves.get(2).evaluate(frame) if 2 in curves else 0.0),
++                    "XYZ",
++                )
++                rotation = raw_euler.to_quaternion()
++                if bone_name in gains:
++                    neutral = neutral_quats[bone_name]
++                    delta = neutral.inverted() @ rotation
++                    if delta.w < 0.0:  # hemisphere canonicalization - THE fix
++                        delta.negate()
++                    rotation = neutral @ quat_pow(delta, float(gains[bone_name]))
++                    check = neutral.inverted() @ rotation
++                    if check.w < 0.0:
++                        check.negate()
++                    max_delta_deg[bone_name] = max(max_delta_deg.get(bone_name, 0.0), math.degrees(check.angle))
++                series = quat_series.setdefault(bone_name, [])
++                if series and series[-1].dot(rotation) < 0.0:
++                    rotation.negate()
++                series.append(rotation)
++
++        for bone_name, worst in sorted(max_delta_deg.items()):
++            if worst > MAX_AMPLIFIED_DELTA_DEG:
++                raise RuntimeError(
++                    f"{clip_name}: amplified {bone_name} reaches {worst:.1f} deg from neutral "
++                    f"(> {MAX_AMPLIFIED_DELTA_DEG}); hemisphere bug or bad neutral - refusing to cut"
++                )
++
++        for bone_name, series in quat_series.items():
++            if FINGER_BONE.match(bone_name):
++                quat_despike(series)
++            path = f'pose.bones["{bone_name}"].rotation_euler'
++            values = sampled.setdefault(path, {})
++            prev = None
++            for rotation in series:
++                out_euler = rotation.to_euler("XYZ", prev) if prev else rotation.to_euler("XYZ")
++                prev = out_euler
++                for axis in range(3):
++                    values.setdefault(axis, []).append(out_euler[axis])
++
++        # Pass 2: location/scale channels.
++        for i in range(frame_count):
++            frame = start + i * RAW_STEP
++            for (bone_name, prop), curves in channels.items():
++                if prop == "rotation_euler":
++                    continue
++                path = f'pose.bones["{bone_name}"].{prop}'
++                values = sampled.setdefault(path, {})
++                for axis, curve in curves.items():
++                    value = curve.evaluate(frame)
++                    if bone_name == "spine" and prop == "location":
++                        value = (value - hip_neutral[axis]) * hip_gain
++                    values.setdefault(axis, []).append(value)
++
++        if clip_name in LOOP_CLIPS:
++            blend = min(LOOP_BLEND_FRAMES, frame_count - 1)
++            for values in sampled.values():
++                for series in values.values():
++                    first = series[0]
++                    for k in range(blend):
++                        index = frame_count - blend + k
++                        t = smoothstep((k + 1) / blend)
++                        series[index] = series[index] * (1.0 - t) + first * t
++
++        stale = bpy.data.actions.get(clip_name)
++        if stale is not None:
++            bpy.data.actions.remove(stale, do_unlink=True)
++        action = bpy.data.actions.new(clip_name)
++        action.use_fake_user = True
++        for path, values in sampled.items():
++            for axis, series in values.items():
++                curve = action.fcurves.new(data_path=path, index=axis)
++                curve.keyframe_points.add(frame_count)
++                for i, value in enumerate(series):
++                    point = curve.keyframe_points[i]
++                    point.co = (1 + i, value)
++                    point.interpolation = "LINEAR"
++                curve.update()
++        new_actions.append(action)
++        worst_summary = ", ".join(f"{b}:{d:.0f}" for b, d in sorted(max_delta_deg.items()))
++        print(f"CUT {clip_name}: frames 1-{frame_count}, arm max deltas deg [{worst_summary}]")
++
++    bpy.data.libraries.write(str(output), set(new_actions), fake_user=True, compress=True)
++    print(f"NONO_CLIP_LIBRARY={output}")
++
++
++if __name__ == "__main__":
++    try:
++        main()
++    except Exception:
++        traceback.print_exc()
++        sys.exit(1)
+diff --git a/.claude/launch.json b/.claude/launch.json
+new file mode 100644
+index 0000000..777ec25
+--- /dev/null
++++ b/.claude/launch.json
+@@ -0,0 +1,11 @@
++{
++  "version": "0.0.1",
++  "configurations": [
++    {
++      "name": "nonosub-dev",
++      "runtimeExecutable": "npm",
++      "runtimeArgs": ["run", "dev"],
++      "port": 5173
++    }
++  ]
++}

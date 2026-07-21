@@ -56,7 +56,7 @@
     "point_user",
     "point_self",
     "cheer",
-    "hand_over_mouth",
+    "heart_touch",
     "surprised",
   ]);
   // Missing clips degrade along this chain so older GLBs keep working.
@@ -66,7 +66,7 @@
     point_user: "neutral",
     point_self: "neutral",
     cheer: "thumbs_up",
-    hand_over_mouth: "neutral",
+    heart_touch: "neutral",
     surprised: "think",
   };
   type TailRig = Record<TailSide, THREE.Bone[]>;

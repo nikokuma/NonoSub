@@ -17,14 +17,14 @@ from pathlib import Path
 import bpy
 
 
-REQUIRED_ACTIONS = {"Idle": (2.0, 4.0), "Think": (2.0, 4.0), "Neutral": (2.0, 4.0), "Thumbs_Up": (1.0, 2.5)}
+REQUIRED_ACTIONS = {"Idle": (2.0, 10.0), "Think": (2.0, 8.0), "Neutral": (2.0, 10.0), "Thumbs_Up": (1.0, 4.0)}
 # Exported and validated only when present; the app falls back gracefully.
 OPTIONAL_ACTIONS = {
-    "Point_User": (1.0, 2.5),
-    "Point_Self": (1.0, 2.5),
-    "Cheer": (1.0, 2.5),
-    "Hand_Over_Mouth": (1.0, 2.5),
-    "Surprised": (0.5, 2.0),
+    "Point_User": (1.0, 4.0),
+    "Point_Self": (1.0, 4.0),
+    "Cheer": (0.5, 4.0),
+    "Heart_Touch": (0.5, 4.0),
+    "Surprised": (0.5, 4.0),
 }
 TAIL_BONES = {f"spine.{index:03d}" for index in range(55, 79)}
 DYNAMIC_HAIR_ROOTS = {"spine.021", "spine.031", "spine.039", "spine.085", "spine.093"}
@@ -104,8 +104,14 @@ def validate_actions(rig: bpy.types.Object) -> dict[str, bpy.types.Action]:
             bone_name, property_name = match.groups()
             if bone_name in forbidden_bones:
                 raise RuntimeError(f"{name} keys procedural bone {bone_name}")
-            if bone_name == "spine" and property_name in {"location", "scale"}:
-                raise RuntimeError(f"{name} contains unintended root-bone {property_name}")
+            if bone_name == "spine" and property_name == "scale":
+                raise RuntimeError(f"{name} contains unintended root-bone scale")
+            if bone_name == "spine" and property_name == "location":
+                # Hip sway is allowed, but only re-based small-amplitude motion:
+                # a drifting root means the capture wasn't normalized.
+                extremes = [abs(k.co.y) for k in curve.keyframe_points]
+                if extremes and max(extremes) > 0.35:
+                    raise RuntimeError(f"{name} root-bone location amplitude {max(extremes):.2f} exceeds 0.35")
     return actions
 
 

@@ -10,7 +10,7 @@ export const NONO_MOODS = [
   "point_user",
   "point_self",
   "cheer",
-  "hand_over_mouth",
+  "heart_touch",
   "surprised",
 ] as const;
 export type NonoMood = (typeof NONO_MOODS)[number];

@@ -71,7 +71,7 @@ else {
 }
 
 const REQUIRED_CLIPS = ["idle", "think", "neutral", "thumbs_up"];
-const OPTIONAL_CLIPS = ["point_user", "point_self", "cheer", "hand_over_mouth", "surprised"];
+const OPTIONAL_CLIPS = ["point_user", "point_self", "cheer", "heart_touch", "surprised"];
 const animationNames = new Set(animations.map((animation) => animation.name?.toLowerCase()).filter(Boolean));
 for (const clip of REQUIRED_CLIPS) {
   if (!animationNames.has(clip) && !allowMissingAnimations) {
