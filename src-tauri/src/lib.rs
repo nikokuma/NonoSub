@@ -244,7 +244,8 @@ impl RetranslationCoordinator {
             .lock()
             .map_err(|_| service_error("Retranslation generation state is unavailable."))?;
         if active.as_ref().is_some_and(|request| {
-            request.lease.session_generation == session_generation
+            request.status == RetranslationStatus::Running
+                && request.lease.session_generation == session_generation
                 && request.lease.languages == languages
                 && !request.lease.is_cancelled()
         }) {
@@ -3600,7 +3601,7 @@ mod tests {
     }
 
     #[test]
-    fn retranslation_requests_suppress_duplicates_and_permanently_cancel_superseded_work() {
+    fn retranslation_requests_suppress_running_duplicates_and_retry_failed_work() {
         let coordinator = RetranslationCoordinator::default();
         let spanish = LanguageSettings {
             source: "ja".into(),
@@ -3610,7 +3611,9 @@ mod tests {
         let first = coordinator.begin(7, spanish.clone()).unwrap().unwrap();
         assert!(coordinator.begin(7, spanish.clone()).unwrap().is_none());
         coordinator.active.lock().unwrap().as_mut().unwrap().status = RetranslationStatus::Failed;
-        assert!(coordinator.begin(7, spanish).unwrap().is_none());
+        let retry = coordinator.begin(7, spanish).unwrap().unwrap();
+        assert!(first.is_cancelled());
+        assert!(!retry.is_cancelled());
 
         let french = LanguageSettings {
             source: "ja".into(),
@@ -3618,9 +3621,10 @@ mod tests {
             explanation: "fr".into(),
         };
         let second = coordinator.begin(7, french).unwrap().unwrap();
-        assert!(first.is_cancelled());
+        assert!(retry.is_cancelled());
         assert!(!second.is_cancelled());
         assert!(coordinator.ensure_current(&first).is_err());
+        assert!(coordinator.ensure_current(&retry).is_err());
         assert!(coordinator.ensure_current(&second).is_ok());
     }
 
@@ -3827,11 +3831,13 @@ mod tests {
         assert_eq!(after.segments, before.segments);
         assert_eq!(after.errors.len(), before.errors.len() + 1);
         drop(after);
-        assert!(state
+        let retry = state
             .retranslations
             .begin(generation, requested)
             .unwrap()
-            .is_none());
+            .expect("a failed target can be retried");
+        assert_ne!(retry.request_generation, lease.request_generation);
+        assert!(lease.is_cancelled());
     }
 
     #[test]

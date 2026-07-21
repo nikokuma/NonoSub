@@ -259,3 +259,13 @@
 - `pnpm verify` passes with zero Svelte errors or warnings, 135 frontend tests, a successful production build, 110 Rust tests, and warning-free clippy. All five production surface URLs return HTTP 200.
 - Built an arm64 `.app`, `.dmg`, and `.app.zip`; strict code-sign verification passes after ad-hoc signing. Manual paid-network, ScreenCaptureKit permission, multi-display, and second-Mac Gatekeeper checks remain open.
 - Cloned exact pushed R13 commit `e011e37` into a fresh temporary directory, installed with the frozen lockfile, and repeated the complete verification successfully: zero Svelte errors or warnings, 135 frontend tests, production build, 110 Rust tests, and warning-free clippy.
+
+## July 20 — Acceptance audit repairs
+
+- Replaced the shared live cancellation flag with one cancellation token per registered run and serialized replacement through final task registration, closing the duplicate-Start gap that could leave two capture/API tasks active.
+- Finalized and cleared original-only item state at reconnect boundaries so reused realtime item IDs create new NonoSub segments instead of appending to finalized captions.
+- Kept the last coordinated caption visible through catch-up/reconnect gaps and prevented complete translations from pairing with provisional source text.
+- Pruned translation-only and unterminated original-only fault histories independently to the 256-unit/120-second live retention limits.
+- Allowed failed same-target file retranslations to create a fresh request lease while continuing to suppress duplicates that are still running.
+- Added lesson-schema headroom plus complete-sentence validation for speech bubbles and ambiguity notes, and made constructor-time WebGL failure activate the existing text-safe lesson fallback.
+- Full verification passes with zero Svelte errors or warnings, 144 frontend tests, a successful production build, 116 Rust tests passing with one native permission test ignored, and warning-free clippy.

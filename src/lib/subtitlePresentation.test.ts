@@ -59,6 +59,22 @@ describe("subtitle presentation", () => {
     expect(segment.translationText).toBe("Today is a little");
   });
 
+  it("does not pair a completed translation with provisional source in coordinated mode", () => {
+    const segment: SubtitleSegment = {
+      id: "live-provisional-source",
+      origin: "live",
+      startMs: 0,
+      endMs: 1_000,
+      sourceText: "今日はちょっ",
+      translationText: "Today does not work for me.",
+      isProvisional: true,
+      transcriptionStatus: "pending",
+      translationStatus: "complete",
+    };
+    expect(liveOverlaySegment(segment, "coordinated").translationText).toBeUndefined();
+    expect(liveOverlaySegment(segment, "fast_source")).toBe(segment);
+  });
+
   it("shrinks long captions until they fit the available height", () => {
     const result = calculateSubtitleFit({
       basePx: 28,

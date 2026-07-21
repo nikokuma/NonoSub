@@ -1,5 +1,5 @@
 import { DEFAULT_LIVE_SYNC } from "./contracts";
-import type { LiveSyncState, SequencedSessionEvent, SessionEvent, SessionState, SubtitleSegment } from "./contracts";
+import type { LiveSyncMode, LiveSyncState, SequencedSessionEvent, SessionEvent, SessionState, SubtitleSegment } from "./contracts";
 
 const MAX_RECOVERABLE_ERRORS = 50;
 
@@ -76,7 +76,13 @@ export function reduceSession(state: SessionState, event: SessionEvent): Session
     case "coverage_changed":
       return { ...state, readyThroughMs: event.readyThroughMs };
     case "live_sync_changed":
-      return { ...state, liveSync: event.sync };
+      return {
+        ...state,
+        liveSync: {
+          ...event.sync,
+          visibleSegmentId: event.sync.visibleSegmentId ?? state.liveSync?.visibleSegmentId,
+        },
+      };
     case "lesson_selected":
       return { ...state, selectedSegmentId: event.segmentId };
     case "recoverable_error":
@@ -103,10 +109,25 @@ export function subtitleTimelineTime(videoTimeMs: number, manualOffsetMs: number
   return Math.max(0, videoTimeMs - manualOffsetMs);
 }
 
-export function visibleLiveSegments(segments: SubtitleSegment[], sync?: LiveSyncState): SubtitleSegment[] {
-  if (!sync?.visibleSegmentId) return [];
-  const visible = segments.find((segment) => segment.id === sync.visibleSegmentId);
-  return visible ? [visible] : [];
+export function visibleLiveSegments(
+  segments: SubtitleSegment[],
+  sync?: LiveSyncState,
+  mode: LiveSyncMode = "coordinated",
+): SubtitleSegment[] {
+  const requested = sync?.visibleSegmentId
+    ? segments.find((segment) => segment.id === sync.visibleSegmentId)
+    : undefined;
+  const sourceComplete = (segment: SubtitleSegment) => !segment.isProvisional
+    && segment.transcriptionStatus === "complete";
+  if (requested && (mode === "fast_source" || sourceComplete(requested))) return [requested];
+  if (mode === "fast_source" || !requested) return [];
+
+  const requestedIndex = segments.findIndex((segment) => segment.id === requested.id);
+  const retained = segments.slice(0, requestedIndex).reverse().find((segment) => sourceComplete(segment)
+    && (segment.translationStatus === "complete"
+      || segment.translationStatus === "failed"
+      || segment.translationStatus === "skipped"));
+  return retained ? [retained] : [];
 }
 
 export function latestLiveSegments(segments: SubtitleSegment[]): SubtitleSegment[] {

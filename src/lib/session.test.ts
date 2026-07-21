@@ -151,4 +151,31 @@ describe("session contract", () => {
     const sync = { targetDelayMs: 3_100, observedLagMs: 2_500, status: "catching_up" as const, visibleSegmentId: "live-2" };
     expect(reduceSession(EMPTY_SESSION, { type: "live_sync_changed", sync }).liveSync).toEqual(sync);
   });
+
+  it("retains the last released live caption when a catch-up event omits visibility", () => {
+    const visible = { targetDelayMs: 2_500, observedLagMs: 1_800, status: "steady" as const, visibleSegmentId: "live-1" };
+    const state = reduceSession(EMPTY_SESSION, { type: "live_sync_changed", sync: visible });
+    const catchingUp = reduceSession(state, {
+      type: "live_sync_changed",
+      sync: { targetDelayMs: 3_200, observedLagMs: 2_900, status: "catching_up" },
+    });
+    expect(catchingUp.liveSync?.visibleSegmentId).toBe("live-1");
+  });
+
+  it("keeps the previous complete pair when coordinated sync selects provisional source", () => {
+    const previous = { ...FIXTURE_SEGMENTS[0], id: "live-1", origin: "live" as const };
+    const provisional = {
+      ...FIXTURE_SEGMENTS[1],
+      id: "live-2",
+      origin: "live" as const,
+      isProvisional: true,
+      transcriptionStatus: "pending" as const,
+      translationStatus: "complete" as const,
+    };
+    expect(visibleLiveSegments(
+      [previous, provisional],
+      { targetDelayMs: 2_500, observedLagMs: 1_900, status: "steady", visibleSegmentId: "live-2" },
+      "coordinated",
+    )).toEqual([previous]);
+  });
 });

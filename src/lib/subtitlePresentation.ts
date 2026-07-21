@@ -154,9 +154,11 @@ export function liveOverlaySegment(
   segment: SubtitleSegment,
   liveMode: LiveSyncMode,
 ): SubtitleSegment {
-  if (liveMode !== "coordinated" || segment.translationStatus === "complete") {
+  if (liveMode !== "coordinated") {
     return segment;
   }
+  const sourceComplete = !segment.isProvisional && segment.transcriptionStatus === "complete";
+  if (sourceComplete && segment.translationStatus === "complete") return segment;
   return { ...segment, translationText: undefined };
 }
 

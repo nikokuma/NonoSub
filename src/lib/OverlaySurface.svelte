@@ -34,7 +34,7 @@
   const captions = $derived(fixtureWaiting
     ? []
     : session.mode === "live"
-      ? visibleLiveSegments(session.segments, session.liveSync)
+      ? visibleLiveSegments(session.segments, session.liveSync, preferences.sync.liveMode)
       : session.segments.slice(-1));
   const sessionStyle = $derived(effectiveStyle(preferences.style, session.processingMode));
   const activeStyle = $derived({

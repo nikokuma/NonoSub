@@ -94,10 +94,10 @@ impl OpenAiClient {
             .read_timeout(READ_IDLE_TIMEOUT)
             .build()
             .map_err(|error| ApiError {
-            kind: ApiErrorKind::Network,
-            message: format!("Could not initialize secure networking: {error}"),
-            retryable: false,
-        })?;
+                kind: ApiErrorKind::Network,
+                message: format!("Could not initialize secure networking: {error}"),
+                retryable: false,
+            })?;
         Ok(Self { http, api_key })
     }
 
@@ -300,6 +300,17 @@ impl OpenAiClient {
             "required": ["text", "color", "mark", "tailCue"],
             "additionalProperties": false
         });
+        let ambiguity_phrase_schema = json!({
+            "type": "object",
+            "properties": {
+                "text": { "type": "string", "maxLength": 180 },
+                "color": { "type": "string", "enum": ["white", "baby_blue", "yellow", "pink"] },
+                "mark": { "type": "string", "enum": ["none", "box", "bracket", "strike"] },
+                "tailCue": { "type": "string", "enum": ["none", "point", "underline"] }
+            },
+            "required": ["text", "color", "mark", "tailCue"],
+            "additionalProperties": false
+        });
         let demo_item_schema = json!({
             "type": "object",
             "properties": {
@@ -317,7 +328,7 @@ impl OpenAiClient {
             "reasoning": { "effort": "low" },
             "store": false,
             "input": [
-                { "role": "system", "content": [{ "type": "input_text", "text": "You are Nono, an accurate language tutor and chalkboard director. Teach the source utterance in the requested explanation language at the learner's level. The selected line may intentionally lack a translation; translate it when useful. Use nearby dialogue for cultural and pragmatic meaning. Preserve source quotations exactly. Mark ambiguity instead of inventing certainty. Accuracy comes first; use at most one light cute, playful, slightly bratty aside. Return one focused teaching moment when enough, or two to three ordered moments only for genuinely distinct concepts. Every moment must fit on one non-scrolling board. A demonstration allows at most one section with three short lines; without a demonstration, use at most two sections with three short lines each. Use at most four demo items. Choose sentence_breakdown for phrase pieces, omitted_meaning for an understood blank, literal_to_natural for a meaning transformation, tone_scale for direct-to-soft comparisons, mini_dialogue for context, or none. Direct the approved chalk presentation: white for neutral context; baby_blue for source forms and grammar; yellow for meanings and takeaways; pink for omission, contrast, correction, exception, or uncertainty. You may deviate only when it makes the lesson clearer. Use box or bracket as structural cues. Use strike only for definitely incorrect or unnatural language, always in pink, never for ambiguity. Each moment must contain exactly one tailCue: either one point or one underline, never both. Attach the cue to the exact phrase or item Nono should indicate. Choose point when Nono should hold attention on the moment's active concept, or underline for one memorable takeaway. Do not output coordinates, selectors, CSS, SVG, bone names, durations, or animation code. sourceFocus controls the already-displayed selected utterance. A tail-drawn underline remains after the gesture. Return three useful follow-up prompts for the complete lesson." }] },
+                { "role": "system", "content": [{ "type": "input_text", "text": "You are Nono, an accurate language tutor and chalkboard director. Teach the source utterance in the requested explanation language at the learner's level. The selected line may intentionally lack a translation; translate it when useful. Use nearby dialogue for cultural and pragmatic meaning. Preserve source quotations exactly. Mark ambiguity instead of inventing certainty. Accuracy comes first; use at most one light cute, playful, slightly bratty aside. Return one focused teaching moment when enough, or two to three ordered moments only for genuinely distinct concepts. Every moment must fit on one non-scrolling board. A demonstration allows at most one section with three short lines; without a demonstration, use at most two sections with three short lines each. Use at most four demo items. Every speech bubble and ambiguity note must be a complete sentence with terminal punctuation. Keep speech bubbles under 150 characters and ambiguity notes under 120 characters; never end mid-word or with a stray script fragment. Choose sentence_breakdown for phrase pieces, omitted_meaning for an understood blank, literal_to_natural for a meaning transformation, tone_scale for direct-to-soft comparisons, mini_dialogue for context, or none. Direct the approved chalk presentation: white for neutral context; baby_blue for source forms and grammar; yellow for meanings and takeaways; pink for omission, contrast, correction, exception, or uncertainty. You may deviate only when it makes the lesson clearer. Use box or bracket as structural cues. Use strike only for definitely incorrect or unnatural language, always in pink, never for ambiguity. Each moment must contain exactly one tailCue: either one point or one underline, never both. Attach the cue to the exact phrase or item Nono should indicate. Choose point when Nono should hold attention on the moment's active concept, or underline for one memorable takeaway. Do not output coordinates, selectors, CSS, SVG, bone names, durations, or animation code. sourceFocus controls the already-displayed selected utterance. A tail-drawn underline remains after the gesture. Return three useful follow-up prompts for the complete lesson." }] },
                 { "role": "user", "content": [{ "type": "input_text", "text": serde_json::to_string(lesson_context).unwrap_or_default() }] }
             ],
             "text": { "format": {
@@ -337,7 +348,7 @@ impl OpenAiClient {
                                 "type": "object",
                                 "properties": {
                                     "title": { "type": "string", "maxLength": 48 },
-                                    "speechBubble": { "type": "string", "maxLength": 180 },
+                                    "speechBubble": { "type": "string", "maxLength": 220 },
                                     "sourceFocus": {
                                         "type": "object",
                                         "properties": {
@@ -375,7 +386,7 @@ impl OpenAiClient {
                                         "required": ["kind", "caption", "items", "result"],
                                         "additionalProperties": false
                                     },
-                                    "ambiguityNote": { "anyOf": [chalk_phrase_schema, { "type": "null" }] }
+                                    "ambiguityNote": { "anyOf": [ambiguity_phrase_schema, { "type": "null" }] }
                                 },
                                 "required": ["title", "speechBubble", "sourceFocus", "boardSections", "demonstration", "ambiguityNote"],
                                 "additionalProperties": false
@@ -467,6 +478,7 @@ fn validate_lesson_card(card: LessonCard) -> Result<LessonCard, ApiError> {
                 || too_long(&moment.title, 48)
                 || moment.speech_bubble.trim().is_empty()
                 || too_long(&moment.speech_bubble, 180)
+                || !complete_sentence(&moment.speech_bubble)
                 || point_count + underline_count != 1
                 || moment.board_sections.len() > 2
                 || moment.board_sections.iter().any(|section| {
@@ -498,12 +510,11 @@ fn validate_lesson_card(card: LessonCard) -> Result<LessonCard, ApiError> {
                     .result
                     .as_ref()
                     .is_some_and(|result| invalid_phrase(result, 90))
-                || moment
-                    .ambiguity_note
-                    .as_ref()
-                    .is_some_and(|note| {
-                        invalid_phrase(note, 140) || matches!(note.mark, ChalkMark::Strike)
-                    })
+                || moment.ambiguity_note.as_ref().is_some_and(|note| {
+                    invalid_phrase(note, 140)
+                        || !complete_sentence(&note.text)
+                        || matches!(note.mark, ChalkMark::Strike)
+                })
                 || (matches!(
                     moment.demonstration.kind,
                     crate::contracts::BoardDemoKind::None
@@ -536,6 +547,20 @@ fn invalid_phrase(phrase: &ChalkPhrase, length_limit: usize) -> bool {
     phrase.text.trim().is_empty()
         || phrase.text.chars().count() > length_limit
         || invalid_mark(phrase.color, phrase.mark)
+}
+
+fn complete_sentence(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.ends_with('/') {
+        return false;
+    }
+    let content = trimmed.trim_end_matches([
+        '"', '\'', '”', '’', '」', '』', '》', '〉', '】', '）', ')', ']',
+    ]);
+    content
+        .chars()
+        .last()
+        .is_some_and(|character| matches!(character, '.' | '?' | '!' | '。' | '？' | '！' | '…'))
 }
 
 fn invalid_mark(color: ChalkColor, mark: ChalkMark) -> bool {
@@ -1295,5 +1320,25 @@ mod tests {
             suggested_follow_ups: vec!["One?".into(), "Two?".into(), "Three?".into()],
         };
         assert!(validate_lesson_card(card).is_err());
+    }
+
+    #[test]
+    fn lesson_sentence_validation_rejects_truncated_model_text() {
+        for value in [
+            "The speaker is忙",
+            "They went/gِ",
+            "Another known/re",
+            "This reports a済/",
+        ] {
+            assert!(
+                !complete_sentence(value),
+                "accepted truncated text: {value}"
+            );
+        }
+        assert!(complete_sentence(
+            "The omitted subject remains uncertain in this excerpt."
+        ));
+        assert!(complete_sentence("その主語は文脈だけでは決まりません。"));
+        assert!(complete_sentence("“This is context-dependent.”"));
     }
 }

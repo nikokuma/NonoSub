@@ -140,14 +140,24 @@ impl RecentEventIds {
         self.set.clear();
         self.order.clear();
     }
+
+    fn contains(&self, id: &str) -> bool {
+        self.set.contains(id)
+    }
+}
+
+#[derive(Debug)]
+struct ActiveLiveRun {
+    _start_id: u64,
+    cancelled: Arc<AtomicBool>,
+    task: tauri::async_runtime::JoinHandle<()>,
 }
 
 #[derive(Debug, Default)]
 pub struct LiveState {
-    cancelled: Arc<AtomicBool>,
     start_sequence: std::sync::atomic::AtomicU64,
     start_lock: tokio::sync::Mutex<()>,
-    task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    active: Mutex<Option<ActiveLiveRun>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1029,10 +1039,6 @@ impl CaptionCoordinator {
             }
             remove_drafts += 1;
         }
-        if remove_drafts == 0 {
-            return;
-        }
-
         self.drafts.drain(..remove_drafts);
         self.translation_pair_cursor = self.translation_pair_cursor.saturating_sub(remove_drafts);
         for draft in &mut self.drafts {
@@ -1081,16 +1087,18 @@ impl CaptionCoordinator {
             .active_source_clause
             .and_then(|index| source_map.get(index).copied().flatten());
 
-        let unpaired = self
+        let recent_unpaired = self
             .unpaired_translation_clauses
             .iter()
+            .rev()
+            .take(MAX_RETAINED_LIVE_UNITS)
             .copied()
             .collect::<HashSet<_>>();
         let mut translation_map = vec![None; self.translation_clauses.len()];
         let mut retained_translations = Vec::new();
         for (index, clause) in self.translation_clauses.drain(..).enumerate() {
-            let recent_unpaired = unpaired.contains(&index)
-                && (!clause.closed || clause.end_ms >= cutoff);
+            let recent_unpaired =
+                recent_unpaired.contains(&index) && (!clause.closed || clause.end_ms >= cutoff);
             if clause.unit_index.is_some()
                 || self.active_translation_clause == Some(index)
                 || recent_unpaired
@@ -1157,10 +1165,17 @@ impl CaptionCoordinator {
     }
 }
 
+#[derive(Debug)]
+struct PendingTranscription {
+    segment: SubtitleSegment,
+    last_at_ms: u64,
+}
+
 #[derive(Debug, Default)]
 struct TranscriptionCoordinator {
-    segments: HashMap<String, SubtitleSegment>,
+    segments: HashMap<String, PendingTranscription>,
     seen_event_ids: RecentEventIds,
+    completed_item_ids: RecentEventIds,
     next_segment: u64,
 }
 
@@ -1172,21 +1187,24 @@ impl TranscriptionCoordinator {
         }
     }
 
-    fn segment_mut(&mut self, item_id: &str, capture_clock_ms: u64) -> &mut SubtitleSegment {
+    fn segment_mut(&mut self, item_id: &str, capture_clock_ms: u64) -> &mut PendingTranscription {
         self.segments.entry(item_id.to_owned()).or_insert_with(|| {
             self.next_segment += 1;
-            SubtitleSegment {
-                id: format!("live-original-{}", self.next_segment),
-                origin: SessionMode::Live,
-                start_ms: capture_clock_ms,
-                end_ms: capture_clock_ms.saturating_add(250),
-                source_text: String::new(),
-                translation_text: None,
-                ambiguity_note: None,
-                speaker_id: Some("live-audio".into()),
-                is_provisional: true,
-                transcription_status: SegmentStatus::Pending,
-                translation_status: SegmentStatus::Skipped,
+            PendingTranscription {
+                last_at_ms: capture_clock_ms,
+                segment: SubtitleSegment {
+                    id: format!("live-original-{}", self.next_segment),
+                    origin: SessionMode::Live,
+                    start_ms: capture_clock_ms,
+                    end_ms: capture_clock_ms.saturating_add(250),
+                    source_text: String::new(),
+                    translation_text: None,
+                    ambiguity_note: None,
+                    speaker_id: Some("live-audio".into()),
+                    is_provisional: true,
+                    transcription_status: SegmentStatus::Pending,
+                    translation_status: SegmentStatus::Skipped,
+                },
             }
         })
     }
@@ -1212,7 +1230,12 @@ impl TranscriptionCoordinator {
         if text.is_empty() || !self.accept(&event_id) {
             return Vec::new();
         }
-        let segment = self.segment_mut(&item_id, capture_clock_ms);
+        if self.completed_item_ids.contains(&item_id) {
+            return Vec::new();
+        }
+        let pending = self.segment_mut(&item_id, capture_clock_ms);
+        pending.last_at_ms = capture_clock_ms;
+        let segment = &mut pending.segment;
         segment.source_text.push_str(&text);
         segment.end_ms = capture_clock_ms.max(segment.start_ms.saturating_add(250));
         vec![
@@ -1233,12 +1256,18 @@ impl TranscriptionCoordinator {
         if !self.accept(&event_id) {
             return Vec::new();
         }
-        let segment = self.segment_mut(&item_id, capture_clock_ms);
+        if self.completed_item_ids.contains(&item_id) {
+            return Vec::new();
+        }
+        let pending = self.segment_mut(&item_id, capture_clock_ms);
+        pending.last_at_ms = capture_clock_ms;
+        let segment = &mut pending.segment;
         if !text.trim().is_empty() {
             segment.source_text = text;
         }
         if segment.source_text.trim().is_empty() {
             self.segments.remove(&item_id);
+            self.completed_item_ids.insert(&item_id);
             return Vec::new();
         }
         segment.end_ms = capture_clock_ms.max(segment.start_ms.saturating_add(250));
@@ -1247,21 +1276,54 @@ impl TranscriptionCoordinator {
         let finalized = segment.clone();
         let sync_id = finalized.id.clone();
         self.segments.remove(&item_id);
+        self.completed_item_ids.insert(&item_id);
         vec![
-            SessionEvent::TranscriptFinalized {
-                segment: finalized,
-            },
+            SessionEvent::TranscriptFinalized { segment: finalized },
             Self::sync(sync_id),
         ]
     }
 
     fn finish(&mut self, capture_clock_ms: u64) -> Vec<SessionEvent> {
         let mut events = Vec::new();
-        for segment in self
+        for (_, mut pending) in self.segments.drain() {
+            let segment = &mut pending.segment;
+            if segment.source_text.trim().is_empty() {
+                continue;
+            }
+            segment.end_ms = capture_clock_ms.max(segment.start_ms.saturating_add(250));
+            segment.is_provisional = false;
+            segment.transcription_status = SegmentStatus::Complete;
+            events.push(SessionEvent::TranscriptFinalized {
+                segment: segment.clone(),
+            });
+        }
+        self.seen_event_ids.clear();
+        self.completed_item_ids.clear();
+        events
+    }
+
+    fn prune(&mut self, capture_clock_ms: u64) -> Vec<SessionEvent> {
+        let cutoff = capture_clock_ms.saturating_sub(MAX_RETAINED_LIVE_MS);
+        let mut ordered = self
             .segments
-            .values_mut()
-            .filter(|segment| segment.is_provisional)
-        {
+            .iter()
+            .map(|(item_id, pending)| (item_id.clone(), pending.last_at_ms))
+            .collect::<Vec<_>>();
+        ordered.sort_by_key(|(_, last_at_ms)| *last_at_ms);
+        let excess = ordered.len().saturating_sub(MAX_RETAINED_LIVE_UNITS);
+        let evict = ordered
+            .into_iter()
+            .enumerate()
+            .filter(|(index, (_, last_at_ms))| *index < excess || *last_at_ms < cutoff)
+            .map(|(_, (item_id, _))| item_id)
+            .collect::<Vec<_>>();
+        let mut events = Vec::new();
+        for item_id in evict {
+            let Some(mut pending) = self.segments.remove(&item_id) else {
+                continue;
+            };
+            self.completed_item_ids.insert(&item_id);
+            let segment = &mut pending.segment;
             if segment.source_text.trim().is_empty() {
                 continue;
             }
@@ -1671,11 +1733,10 @@ pub async fn start(
         processing_mode,
         source,
     } = options;
-    let start_lease = state.start_sequence.fetch_add(1, Ordering::Relaxed) + 1;
-    abort_previous(state).await;
+    let start_lease = state.start_sequence.fetch_add(1, Ordering::SeqCst) + 1;
     let _start_guard = state.start_lock.lock().await;
+    abort_previous(state).await;
     ensure_live_start_current(state, start_lease)?;
-    state.cancelled.store(false, Ordering::Relaxed);
 
     let content = AsyncSCShareableContent::create()
         .with_exclude_desktop_windows(true)
@@ -1704,7 +1765,10 @@ pub async fn start(
     stream.start_capture().await.map_err(|error| {
         capture_error(&format!("System audio capture could not start: {error}"))
     })?;
-    ensure_live_start_current(state, start_lease)?;
+    if let Err(error) = ensure_live_start_current(state, start_lease) {
+        let _ = stream.stop_capture().await;
+        return Err(error);
+    }
     let _ = record_event_for_generation(
         &app,
         generation,
@@ -1713,7 +1777,8 @@ pub async fn start(
         },
     );
 
-    let cancelled = state.cancelled.clone();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let task_cancelled = Arc::clone(&cancelled);
     let task = tauri::async_runtime::spawn(async move {
         let original_only = processing_mode == CaptionProcessingMode::OriginalOnly;
         let mut pcm = Vec::<i16>::with_capacity(SEND_SAMPLES * 2);
@@ -1733,7 +1798,7 @@ pub async fn start(
         let mut reconnect = ReconnectAllowance::default();
 
         'capture: loop {
-            if cancelled.load(Ordering::Relaxed) && !closing {
+            if task_cancelled.load(Ordering::Relaxed) && !closing {
                 closing = true;
                 close_started = Some(Instant::now());
                 let close_event = if original_only {
@@ -1977,8 +2042,11 @@ pub async fn start(
                     }
                 }
                 _ = tick.tick() => {
-                    if !original_only {
-                        emit_events(&app, generation, coordinator.tick(capture_clock_ms(captured_input_samples_48k / 2)));
+                    let capture_ms = capture_clock_ms(captured_input_samples_48k / 2);
+                    if original_only {
+                        emit_events(&app, generation, transcription.prune(capture_ms));
+                    } else {
+                        emit_events(&app, generation, coordinator.tick(capture_ms));
                     }
                 }
             }
@@ -2000,10 +2068,21 @@ pub async fn start(
         let _ = stream.stop_capture().await;
         let _ = record_event_for_generation(&app, generation, SessionEvent::Complete);
     });
-    *state
-        .task
+    let mut active = state
+        .active
         .lock()
-        .map_err(|_| capture_error("Live task state is unavailable."))? = Some(task);
+        .map_err(|_| capture_error("Live task state is unavailable."))?;
+    if let Err(error) = ensure_live_start_current(state, start_lease) {
+        drop(active);
+        cancelled.store(true, Ordering::Relaxed);
+        drain_or_abort(task).await;
+        return Err(error);
+    }
+    *active = Some(ActiveLiveRun {
+        _start_id: start_lease,
+        cancelled,
+        task,
+    });
     Ok(())
 }
 
@@ -2109,12 +2188,16 @@ fn close_for_transmission_gap(
 }
 
 pub fn stop(state: &LiveState) {
-    state.start_sequence.fetch_add(1, Ordering::Relaxed);
-    state.cancelled.store(true, Ordering::Relaxed);
+    state.start_sequence.fetch_add(1, Ordering::SeqCst);
+    if let Ok(active) = state.active.lock() {
+        if let Some(active) = active.as_ref() {
+            active.cancelled.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 fn ensure_live_start_current(state: &LiveState, lease: u64) -> Result<(), ApiError> {
-    if state.start_sequence.load(Ordering::Relaxed) == lease {
+    if state.start_sequence.load(Ordering::SeqCst) == lease {
         Ok(())
     } else {
         Err(ApiError {
@@ -2126,11 +2209,24 @@ fn ensure_live_start_current(state: &LiveState, lease: u64) -> Result<(), ApiErr
 }
 
 async fn abort_previous(state: &LiveState) {
-    state.cancelled.store(true, Ordering::Relaxed);
-    let previous = state.task.lock().ok().and_then(|mut task| task.take());
-    if let Some(task) = previous {
+    let previous = state
+        .active
+        .lock()
+        .ok()
+        .and_then(|mut active| active.take());
+    if let Some(previous) = previous {
+        previous.cancelled.store(true, Ordering::Relaxed);
+        drain_or_abort(previous.task).await;
+    }
+}
+
+async fn drain_or_abort(mut task: tauri::async_runtime::JoinHandle<()>) {
+    if tokio::time::timeout(Duration::from_secs(3), &mut task)
+        .await
+        .is_err()
+    {
         task.abort();
-        let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+        let _ = task.await;
     }
 }
 
@@ -2641,6 +2737,51 @@ mod tests {
             ApiErrorKind::Cancelled
         );
         assert!(ensure_live_start_current(&state, second).is_ok());
+    }
+
+    #[tokio::test]
+    async fn duplicate_live_start_cannot_overwrite_an_unseen_older_task() {
+        let state = LiveState::default();
+        let first = state.start_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+        let first_guard = state.start_lock.lock().await;
+        ensure_live_start_current(&state, first).unwrap();
+
+        let first_cancelled = Arc::new(AtomicBool::new(false));
+        let first_task_cancelled = Arc::clone(&first_cancelled);
+        let first_task = tauri::async_runtime::spawn(async move {
+            while !first_task_cancelled.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        *state.active.lock().unwrap() = Some(ActiveLiveRun {
+            _start_id: first,
+            cancelled: Arc::clone(&first_cancelled),
+            task: first_task,
+        });
+
+        let second = state.start_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+        drop(first_guard);
+
+        let _second_guard = state.start_lock.lock().await;
+        abort_previous(&state).await;
+        assert!(first_cancelled.load(Ordering::Relaxed));
+        assert!(state.active.lock().unwrap().is_none());
+        assert!(ensure_live_start_current(&state, second).is_ok());
+
+        let second_cancelled = Arc::new(AtomicBool::new(false));
+        let second_task_cancelled = Arc::clone(&second_cancelled);
+        let second_task = tauri::async_runtime::spawn(async move {
+            while !second_task_cancelled.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        *state.active.lock().unwrap() = Some(ActiveLiveRun {
+            _start_id: second,
+            cancelled: Arc::clone(&second_cancelled),
+            task: second_task,
+        });
+        assert!(!second_cancelled.load(Ordering::Relaxed));
+        abort_previous(&state).await;
     }
 
     #[test]
@@ -3263,6 +3404,73 @@ mod tests {
         assert!(
             matches!(events.first(), Some(SessionEvent::TranscriptFinalized { segment }) if !segment.is_provisional && segment.source_text == "今日はちょっと。")
         );
+    }
+
+    #[test]
+    fn original_only_reconnect_starts_fresh_when_item_ids_are_reused() {
+        let mut coordinator = TranscriptionCoordinator::default();
+        coordinator.on_delta(
+            "item-reused".into(),
+            Some("before-delta".into()),
+            "before".into(),
+            1_000,
+        );
+        let finalized = coordinator.finish(1_500);
+        let first_id = match finalized.first() {
+            Some(SessionEvent::TranscriptFinalized { segment }) => segment.id.clone(),
+            other => panic!("expected a finalized pre-reconnect segment, got {other:?}"),
+        };
+
+        let after = coordinator.on_delta(
+            "item-reused".into(),
+            Some("after-delta".into()),
+            "after".into(),
+            2_000,
+        );
+        match after.first() {
+            Some(SessionEvent::CaptionUpserted { segment }) => {
+                assert_eq!(segment.source_text, "after");
+                assert!(segment.is_provisional);
+                assert_ne!(segment.id, first_id);
+            }
+            other => panic!("expected a fresh post-reconnect segment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn degraded_live_histories_remain_bounded() {
+        let mut translated = CaptionCoordinator::new(LiveSyncMode::Coordinated);
+        for index in 0..1_800_u64 {
+            let clock = index * 1_000;
+            translated.on_translation(
+                TimedText {
+                    event_id: Some(format!("target-only-{index}")),
+                    text: format!("Target {index}."),
+                    elapsed_ms: Some(clock),
+                },
+                clock,
+            );
+            translated.tick(clock + TERMINAL_QUIET_MS);
+        }
+        translated.tick(1_800_000);
+        assert!(translated.translation_clauses.len() <= MAX_RETAINED_LIVE_UNITS);
+        assert!(translated.unpaired_translation_clauses.len() <= MAX_RETAINED_LIVE_UNITS);
+
+        let mut original = TranscriptionCoordinator::default();
+        for index in 0..1_800_u64 {
+            let clock = index * 1_000;
+            original.on_delta(
+                format!("item-{index}"),
+                Some(format!("event-{index}")),
+                "partial".into(),
+                clock,
+            );
+            original.prune(clock);
+        }
+        original.prune(1_800_000);
+        assert!(original.segments.len() <= MAX_RETAINED_LIVE_UNITS);
+        assert!(original.seen_event_ids.order.len() <= MAX_RECENT_EVENT_IDS);
+        assert!(original.completed_item_ids.order.len() <= MAX_RECENT_EVENT_IDS);
     }
 
     #[test]
