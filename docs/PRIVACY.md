@@ -10,7 +10,8 @@
 | --- | --- | --- |
 | Selected video | Local Tauri asset protocol only | Existing user file |
 | Extracted WAV chunks | OpenAI transcription API | Local temp directory for current session; transcription endpoint follows OpenAI API controls |
-| Selected live system audio | OpenAI realtime translation | Memory only until each approximately 100 ms batch is transmitted; never written to disk |
+| Selected live system audio | OpenAI realtime translation or realtime Whisper transcription | Memory only until each approximately 100 ms batch is transmitted; never written to disk |
+| Finalized live source clause in Accurate mode | GPT‑5.6 Luna Responses API | Current app memory; request uses `store:false` |
 | Transcript context | GPT‑5.6 Responses API | Current app memory; request uses `store:false` |
 | Tutor question/thread | GPT‑5.6 Responses API | Current app memory; request uses `store:false` |
 | OpenAI API key | OS credential vault | Until user removes it |

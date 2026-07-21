@@ -4,6 +4,8 @@ mod chunking;
 mod contracts;
 #[cfg(target_os = "macos")]
 mod live;
+#[cfg(test)]
+mod luna_benchmark;
 mod media;
 mod media_keys;
 mod openai;

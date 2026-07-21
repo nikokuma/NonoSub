@@ -18,6 +18,8 @@ For the reverse-direction path, set Subtitles to **Japanese** and open `demo/Non
 
 Choose **Start Live Captions…** from the menu bar. NonoSub displays a visible list of shareable applications, windows, and displays; select the browser or media application there and press **Start Captions**. NonoSub captures only the selected system audio, excludes its own process audio, and does not write PCM to disk. Live mode intentionally uses one `Live Audio` identity rather than claiming reliable realtime diarization.
 
+Settings offers two next-session engines. **Realtime — Fast** is the default and uses `gpt-realtime-translate`. **Transcript-Locked — Accurate (Experimental)** finalizes the source with `gpt-realtime-whisper`, then translates that immutable clause with `gpt-5.6-luna`. Accurate mode holds the previous readable caption until its validated pair is ready; failures keep a clickable source-only caption rather than falling back to another engine.
+
 If permission is denied, enable NonoSub under **System Settings → Privacy & Security → Screen & System Audio Recording**, then relaunch. File mode remains available regardless of live-capture permission.
 
 ## Unsigned artifact

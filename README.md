@@ -20,7 +20,7 @@ The repository currently contains:
 - OS credential-vault storage for the OpenAI key, a non-sensitive local configured marker, and live model-access validation;
 - pure-Rust MP4/MOV AAC decoding, mono 16 kHz WAV conversion, silence-aware chunking, and temporary-file cleanup;
 - streamed diarized transcription parsing, contextual Structured Output translation, atomic generation-scoped target-only retranslation, coverage events, cancellation, and retry-once behavior;
-- macOS 14 ScreenCaptureKit system-audio capture, 48→24 kHz PCM16 conversion, realtime translation or low-latency transcription-only sessions, one automatic reconnect, and graceful drain/close;
+- macOS 14 ScreenCaptureKit system-audio capture, 48→24 kHz PCM16 conversion, a default Realtime — Fast engine, an experimental transcript-locked Whisper→Luna engine, low-latency transcription-only sessions, one automatic reconnect, and graceful drain/close;
 - readable timed splitting for paragraph-sized transcription turns, before contextual translation;
 - original Japanese indirect-refusal and English reverse-direction fixtures plus fixture/unit tests that make no paid API calls.
 
@@ -52,7 +52,7 @@ Requirements:
 - pnpm 10 or newer;
 - stable Rust;
 - Xcode command-line tools;
-- an OpenAI API project with access to `gpt-5.6-sol`, `gpt-4o-transcribe-diarize`, and optionally `gpt-realtime-translate`.
+- an OpenAI API project with access to `gpt-5.6-sol` and `gpt-4o-transcribe-diarize`; Live Captions additionally use `gpt-realtime-translate`, while experimental Accurate mode uses `gpt-realtime-whisper` plus `gpt-5.6-luna`.
 
 ```bash
 pnpm install
@@ -141,6 +141,13 @@ selected macOS system audio
   → source/translation deltas
   → compact always-on-top overlay
 
+selected macOS system audio (Transcript-Locked — Accurate)
+  → ScreenCaptureKit and stateful 24 kHz PCM16
+  → gpt-realtime-whisper finalized source clauses
+  → bounded ordered gpt-5.6-luna Responses worker at low reasoning
+  → terminal-validated target paired with the immutable source
+  → source-only fallback on translation failure
+
 selected macOS system audio (original only)
   → ScreenCaptureKit and stateful 24 kHz PCM16
   → gpt-realtime-whisper transcription-only WebSocket
@@ -202,7 +209,9 @@ The exact suit-capture rules, forbidden procedural bones, pose checks, and final
 
 - `gpt-4o-transcribe-diarize`: streamed finalized source-language segments with timestamps and speaker labels.
 - `gpt-5.6-sol`: contextual any-language subtitles and validated `LessonCard` Structured Outputs for grammar, tone, meaning, and culture.
-- `gpt-realtime-translate`: streaming source and translated transcript deltas for Live Captions.
+- `gpt-realtime-translate`: default Realtime — Fast source and translated transcript deltas for Live Captions.
+- `gpt-realtime-whisper`: source transcription for Original-only and Transcript-Locked live sessions.
+- `gpt-5.6-luna`: experimental Transcript-Locked text translation at fixed low reasoning, with streamed transport, terminal validation, exact Arabic-digit locking, and one retry. See the [Luna benchmark](docs/LUNA_LIVE_TRANSLATION_BENCHMARK.md).
 - Responses requests use `store:false`; requested batches contain up to six target lines and at most 80 preceding lines.
 
 References: [speech to text](https://developers.openai.com/api/docs/guides/speech-to-text), [GPT‑5.6 guidance](https://developers.openai.com/api/docs/guides/latest-model), and [Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs).

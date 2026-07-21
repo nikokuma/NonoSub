@@ -44,12 +44,13 @@ Live mode is compiled only on macOS and requires macOS 14 or later.
 3. A stateful converter averages adjacent float samples into 24 kHz PCM16. Approximately 100 ms is base64 encoded per message; PCM is never written to disk.
 4. Rust authenticates the mode-specific WebSocket and waits for the documented first `session.created` event.
 5. Rust sends one generation/attempt-scoped `session.update`, waits for `session.updated`, and validates the echoed session type, target language, source transcription, input format, and explicit source hint where supported. ScreenCaptureKit does not start and PCM cannot be sent before this acknowledgement.
-6. Approximately 100 ms of audio is appended at a time. The canonical capture clock advances only after each audio append is successfully written; commits and failed writes do not advance it.
-7. Source and translated transcript deltas enter independent append-only clause tracks and pair monotonically within one connection epoch.
-8. One unexpected read, write, or remote close spends a single reconnect allowance. The replacement connection repeats the complete acknowledged handshake before a new timing epoch begins; normal stop/close never reconnects.
-9. Stop sends `session.close`, stops appending audio, drains until `session.closed` or a bounded timeout, then closes capture.
+6. Approximately 100 ms of audio is appended at a time. The capture clock follows every ScreenCaptureKit sample; a separate transmission timeline maps successfully sent spans back to capture time, so silence, failed writes, and reconnect gaps cannot compress later speech.
+7. **Realtime — Fast** sends audio to `gpt-realtime-translate`; source and translated transcript deltas enter independent append-only clause tracks and pair monotonically within one connection epoch.
+8. **Transcript-Locked — Accurate** sends the same audio to `gpt-realtime-whisper`. Each completed Whisper item becomes an immutable, capture-timed source segment and enters one eight-slot ordered `gpt-5.6-luna` Responses worker. Luna receives at most 12 prior successful pairs/6,000 characters, streams internally, and becomes visible only after a valid terminal event, identity check, output validation, and exact Arabic-digit check. Queue or translation failure retains a clickable source-only line and an explicit retry; it never silently changes engines.
+9. One unexpected read, write, or remote close spends a single reconnect allowance. The replacement connection repeats the complete acknowledged handshake before a new timing epoch begins; normal stop/close never reconnects.
+10. Stop sends `session.close`, stops appending audio, aborts queued/in-flight Luna work where applicable, drains until `session.closed` or a bounded timeout, then closes capture.
 
-Realtime translation currently auto-detects its source language because the dedicated translation-session contract does not expose a source hint. Original-only realtime transcription and file transcription honor an explicit source override. Changing the live target stops the active stream and asks the user to restart Live Captions with the new language.
+Realtime — Fast currently auto-detects its source language because the dedicated translation-session contract does not expose a source hint. Original-only, Transcript-Locked, and file transcription honor an explicit source override. Changing the live engine or target affects only the next session; the active session keeps its canonical engine identity.
 
 ## Structured lessons
 
