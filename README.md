@@ -218,6 +218,21 @@ References: [speech to text](https://developers.openai.com/api/docs/guides/speec
 
 ## Codex and provenance
 
-This implementation was created in the primary Codex task used for the Build Week `/feedback` submission. It was scaffolded into a new repository and does not import source from the older experimental NonoSub. Nico owns the Nono assets and recorded motion; exact technical contributions from Codex, Claude Fable 5, and read-only Kimi/Codex investigations are recorded in the [AI contribution ledger](docs/AI_CONTRIBUTIONS.md). Production asset hashes are recorded in [Asset rights](ASSET_RIGHTS.md).
+NonoSub was built end-to-end with Codex as the primary development partner. Nico supplied the product vision, Nono character, visual direction, recorded motion, acceptance decisions, and continuous hands-on testing; Codex turned that direction into the working application.
+
+Codex was used throughout the entire Build Week workflow—not only to generate isolated snippets. In the primary task, Codex:
+
+- helped define the MVP, seven-day scope, architecture, privacy boundaries, model roles, failure behavior, and submission strategy;
+- created the fresh Tauri 2, Rust, Svelte 5, Vite, and TypeScript repository and implemented the application from scratch without importing the legacy NonoSub code;
+- implemented local media decoding and chunking, diarized transcription, contextual GPT-5.6 translation, ScreenCaptureKit live audio, realtime synchronization, cancellation, retries, cleanup, and canonical multi-window state;
+- designed and implemented the menu-bar-first product shell, video viewer, floating subtitle overlay, launcher, transcript/settings surface, subtitle presets, and interactive Nono chalkboard lessons;
+- collaborated with Nico through repeated visual reviews to refine subtitle readability, lesson layout, Nono placement, animation integration, and the procedural twin-tail pointing and underlining system;
+- diagnosed native macOS, Keychain, playback, window-placement, long-caption, reconnect, model-output, timing, and resource-lifecycle failures, then added focused regression and endurance tests;
+- coordinated specialized Codex review and implementation agents for frontend, realtime, lesson, reliability, 3D export, facial-expression, toon-shader, and acceptance-testing work;
+- maintained the implementation plans, architecture notes, privacy disclosure, judge instructions, Build Week log, CI, release packaging, GitHub checkpoints, and submission documentation.
+
+The primary Codex `/feedback` task—where the majority of NonoSub's core functionality was planned, implemented, debugged, and shipped—is `019f5e47-89f8-7541-a803-2a3b6535142f`. The deliverable-by-deliverable record, including the additional Codex sessions orchestrated during animation, model, shader, and QA work, is in the [AI contribution ledger](docs/AI_CONTRIBUTIONS.md).
+
+This repository was scaffolded fresh for Build Week and does not import source from the older experimental NonoSub. Nico owns the Nono assets and recorded motion; exact technical contributions from Codex, Claude Fable 5, and read-only Kimi/Codex investigations are recorded in the contribution ledger. Production asset hashes are recorded in [Asset rights](ASSET_RIGHTS.md).
 
 No license is granted for this repository. Nono's model, character, name, likeness, artwork, logos, and brand assets remain all rights reserved. Third-party components retain their respective terms; see [Third-party notices](THIRD_PARTY_NOTICES.md).
