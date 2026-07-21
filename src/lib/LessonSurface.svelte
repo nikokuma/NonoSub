@@ -284,7 +284,7 @@
     await sleep(440);
     skippedCardKey = latestCardKey;
     boardPhase = "idle";
-    nonoGesture = "heart_touch";
+    nonoGesture = "cheer";
   }
 
   async function closeLesson() {
