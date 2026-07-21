@@ -26,7 +26,7 @@
     place-items: center;
     isolation: isolate;
     color: #f4f0df;
-    font: 600 clamp(8px, .82vw, 11px)/1 "Klee One", "Hiragino Maru Gothic ProN", cursive;
+    font: 600 clamp(7px, calc(11px * var(--chalk-scale, 1)), 18px)/1 "Klee One", "Hiragino Maru Gothic ProN", cursive;
     text-shadow: .35px .25px 0 #f4f0df66, 0 0 4px #f4f0df33;
     transform: rotate(-2deg);
     filter: url(#chalk-roughen);
@@ -49,7 +49,7 @@
     position: absolute;
     inset: 0;
     z-index: 0;
-    border: 1.3px solid #f4f0df;
+    border: max(1px, calc(1.3px * var(--chalk-scale, 1))) solid #f4f0df;
     border-radius: 49% 45% 52% 47% / 46% 52% 45% 51%;
     box-shadow: 0 0 3px #f4f0df44;
     pointer-events: none;

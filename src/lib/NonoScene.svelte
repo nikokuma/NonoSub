@@ -48,6 +48,7 @@
     type TailPresentation,
     type TailRestPose,
   } from "./tailPresentation";
+  import type { CharacterViewport } from "./lessonLayout";
 
   type TailSide = "left" | "right";
 
@@ -89,11 +90,13 @@
   let {
     presentation,
     mood = "idle",
+    viewport,
     onRigStatus,
     onTailTip,
   }: {
     presentation: TailPresentation;
     mood?: NonoMood;
+    viewport: CharacterViewport;
     onRigStatus?: (available: boolean) => void;
     onTailTip?: (report: { cueId: string; x: number; y: number }) => void;
   } = $props();
@@ -137,6 +140,10 @@
     scene.add(rim);
 
     let model: THREE.Object3D | undefined;
+    const modelPlacement = new THREE.Group();
+    scene.add(modelPlacement);
+    let modelBodyBounds: THREE.Box3 | undefined;
+    let viewportSignature = "";
     let mixer: THREE.AnimationMixer | undefined;
     let activeAction: THREE.AnimationAction | undefined;
     let activeMood: NonoMood | undefined;
@@ -164,17 +171,7 @@
       }
       model = gltf.scene;
       applyNonoMaterials(model, shaderVariant);
-      const bounds = new THREE.Box3().setFromObject(model);
-      const size = bounds.getSize(new THREE.Vector3());
-      const center = bounds.getCenter(new THREE.Vector3());
-      const scale = 1.15 / Math.max(size.y, 0.001);
-      model.scale.setScalar(scale);
-      model.position.set(
-        LESSON_NONO_ANCHOR.x - center.x * scale,
-        LESSON_NONO_ANCHOR.y - center.y * scale,
-        -center.z * scale,
-      );
-      scene.add(model);
+      modelPlacement.add(model);
 
       if (gltf.animations.length > 0) mixer = new THREE.AnimationMixer(model);
       const resolveClip = (requested: NonoMood): { clip: THREE.AnimationClip; mood: NonoMood } | undefined => {
@@ -212,6 +209,19 @@
         const resting = resolveClip("neutral");
         if (resting) playClip(resting.clip, false);
       });
+      function updateAnimation(nextMood: NonoMood) {
+        if (!mixer || nextMood === activeMood) return;
+        activeMood = nextMood;
+        const resolved = resolveClip(nextMood);
+        if (!resolved) return;
+        // A one-shot request that fell back to a resting clip must loop.
+        playClip(resolved.clip, ONE_SHOT_MOODS.has(nextMood) && resolved.mood === nextMood);
+      }
+      updateAnimation(moodOverride ?? mood);
+      mixer?.update(0);
+      model.updateWorldMatrix(true, true);
+      modelBodyBounds = calculateCharacterBounds(model);
+      positionModelInViewport();
       if (tailDynamics) {
         resetTailDynamics(tailDynamics.left);
         resetTailDynamics(tailDynamics.right);
@@ -250,16 +260,6 @@
         if (import.meta.env.DEV) console.warn("Nono tail rig unavailable: the GLB needs skinned tail geometry and both 12-bone chains.");
       }
       hairRig = resolveHairMotionRig(model);
-
-      function updateAnimation(nextMood: NonoMood) {
-        if (!mixer || nextMood === activeMood) return;
-        activeMood = nextMood;
-        const resolved = resolveClip(nextMood);
-        if (!resolved) return;
-        // A one-shot request that fell back to a resting clip must loop.
-        playClip(resolved.clip, ONE_SHOT_MOODS.has(nextMood) && resolved.mood === nextMood);
-      }
-      updateAnimation(moodOverride ?? mood);
       model.userData.updateAnimation = updateAnimation;
     }, undefined, () => {
       if (destroyed) return;
@@ -277,6 +277,8 @@
       renderer.setSize(width, height, false);
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
+      viewportSignature = "";
+      positionModelInViewport();
     };
     const observer = new ResizeObserver(resize);
     observer.observe(container);
@@ -295,6 +297,8 @@
       previousTime = timestamp;
       mixer?.update(delta);
       if (model) {
+        const nextViewportSignature = `${viewport.x}:${viewport.y}:${viewport.width}:${viewport.height}:${viewport.bottom}`;
+        if (nextViewportSignature !== viewportSignature) positionModelInViewport();
         (model.userData.updateAnimation as ((nextMood: NonoMood) => void) | undefined)?.(moodOverride ?? mood);
         model.rotation.y = reducedMotion ? 0 : Math.sin(timestamp * 0.00055) * 0.018;
         model.updateWorldMatrix(true, true);
@@ -330,6 +334,44 @@
       animationFrame = requestAnimationFrame(render);
     };
     animationFrame = requestAnimationFrame(render);
+
+    function positionModelInViewport() {
+      if (!model || !modelBodyBounds || renderer.domElement.width === 0) return;
+      const canvas = renderer.domElement;
+      const canvasRect = canvas.getBoundingClientRect();
+      if (canvasRect.width <= 0 || canvasRect.height <= 0 || viewport.width <= 0 || viewport.height <= 0) return;
+      const plane = _characterPlane.setFromNormalAndCoplanarPoint(
+        camera.getWorldDirection(_characterPlaneNormal),
+        _characterPlaneOrigin.set(0, 0, 0),
+      );
+      const leftTop = screenPointToPlane(canvasRect.left + viewport.x, canvasRect.top + viewport.y, camera, canvasRect, plane, _characterLeftTop);
+      const rightBottom = screenPointToPlane(
+        canvasRect.left + viewport.x + viewport.width,
+        canvasRect.top + viewport.bottom,
+        camera,
+        canvasRect,
+        plane,
+        _characterRightBottom,
+      );
+      if (!leftTop || !rightBottom) return;
+
+      const bodySize = modelBodyBounds.getSize(_characterBodySize);
+      const bodyCenter = modelBodyBounds.getCenter(_characterBodyCenter);
+      const availableWidth = Math.abs(rightBottom.x - leftTop.x) * CHARACTER_FIT.width;
+      const availableHeight = Math.abs(leftTop.y - rightBottom.y) * CHARACTER_FIT.height;
+      const scale = Math.min(
+        availableWidth / Math.max(bodySize.x, 0.001),
+        availableHeight / Math.max(bodySize.y, 0.001),
+      );
+      const centerX = (leftTop.x + rightBottom.x) / 2;
+      modelPlacement.scale.setScalar(scale);
+      modelPlacement.position.set(
+        centerX - bodyCenter.x * scale,
+        rightBottom.y - modelBodyBounds.min.y * scale,
+        -bodyCenter.z * scale,
+      );
+      viewportSignature = `${viewport.x}:${viewport.y}:${viewport.width}:${viewport.height}:${viewport.bottom}`;
+    }
 
     return () => {
       destroyed = true;
@@ -384,6 +426,32 @@
       return undefined;
     }
     return { left, right };
+  }
+
+  function calculateCharacterBounds(model: THREE.Object3D): THREE.Box3 {
+    model.updateWorldMatrix(true, true);
+    const bounds = new THREE.Box3();
+    model.traverse((object) => {
+      if (!("isMesh" in object) || !object.isMesh || object.name === "Nono_Tails") return;
+      bounds.union(new THREE.Box3().setFromObject(object, true));
+    });
+    return bounds.isEmpty() ? new THREE.Box3().setFromObject(model, true) : bounds;
+  }
+
+  function screenPointToPlane(
+    x: number,
+    y: number,
+    camera: THREE.Camera,
+    canvasRect: DOMRect,
+    plane: THREE.Plane,
+    out: THREE.Vector3,
+  ): THREE.Vector3 | undefined {
+    _characterNdc.set(
+      ((x - canvasRect.left) / canvasRect.width) * 2 - 1,
+      -((y - canvasRect.top) / canvasRect.height) * 2 + 1,
+    );
+    _characterRaycaster.setFromCamera(_characterNdc, camera);
+    return _characterRaycaster.ray.intersectPlane(plane, out) ?? undefined;
   }
 
   function applyPresentation({
@@ -826,7 +894,7 @@
   }
 
   const TAIL_SIDES = ["left", "right"] as const;
-  const LESSON_NONO_ANCHOR = { x: 1.15, y: -0.2 } as const;
+  const CHARACTER_FIT = { width: 0.92, height: 0.96 } as const;
   const TAIL_DEBUG_POINTS = 32;
   const CHALK_PROP = { lengthScale: 1.4, radiusScale: 0.15, protrusion: 0.3, color: 0xf4f0df } as const;
   const WORLD_DOWN = new THREE.Vector3(0, -1, 0);
@@ -852,9 +920,23 @@
   const _modifiedTailTarget = new THREE.Vector3();
   const _targetPullbackDirection = new THREE.Vector3();
   const _presentationTargetOffsets = { pullback: 0, droop: 0 };
+  const _characterPlane = new THREE.Plane();
+  const _characterPlaneNormal = new THREE.Vector3();
+  const _characterPlaneOrigin = new THREE.Vector3();
+  const _characterLeftTop = new THREE.Vector3();
+  const _characterRightBottom = new THREE.Vector3();
+  const _characterBodySize = new THREE.Vector3();
+  const _characterBodyCenter = new THREE.Vector3();
+  const _characterNdc = new THREE.Vector2();
+  const _characterRaycaster = new THREE.Raycaster();
 </script>
 
-<div class="nono-scene" bind:this={container} aria-label="Nono 3D guide">
+<div
+  class="nono-scene"
+  bind:this={container}
+  aria-label="Nono 3D guide"
+  style={`--nono-x:${viewport.x}px;--nono-y:${viewport.y}px;--nono-width:${viewport.width}px;--nono-height:${viewport.height}px`}
+>
   {#if failed}
     <div class="fallback"><span>の</span><small>Nono is still here to help.</small></div>
   {/if}
@@ -863,5 +945,5 @@
 <style>
   .nono-scene{position:absolute;inset:0;z-index:7;overflow:hidden;pointer-events:none;background:transparent}
   .nono-scene :global(canvas){display:block;width:100%;height:100%}
-  .fallback{position:absolute;right:36px;bottom:62px;display:grid;place-content:center;text-align:center;gap:5px;color:#765f6b}.fallback span{width:68px;height:68px;display:grid;place-items:center;margin:auto;border-radius:50%;background:linear-gradient(135deg,#ff70b7,#8d7cff);color:white;font-size:31px}.fallback small{font-size:9px}
+  .fallback{position:absolute;left:var(--nono-x);top:var(--nono-y);width:var(--nono-width);height:var(--nono-height);display:grid;place-content:center;text-align:center;gap:5px;color:#765f6b}.fallback span{width:68px;height:68px;display:grid;place-items:center;margin:auto;border-radius:50%;background:linear-gradient(135deg,#ff70b7,#8d7cff);color:white;font-size:31px}.fallback small{font-size:9px}
 </style>

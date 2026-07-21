@@ -1,25 +1,52 @@
 import { describe, expect, it } from "vitest";
-import { calculateLessonStageLayout } from "./lessonLayout";
+import { calculateLessonStageLayout, LESSON_BOARD_TARGET } from "./lessonLayout";
+
+function expectContained(layout: ReturnType<typeof calculateLessonStageLayout>, width: number, height: number) {
+  for (const rect of [layout.board, layout.characterRail, layout.bubble, layout.controls]) {
+    expect(rect.x).toBeGreaterThanOrEqual(0);
+    expect(rect.y).toBeGreaterThanOrEqual(0);
+    expect(rect.x + rect.width).toBeLessThanOrEqual(width);
+    expect(rect.y + rect.height).toBeLessThanOrEqual(height);
+  }
+  expect(layout.characterRail.x).toBeGreaterThan(layout.board.x + layout.board.width);
+  expect(layout.bubble.x).toBeGreaterThanOrEqual(layout.board.x + layout.board.width);
+  expect(layout.controls.y).toBeGreaterThan(layout.board.y + layout.board.height);
+}
 
 describe("lesson stage layout", () => {
-  it("keeps the normal lesson board and controls inside 980 by 620", () => {
-    const layout = calculateLessonStageLayout(980, 620, false);
-    expect(layout.compact).toBe(false);
-    expect(layout.left + layout.boardWidth + layout.right).toBeLessThanOrEqual(980);
-    expect(layout.top + layout.boardHeight + 5 + 42 + layout.bottom).toBeLessThanOrEqual(620);
+  it("renders the literal doubled board at the full lesson target", () => {
+    const layout = calculateLessonStageLayout(2048, 1024, false);
+    expect(layout.scale).toBe(1);
+    expect(layout.board.width).toBe(LESSON_BOARD_TARGET.width);
+    expect(layout.board.height).toBe(LESSON_BOARD_TARGET.height);
+    expect(layout.boardContentScale).toBe(1.65);
+    expectContained(layout, 2048, 1024);
   });
 
-  it("fits the full board and controls in the constrained Retina geometry", () => {
-    const layout = calculateLessonStageLayout(720, 405, false);
-    expect(layout.compact).toBe(true);
-    expect(layout.left + layout.boardWidth + layout.right).toBeLessThanOrEqual(720);
-    expect(layout.top + layout.boardHeight + 5 + 40 + layout.bottom).toBeLessThanOrEqual(405);
+  it.each([
+    [2048, 1024],
+    [1728, 864],
+    [1360, 680],
+    [720, 360],
+    [720, 405],
+  ])("keeps the board, Nono rail, bubble, and controls contained at %d by %d", (width, height) => {
+    expectContained(calculateLessonStageLayout(width, height, false), width, height);
   });
 
-  it("reserves additional space for the follow-up composer", () => {
-    const closed = calculateLessonStageLayout(720, 405, false);
-    const open = calculateLessonStageLayout(720, 405, true);
-    expect(open.boardHeight).toBeLessThan(closed.boardHeight);
-    expect(open.top + open.boardHeight + 5 + 54 + open.bottom).toBeLessThanOrEqual(405);
+  it("shrinks every major rectangle by the same ratio", () => {
+    const full = calculateLessonStageLayout(2048, 1024, false);
+    const half = calculateLessonStageLayout(1024, 512, false);
+    expect(half.scale).toBe(0.5);
+    expect(half.board.width).toBe(full.board.width / 2);
+    expect(half.board.height).toBe(full.board.height / 2);
+    expect(half.characterRail.width).toBe(full.characterRail.width / 2);
+    expect(half.bubble.height).toBe(full.bubble.height / 2);
+  });
+
+  it("does not move or shrink the board when Ask Another opens", () => {
+    const closed = calculateLessonStageLayout(1360, 680, false);
+    const open = calculateLessonStageLayout(1360, 680, true);
+    expect(open.board).toEqual(closed.board);
+    expect(open.controls).toEqual(closed.controls);
   });
 });

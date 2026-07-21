@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fitLogicalWindowSize, normalizeLessonPlacement, resolveLessonPosition, shouldPersistLessonPlacement, type MonitorGeometry } from "./floatingPlacement";
+import { fitLogicalWindowSize, fitLogicalWindowSizeProportionally, normalizeLessonPlacement, resolveLessonPosition, shouldPersistLessonPlacement, type MonitorGeometry } from "./floatingPlacement";
 
 const monitor: MonitorGeometry = { key: "main", x: 100, y: 50, width: 1600, height: 900 };
 
@@ -22,6 +22,13 @@ describe("floating lesson placement", () => {
   it("keeps composer and lesson dimensions in logical points on Retina displays", () => {
     expect(fitLogicalWindowSize({ width: 720, height: 210 }, { width: 3024, height: 1964 }, 2)).toEqual({ width: 720, height: 210 });
     expect(fitLogicalWindowSize({ width: 980, height: 620 }, { width: 1600, height: 900 }, 2)).toEqual({ width: 720, height: 405 });
+  });
+
+  it("fits the enlarged lesson window without changing its aspect ratio", () => {
+    expect(fitLogicalWindowSizeProportionally({ width: 2048, height: 1024 }, { width: 2560, height: 1440 }, 1)).toEqual({ width: 2048, height: 1024 });
+    expect(fitLogicalWindowSizeProportionally({ width: 2048, height: 1024 }, { width: 1920, height: 1080 }, 1)).toEqual({ width: 1728, height: 864 });
+    expect(fitLogicalWindowSizeProportionally({ width: 2048, height: 1024 }, { width: 3024, height: 1964 }, 2)).toEqual({ width: 1360, height: 680 });
+    expect(fitLogicalWindowSizeProportionally({ width: 2048, height: 1024 }, { width: 1600, height: 900 }, 2)).toEqual({ width: 720, height: 360 });
   });
 
   it("persists only manual movement of the full lesson board", () => {

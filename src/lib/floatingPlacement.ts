@@ -28,6 +28,22 @@ export function fitLogicalWindowSize(
   };
 }
 
+export function fitLogicalWindowSizeProportionally(
+  desired: { width: number; height: number },
+  monitorPhysical: { width: number; height: number },
+  scaleFactor: number,
+  maximumRatio = 0.9,
+): { width: number; height: number } {
+  const scale = Number.isFinite(scaleFactor) && scaleFactor > 0 ? scaleFactor : 1;
+  const maximumWidth = Math.floor((monitorPhysical.width / scale) * maximumRatio);
+  const maximumHeight = Math.floor((monitorPhysical.height / scale) * maximumRatio);
+  const fit = Math.min(1, maximumWidth / desired.width, maximumHeight / desired.height);
+  return {
+    width: Math.max(1, Math.floor(desired.width * fit)),
+    height: Math.max(1, Math.floor(desired.height * fit)),
+  };
+}
+
 export function makeMonitorKey(name: string | null, monitor: Omit<MonitorGeometry, "key">): string {
   return `${name ?? "display"}:${monitor.x},${monitor.y}:${monitor.width}x${monitor.height}`;
 }
