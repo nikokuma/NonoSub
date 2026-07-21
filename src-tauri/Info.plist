@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>NonoSub needs screen capture access to list the application, window, or display whose system audio you choose for Live Captions.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>NonoSub captures system audio from the source you explicitly select to create temporary live captions and translations.</string>
+</dict>
+</plist>
