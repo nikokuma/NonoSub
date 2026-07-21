@@ -45,11 +45,10 @@ Deadline: **Tuesday, July 21, 2026 at 5:00 PM PT**. Target implementation finish
 ## Final reliability artifacts
 
 - Version: `0.1.0`
-- Submission DMG SHA-256: `ec65f62f928a5c890552cac05f51a8914331cc3c8b8562eafa6d4a3c08c3cbab`
-- Submission App ZIP SHA-256: `e2390c01d46e27b810ef600c1a1fb1b6f7c390c7999ee15938e093f4d0a06532`
-- Automated: 155 frontend tests, 120 Rust tests, zero Svelte diagnostics, production build, Rust 1.97.1 warning-free Clippy, Apple Silicon Tauri bundle, arm64 executable check, and strict ad-hoc signature verification for the app inside the submission DMG.
+- Artifact hashes are published beside the final DMG and App ZIP in `SHA256SUMS.txt` so the manifest can describe the exact post-build files without creating a self-referential source commit.
+- Automated: frozen install in an isolated detached worktree, 155 frontend tests, 120 Rust tests, zero Svelte diagnostics, production build, Rust 1.97.1 warning-free Clippy, Apple Silicon Tauri bundle, arm64 executable check, and strict ad-hoc signature verification for the app inside the submission DMG.
 - Dependency note: Rust 1.97.1 emits a non-fatal duplicate Swift symbol linker diagnostic from the current `apple-cf`/`screencapturekit` bridge combination. Test and release binaries link successfully; it is not suppressed.
-- Still manual: complete paid/native acceptance matrix, clean-clone verification of the final pushed SHA, GitHub Actions result, and Gatekeeper launch from another Mac/user account.
+- Still manual: complete paid/native acceptance matrix, GitHub Actions result, and Gatekeeper launch from another Mac/user account.
 
 ## Devpost
 
