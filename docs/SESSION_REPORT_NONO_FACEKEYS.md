@@ -44,3 +44,30 @@ New face layer for the Nono mascot, authored in Blender by Nico this session and
   ```
   (Bear-hoodie form already preserved as `static/assets/NonoHoodie.glb`.)
 - Rebuild-from-source chain unchanged from `docs/NONO_CANDIDATE_PROMOTION.md`, with `--actions-from ~/Projects/Blendr/NonoClipLibrary.blend`.
+
+---
+
+# Addendum — Anime Toon Shader (same day, follow-up session)
+
+Nico asked for a real anime toon look (referencing lilxyzw's NonToon Unity shader). Port assessment: NonToon's `.scshader` is Unity pipeline scaffolding whose lighting math lives in the external `jp.lilxyzw.shadercore` HLSL library — not portable in the timeframe. Instead the standard three.js anime stack was built natively on the existing `MeshToonMaterial` base:
+
+- **Inverted-hull outlines** — `createNonoOutlines()` in `src/lib/nonoToon.ts`: per outlined mesh, a companion mesh sharing the same geometry, `MeshBasicMaterial` `BackSide`, vertices extruded along normals in `begin_vertex` (before morph/skinning chunks, so bones and blink/smile shape keys deform the hull). SkinnedMesh sources re-bind the shared skeleton; morph sources share `morphTargetInfluences` by reference; outlines are parented to their source mesh so visibility (e.g. lash-hide during >.<) inherits for free. Per-role dark-tint colors + widths live in exported `NONO_OUTLINE_CONFIG`; eye decals, squint geometry, and transparent materials are skipped, while the mouth receives its own thin outline. Dev kill-switch `?nonoOutline=0`.
+- **Tinted cel shade** — `gradientmap_pars_fragment` chunk override: shadow band is now `mix(nonoShadeTint, white, step)` (per-role colored shade — rosy skin shadow, blue-violet hair shadow) instead of grayscale darkening. Cache key bumped to `-v3`.
+- **Polish** — hair sheen band enabled for the default `toon` variant (0.18), hair/tail rim strength 0.22 → 0.28.
+
+## Codex usage tracking (addendum)
+
+| Agent | Chat name | Thread/Chat ID | Scope |
+|---|---|---|---|
+| **Codex-C** | `Codex Companion Task: Codex-C: anime toon shader Repo: /Users/nico/Projects/NonoSub…` | `019f8693-b6e1-7632-a0f7-eb60554a3436` | `src/lib/nonoToon.ts`, `src/lib/NonoScene.svelte`, `src/lib/nonoToon.test.ts` |
+
+Model `gpt-5.6-sol`, reasoning effort high, workspace-write, zero spec deviations either turn. Resume with `codex resume 019f8693-b6e1-7632-a0f7-eb60554a3436`.
+
+**Codex-C ran three turns** (orchestrator feedback loop, like Codex-A before it). Turn 2 came from Nico's visual review: (1) mouth + lips now get a thin deep-maroon outline (width 0.002, `0x4a1420`); (2) the face's toon ramp was flattened (`[240,244,248,255]`, shade tint near-white) so the nose disappears under cel shading, anime-style — body skin shading untouched; (3) the hairclips (green + red, previously inheriting the hair outline that blended into them) now get dedicated per-mesh outlines colored as their own base color darkened to 22% — dark-green rim on the green clip, dark-red on the red.
+
+Turn 3 (second visual review): (1) the rosy lips were undone — the lips primitive kept UVs into the face texture, so a post-pass in `applyNonoMaterials` hands the lips material the face's own texture map + white color and zeroes the gloss: lips now render identical to surrounding skin, with only the thin mouth outline remaining; (2) outline hulls no longer draw over nearby character geometry (the hair hulls were covering the ahoge `Nono_Hair_Fwip` and side sweeps) — all outline materials now apply a small clip-space depth bias (`gl_Position.z += 0.0002 * gl_Position.w`), letting real surfaces beat the hull while silhouette lines survive; (3) green clip outline strengthened (width 0.010, color multiplier 0.16). Note: turn 3 was sent via `codex exec resume <thread-id>` directly (the plugin forwarder lost its resume pointer) — same thread, same worker.
+
+## Verification
+
+- `pnpm test` 178/178 (was 170; +8 outline/ramp/lips tests across the three turns) · `pnpm check` 0 errors 0 warnings.
+- Browser (`?nonoAsset=candidate`): idle/point_self outlined with correct materials; `cheer` and `surprised` show >.< with outlines intact; `thumbs_up` normal eyes; `?nonoOutline=0` cleanly removes outlines (A/B confirmed); console error-free.

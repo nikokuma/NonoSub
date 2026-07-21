@@ -5,11 +5,13 @@
   import { applyHairMotion, resolveHairMotionRig, type HairMotionRig } from "./hairMotion";
   import {
     applyNonoMaterials,
+    createNonoOutlines,
     nextNonoBlinkAt,
     nonoAssetFromLocation,
     nonoBlinkInfluence,
     nonoExpressionFromLocation,
     nonoMoodFromLocation,
+    nonoOutlineFromLocation,
     shaderVariantFromLocation,
     type NonoMood,
   } from "./nonoToon";
@@ -168,6 +170,7 @@
     let tailDebugLines: Record<TailSide, THREE.Line> | undefined;
     let hairRig: HairMotionRig | undefined;
     let faceController: FaceController | undefined;
+    let outlines: THREE.Object3D[] = [];
     let assignedSequence = -1;
     const motionPreference = window.matchMedia("(prefers-reduced-motion: reduce)");
     let reducedMotion = motionPreference.matches;
@@ -177,6 +180,7 @@
     const shaderVariant = shaderVariantFromLocation(window.location.search);
     const moodOverride = nonoMoodFromLocation(window.location.search);
     const expressionOverride = nonoExpressionFromLocation(window.location.search);
+    const outlineEnabled = nonoOutlineFromLocation(window.location.search);
     const tailDebugEnabled = import.meta.env.DEV && new URLSearchParams(window.location.search).get("tailDebug") === "1";
     if (import.meta.env.DEV) container.dataset.nonoShader = shaderVariant;
 
@@ -187,6 +191,7 @@
       }
       model = gltf.scene;
       applyNonoMaterials(model, shaderVariant);
+      if (shaderVariant !== "portable" && outlineEnabled) outlines = createNonoOutlines(model);
       modelPlacement.add(model);
       faceController = createFaceController(model, expressionOverride === "squint");
       model.userData.faceController = faceController;
@@ -416,6 +421,7 @@
       }
       if (model) disposeModel(model);
       model = undefined;
+      outlines = [];
       mixer = undefined;
       activeAction = undefined;
       tailRig = undefined;
@@ -549,7 +555,7 @@
     model.updateWorldMatrix(true, true);
     const bounds = new THREE.Box3();
     model.traverse((object) => {
-      if (!("isMesh" in object) || !object.isMesh || object.name === "Nono_Tails") return;
+      if (!("isMesh" in object) || !object.isMesh || object.name === "Nono_Tails" || object.userData.nonoOutline) return;
       bounds.union(new THREE.Box3().setFromObject(object, true));
     });
     return bounds.isEmpty() ? new THREE.Box3().setFromObject(model, true) : bounds;
@@ -995,12 +1001,19 @@
 
   function disposeModel(model: THREE.Object3D) {
     const textures = new Set<THREE.Texture>();
+    const geometries = new Set<THREE.BufferGeometry>();
+    const materialsToDispose = new Set<THREE.Material>();
     model.traverse((object) => {
       if (!("isMesh" in object) || !object.isMesh) return;
       const mesh = object as THREE.Mesh;
-      mesh.geometry.dispose();
+      if (!object.userData.nonoOutline && !geometries.has(mesh.geometry)) {
+        geometries.add(mesh.geometry);
+        mesh.geometry.dispose();
+      }
       const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
       for (const material of materials) {
+        if (materialsToDispose.has(material)) continue;
+        materialsToDispose.add(material);
         for (const value of Object.values(material)) {
           if (value instanceof THREE.Texture) textures.add(value);
         }
