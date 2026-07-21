@@ -1,7 +1,5 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-
-const infoPlist = readFileSync(new URL("../../src-tauri/Info.plist", import.meta.url), "utf8");
+import infoPlist from "../../src-tauri/Info.plist?raw";
 
 describe("macOS capture privacy packaging", () => {
   it("declares why ScreenCaptureKit needs screen and system-audio access", () => {
