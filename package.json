@@ -2,6 +2,7 @@
   "name": "nonosub",
   "version": "0.1.0",
   "description": "Interactive subtitles that turn foreign-language media into a language lesson.",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite dev",

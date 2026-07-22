@@ -235,4 +235,4 @@ The primary Codex `/feedback` task—where the majority of NonoSub's core functi
 
 This repository was scaffolded fresh for Build Week and does not import source from the older experimental NonoSub. Nico owns the Nono assets and recorded motion; exact technical contributions from Codex, Claude Fable 5, and read-only Kimi/Codex investigations are recorded in the contribution ledger. Production asset hashes are recorded in [Asset rights](ASSET_RIGHTS.md).
 
-No license is granted for this repository. Nono's model, character, name, likeness, artwork, logos, and brand assets remain all rights reserved. Third-party components retain their respective terms; see [Third-party notices](THIRD_PARTY_NOTICES.md).
+NonoSub's software source code is available under the [MIT License](LICENSE). The MIT License does **not** cover Nono's model, character, name, likeness, artwork, animations, logos, or brand assets; those remain all rights reserved by Nico under [Nono asset rights](ASSET_RIGHTS.md). Third-party components retain their respective terms; see [Third-party notices](THIRD_PARTY_NOTICES.md).

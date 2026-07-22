@@ -1,5 +1,8 @@
 # Nono asset rights
 
+The repository's MIT License applies to the software source code only. It does
+**not** apply to the assets identified below.
+
 The following are **all rights reserved by Nico**:
 
 - `static/assets/Nono.glb` and `static/assets/NonoHoodie.glb`;
